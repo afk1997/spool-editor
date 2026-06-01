@@ -17,7 +17,7 @@ graph TD
       B3["Green test baseline — 591 tests, local uv venv (py3.12)"]:::done
       B5["Dependency-doctor endpoint (machine probe + tool checks)"]:::done
       B4["Strip htmx UI (routes/templates/editor) — done, suite green (467)"]:::done
-      B6["De-couple Docker/trove.sh from Tailwind + root docker compose"]:::todo
+      B6["De-couple Docker/trove.sh from Tailwind + root compose — verifying build"]:::wip
     end
     subgraph P1["Phase 1 — Core clip loop + own UI (MVP)"]
       C1["Engine: moments · cutter · reframe(diar plus ROI) · captioner · exporter"]:::todo
@@ -47,7 +47,7 @@ graph TD
 - [x] **Green test baseline** — **591 tests pass** (whole trove suite) on Python 3.12 via a local **uv venv**. Docker got corrupted by a full disk and was reset; the dev/test loop is now the local venv (seconds per run, vs Docker's 14-min rebuilds). Docker packaging is deferred to B6.
 - [x] **Dependency-doctor endpoint** — `GET /api/v1/doctor` (unauthenticated): `machine.probe()` + ffmpeg / yt-dlp / whisper.cpp / Python presence & versions + available ffmpeg encoders. Test + OpenAPI contract entry; verified in the 591-test run.
 - [x] **Strip the htmx UI** — removed `templates/`, `static/`, `styles/`, `tailwind.config.js`, `routes/transcript_editor.py`, the inline HTML/`*-card`/transcribe-setup/transcript-view routes in `app.py`, `_card_view`, the htmx jinja globals + editor `txn_locks`, and 7 obsolete htmx test files. Preserved the `app.extensions["trove.actions"]` helpers `api_v1` needs; trimmed now-dead imports. **Migrated** `test_transcribe_pipeline.py` to drive the real pipeline via `POST /api/v1/jobs/<id>/transcribe` (was the removed HTML route) so coverage isn't lost. CSP coverage confirmed in `test_safety.py`. Also fixed a pre-existing trove test race (`test_cancel_from_paused_removes_partial_files`) the suite reordering exposed. **Suite green: 467 passed, exit 0.**
-- [ ] ◻️ **De-couple Docker** — drop the Tailwind builder stage + `templates/`/`static/` copy from `engine/Dockerfile` and `trove.sh`; add a **root `docker-compose.yml`**. (Needs a working Docker again — it was reset.)
+- [ ] 🟡 **De-couple Docker** — files done: `engine/Dockerfile` + `trove.sh` rewritten headless (no Tailwind builder stage, no `templates/`/`static/` copy; install full `requirements.txt`), added root `docker-compose.yml` (engine on :8899, host-bind + token, persisted models volume) + `engine/.dockerignore`. Headless serving verified via the venv smoke (real `/doctor`: ffmpeg 7.1.1, whisper.cpp 1.5.0, yt-dlp 2026.3.17, VideoToolbox encoders). **`docker compose build` verification running** (Docker restarted after the disk-full reset).
 
 **Phase 0 done-when:** from a clean checkout, the engine runs headless → POST a URL to `api_v1` → file downloads with live progress → transcribe yields `words.json` + `.srt`; the same flow works from Claude Desktop via the MCP server; no htmx anywhere.
 

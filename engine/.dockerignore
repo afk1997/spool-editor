@@ -1,0 +1,13 @@
+# Keep the build context small — never ship dev/runtime cruft into the image.
+.venv/
+venv/
+downloads/
+models/
+tools/
+tests/
+docs/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/

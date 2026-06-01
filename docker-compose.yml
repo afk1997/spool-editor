@@ -1,0 +1,24 @@
+# Spool engine — headless JSON API + MCP, containerized.
+# The studio (apps/studio) runs separately (`pnpm dev`) and talks to this over HTTP.
+#   docker compose up --build      # engine → http://localhost:8899/api/v1/health
+services:
+  engine:
+    build: ./engine
+    image: spool-engine
+    ports:
+      - "8899:8899"
+    environment:
+      HOST: 0.0.0.0 # reachable from the host (the studio); safe-bind requires the token below
+      PORT: "8899"
+      # config.assert_safe_bind refuses a public bind without a token. Override in your shell:
+      #   TROVE_TOKEN=... docker compose up
+      TROVE_TOKEN: ${TROVE_TOKEN:-spool-dev-token}
+      # Diarization is installed; flip on to label speakers at transcribe time (heavier).
+      TROVE_DIARIZATION: ${TROVE_DIARIZATION:-off}
+    volumes:
+      - ./engine/downloads:/app/downloads # source media + job store — host-owned (local-first)
+      - spool-models:/app/models # whisper.cpp model cache, persisted across restarts
+    restart: unless-stopped
+
+volumes:
+  spool-models:
