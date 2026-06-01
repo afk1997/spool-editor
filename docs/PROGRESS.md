@@ -1,0 +1,88 @@
+# Spool — build progress
+
+> **Living tracker. Read this first to resume.** Maintained as work proceeds, mapped to
+> `Spool_Engineering-Spec.md` (§5 roadmap, §6 front-end standards). Status legend:
+> ✅ done & verified · 🟡 in progress · ◻️ not started.
+>
+> **Last updated:** 2026-06-02 · **Current phase:** Phase 0 (foundation).
+
+## Roadmap at a glance
+
+```mermaid
+graph TD
+    subgraph P0["Phase 0 — Foundation: engine headless"]
+      B0["Monorepo bootstrap (pnpm+turbo, CI, Apache-2.0)"]:::done
+      B1["Fold trove into engine/ (flat, byte-identical)"]:::done
+      B2["Studio app + packages scaffold, types, wired home"]:::done
+      B3["Engine in Docker + green trove test baseline"]:::wip
+      B4["Strip htmx UI (templates/static/transcript_editor) — tests-guarded"]:::todo
+      B5["Dependency-doctor endpoint (machine.probe + tool checks)"]:::todo
+      B6["De-couple Docker/trove.sh from Tailwind + root docker compose"]:::todo
+    end
+    subgraph P1["Phase 1 — Core clip loop + own UI (MVP)"]
+      C1["Engine: moments · cutter · reframe(diar plus ROI) · captioner · exporter"]:::todo
+      C2["MCP: clip tools + elicitation + spool:// resources"]:::todo
+      C3["UI: S0-S5, S7 basic, S8 presets, S10, S11 + Agent panel + Cmd-K"]:::todo
+      C4["Port demo design tokens into the Tailwind theme; component library"]:::todo
+      C5["e2e: URL to 9:16 clip (Playwright)"]:::todo
+    end
+    P2["Phase 2 — Studios + editor (timeline, ROI editor, caption studio, brand kits, SQLite FTS5)"]:::todo
+    P3["Phase 3 — Discovery + automation (glass-box ranking, watch-folder, recipes)"]:::todo
+    P4["Phase 4 — Publish + analyze"]:::todo
+
+    P0 --> P1 --> P2 --> P3 --> P4
+
+    classDef done fill:#bbf7d0,stroke:#16a34a,color:#052e16;
+    classDef wip  fill:#fde68a,stroke:#d97706,color:#451a03;
+    classDef todo fill:#e5e7eb,stroke:#9ca3af,color:#374151;
+```
+
+## Phase 0 — Foundation (current)
+
+- [x] **Monorepo bootstrap** — pnpm + turbo workspace, strict TS, Prettier, GitHub Actions CI, Apache-2.0. `pnpm install`+`typecheck`+`build` green. *(commit `58f5763`)*
+- [x] **Fold trove → `engine/`** — flat layout intact, verified **byte-identical** to validated upstream; `engine/clip/` Phase-1 scaffolds; clipify back-half vendored + renamed + MIT-credited (`THIRD_PARTY_LICENSES.md`).
+- [x] **Studio + packages** — real Next.js 16 app; `@spool/types` (full data model, spec §3), `api-client`, `mcp-client`, `ui`; home screen wired to the engine with live connected/offline/loading states. *(fix `d788686`: health() shape)*
+- [x] **whisper.cpp standard** — already the only transcription dep (`pywhispercpp`); no `openai-whisper` to remove.
+- [x] **Progress stream** — already exists: `GET /api/v1/events` (SSE, jobs + transcripts snapshots).
+- [ ] 🟡 **Engine in Docker + green test baseline** — local Python is 3.9; engine needs 3.11+, so run/verify via Docker. Establish trove's full suite passing in a clean container before touching anything.
+- [ ] ◻️ **Strip the htmx UI** — remove `templates/`, `static/`, `styles/`, `tailwind.config.js`, `routes/transcript_editor.py`, the inline `*-card`/HTML page routes in `app.py`, and their tests. **Must preserve** the work-thunk helpers `api_v1` depends on via `app.extensions["trove.actions"]`. Tests stay green.
+- [ ] ◻️ **Dependency-doctor endpoint** — add to `api_v1`: `machine.probe()` + ffmpeg / yt-dlp / whisper.cpp / Python presence + versions. Drives the S0 onboarding screen.
+- [ ] ◻️ **De-couple Docker** — drop the Tailwind builder stage + `templates/`/`static/` copy from `engine/Dockerfile` and `trove.sh`; add a **root `docker-compose.yml`**.
+
+**Phase 0 done-when:** from a clean checkout, `docker compose up` → POST a URL to `api_v1` → file downloads with live progress → transcribe yields `words.json` + `.srt`; the same flow works from Claude Desktop via the MCP server; no htmx anywhere.
+
+## What's verified now
+
+- `pnpm install` → 6 workspace projects, 354 packages, clean.
+- `pnpm typecheck` → 9/9 tasks pass.
+- `pnpm build` → Next.js 16 compiles, TS checks, static pages generate.
+- `engine/` `.py` files diff byte-identical against the validated trove clone.
+
+## How to resume (cold start)
+
+```bash
+# JS workspace
+pnpm install
+pnpm dev            # studio → http://localhost:3000 (shows engine status)
+pnpm typecheck && pnpm build
+
+# engine (Python 3.11+ required; local is 3.9 → use Docker)
+cd engine && docker build -t spool-engine .        # NOTE: Dockerfile still htmx-coupled until B4/B6
+# trove test baseline (clean container, deps + ffmpeg):
+docker run --rm -v "$PWD/engine":/app -w /app python:3.12-slim \
+  bash -lc "apt-get update -qq && apt-get install -y -qq ffmpeg && pip install -q -r requirements.txt && pytest -q"
+```
+
+Spec: `docs/Spool_Engineering-Spec.md` (§5 phases, §6 front-end). Visual source of truth: `docs/Spool (standalone) (1).html`.
+
+## Locked decisions
+
+- License **Apache-2.0**; diarization kept in **core install** (heavier base, no missing-dep step).
+- Engine = flat fold-in of trove (reuse, don't rebuild); htmx stripped in Phase 0, not at bootstrap.
+- Internal TS packages export raw source; Next `transpilePackages` compiles them.
+- TS types are currently idealized (camelCase); **Phase-1 wiring reconciles them with the real `api_v1` shape** (snake_case; `/api/v1/openapi.json` can seed generation).
+
+## Open / deferred
+
+- `Spool_Design-Brief.md` and `Spool_Design-Review.md` are referenced by the spec but **absent**; proceeding from the demo + §6.6 carried review items.
+- Reclip MIT attribution: confirm before launch whether any reclip source was copied into trove (spec §7.3).
