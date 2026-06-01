@@ -353,16 +353,18 @@ def test_cancel_from_paused_removes_partial_files(tmp_path):
     webm_file.write_bytes(b"alt")
     out_template = str(tmp_path / "abc.%(ext)s")
 
-    jid = jm.submit(target=lambda j: time.sleep(2), title="t", url="https://x")
-    # Simulate a paused job: status PAUSED + out_template recorded.
+    # Insert a paused job directly rather than submitting a live worker: a real
+    # target() races the worker (which flips status to DOWNLOADING) against this
+    # PAUSED setup, making the test order/timing-dependent. cancel()'s artifact
+    # cleanup needs only the job's recorded out_template — no running worker.
+    job = Job(id="pausedjob", url="https://x", title="t", status=JobStatus.PAUSED)
+    job._was_paused = True
+    job.out_template = out_template
     with jm._lock:
-        j = jm._jobs[jid]
-        j.status = JobStatus.PAUSED
-        j._was_paused = True
-        j.out_template = out_template
+        jm._jobs[job.id] = job
 
-    assert jm.cancel(jid) is True
-    assert jm.get(jid).status == JobStatus.CANCELLED
+    assert jm.cancel(job.id) is True
+    assert jm.get(job.id).status == JobStatus.CANCELLED
     assert not part_file.exists(), "cancel should delete .part files"
     assert not webm_file.exists(), "cancel should delete the alt-format leftover"
     jm.shutdown()

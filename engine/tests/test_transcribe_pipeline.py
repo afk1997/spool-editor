@@ -170,8 +170,8 @@ def test_pipeline_with_diarization_stub_writes_speakers(tmp_path, monkeypatch):
     with a.test_client() as c:
         # Need an active model — fake it
         monkeypatch.setattr(models_store, "get_active_path", lambda: tmp_path / "fake.bin")
-        rv = c.post(f"/api/transcribe/{parent.id}/start")
-        assert rv.status_code == 200, rv.data
+        rv = c.post(f"/api/v1/jobs/{parent.id}/transcribe")
+        assert rv.status_code == 201, rv.data
 
     # Find the transcribe job that was created
     tjs = [t for t in tm.snapshot_jobs() if t.parent_job_id == parent.id]
@@ -218,8 +218,8 @@ def test_pipeline_diarization_off_skips_diarize(tmp_path, monkeypatch):
     monkeypatch.setattr(models_store, "get_active_path", lambda: tmp_path / "fake.bin")
 
     with a.test_client() as c:
-        rv = c.post(f"/api/transcribe/{parent.id}/start")
-        assert rv.status_code == 200
+        rv = c.post(f"/api/v1/jobs/{parent.id}/transcribe")
+        assert rv.status_code == 201
 
     tjs = [t for t in tm.snapshot_jobs() if t.parent_job_id == parent.id]
     tj = _wait(tm, tjs[0].id)
@@ -261,8 +261,8 @@ def test_pipeline_diarize_failure_doesnt_kill_transcribe(tmp_path, monkeypatch):
     monkeypatch.setattr(models_store, "get_active_path", lambda: tmp_path / "fake.bin")
 
     with a.test_client() as c:
-        rv = c.post(f"/api/transcribe/{parent.id}/start")
-        assert rv.status_code == 200
+        rv = c.post(f"/api/v1/jobs/{parent.id}/transcribe")
+        assert rv.status_code == 201
 
     tjs = [t for t in tm.snapshot_jobs() if t.parent_job_id == parent.id]
     tj = _wait(tm, tjs[0].id)
@@ -306,8 +306,8 @@ def test_pipeline_diarize_empty_chunks_keeps_speakers_none(tmp_path, monkeypatch
     monkeypatch.setattr(models_store, "get_active_path", lambda: tmp_path / "fake.bin")
 
     with a.test_client() as c:
-        rv = c.post(f"/api/transcribe/{parent.id}/start")
-        assert rv.status_code == 200
+        rv = c.post(f"/api/v1/jobs/{parent.id}/transcribe")
+        assert rv.status_code == 201
 
     tjs = [t for t in tm.snapshot_jobs() if t.parent_job_id == parent.id]
     tj = _wait(tm, tjs[0].id)
@@ -335,8 +335,8 @@ def test_pipeline_cancel_before_transcribe_writes_no_artifacts(tmp_path, monkeyp
     monkeypatch.setattr(models_store, "get_active_path", lambda: tmp_path / "fake.bin")
 
     with a.test_client() as c:
-        rv = c.post(f"/api/transcribe/{parent.id}/start")
-        assert rv.status_code == 200
+        rv = c.post(f"/api/v1/jobs/{parent.id}/transcribe")
+        assert rv.status_code == 201
 
     tjs = [t for t in tm.snapshot_jobs() if t.parent_job_id == parent.id]
     tj = _wait(tm, tjs[0].id)
@@ -353,7 +353,7 @@ def test_pipeline_cancel_before_transcribe_writes_no_artifacts(tmp_path, monkeyp
 # ---------------------------------------------------------------------------
 
 def test_pipeline_double_start_is_idempotent(tmp_path, monkeypatch):
-    """Two POSTs to /api/transcribe/<id>/start (rapid double-click) must
+    """Two POSTs to /api/v1/jobs/<id>/transcribe (rapid double-click) must
     not produce two parallel transcribe jobs writing the same WAV."""
     a, tm, dl = _flask_app(tmp_path, monkeypatch)
     jm = a.extensions["trove.jobs"]
@@ -371,9 +371,10 @@ def test_pipeline_double_start_is_idempotent(tmp_path, monkeypatch):
     monkeypatch.setattr(models_store, "get_active_path", lambda: tmp_path / "fake.bin")
 
     with a.test_client() as c:
-        r1 = c.post(f"/api/transcribe/{parent.id}/start")
-        r2 = c.post(f"/api/transcribe/{parent.id}/start")
-        assert r1.status_code == 200 and r2.status_code == 200
+        r1 = c.post(f"/api/v1/jobs/{parent.id}/transcribe")
+        r2 = c.post(f"/api/v1/jobs/{parent.id}/transcribe")
+        # api_v1: first start → 201 (new), second while RUNNING → 200 (idempotent replay)
+        assert r1.status_code == 201 and r2.status_code == 200
 
     # Only one transcribe job should exist for this parent
     tjs = [t for t in tm.snapshot_jobs() if t.parent_job_id == parent.id]

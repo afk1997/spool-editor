@@ -16,7 +16,7 @@ graph TD
       B2["Studio app + packages scaffold, types, wired home"]:::done
       B3["Green test baseline — 591 tests, local uv venv (py3.12)"]:::done
       B5["Dependency-doctor endpoint (machine probe + tool checks)"]:::done
-      B4["Strip htmx UI (templates/static/transcript_editor) — tests-guarded"]:::todo
+      B4["Strip htmx UI (routes/templates/editor) — done, suite green (467)"]:::done
       B6["De-couple Docker/trove.sh from Tailwind + root docker compose"]:::todo
     end
     subgraph P1["Phase 1 — Core clip loop + own UI (MVP)"]
@@ -46,7 +46,7 @@ graph TD
 - [x] **Progress stream** — already exists: `GET /api/v1/events` (SSE, jobs + transcripts snapshots).
 - [x] **Green test baseline** — **591 tests pass** (whole trove suite) on Python 3.12 via a local **uv venv**. Docker got corrupted by a full disk and was reset; the dev/test loop is now the local venv (seconds per run, vs Docker's 14-min rebuilds). Docker packaging is deferred to B6.
 - [x] **Dependency-doctor endpoint** — `GET /api/v1/doctor` (unauthenticated): `machine.probe()` + ffmpeg / yt-dlp / whisper.cpp / Python presence & versions + available ffmpeg encoders. Test + OpenAPI contract entry; verified in the 591-test run.
-- [ ] ◻️ **Strip the htmx UI** — remove `templates/`, `static/`, `styles/`, `tailwind.config.js`, `routes/transcript_editor.py`, the inline `*-card`/HTML page routes in `app.py`, and their now-obsolete tests. **Must preserve** the work-thunk helpers `api_v1` depends on via `app.extensions["trove.actions"]`. Tests stay green. (Plan: remove surface → run pytest → remove exactly the failing htmx tests → green. `test_mcp.py` is a keeper — it only matched the grep on the `trove://transcript/` URI.)
+- [x] **Strip the htmx UI** — removed `templates/`, `static/`, `styles/`, `tailwind.config.js`, `routes/transcript_editor.py`, the inline HTML/`*-card`/transcribe-setup/transcript-view routes in `app.py`, `_card_view`, the htmx jinja globals + editor `txn_locks`, and 7 obsolete htmx test files. Preserved the `app.extensions["trove.actions"]` helpers `api_v1` needs; trimmed now-dead imports. **Migrated** `test_transcribe_pipeline.py` to drive the real pipeline via `POST /api/v1/jobs/<id>/transcribe` (was the removed HTML route) so coverage isn't lost. CSP coverage confirmed in `test_safety.py`. Also fixed a pre-existing trove test race (`test_cancel_from_paused_removes_partial_files`) the suite reordering exposed. **Suite green: 467 passed, exit 0.**
 - [ ] ◻️ **De-couple Docker** — drop the Tailwind builder stage + `templates/`/`static/` copy from `engine/Dockerfile` and `trove.sh`; add a **root `docker-compose.yml`**. (Needs a working Docker again — it was reset.)
 
 **Phase 0 done-when:** from a clean checkout, the engine runs headless → POST a URL to `api_v1` → file downloads with live progress → transcribe yields `words.json` + `.srt`; the same flow works from Claude Desktop via the MCP server; no htmx anywhere.
@@ -56,7 +56,7 @@ graph TD
 - `pnpm install` → 6 workspace projects, 354 packages, clean.
 - `pnpm typecheck` → 9/9 tasks pass. `pnpm build` → Next.js 16 compiles, static pages generate.
 - `engine/` `.py` files diff byte-identical against the validated trove clone.
-- **engine: 591 tests pass** (trove suite + dependency-doctor) on Python 3.12 via uv venv.
+- **engine: 467 tests pass** (exit 0) on Python 3.12 via uv venv — headless after the htmx strip; pipeline coverage migrated to `api_v1`. (Was 591 with the htmx surface + its tests.)
 
 ## How to resume (cold start)
 
