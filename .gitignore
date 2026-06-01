@@ -1,0 +1,44 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+.next/
+out/
+dist/
+build/
+.turbo/
+*.tsbuildinfo
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+engine/venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# engine runtime data — user-owned media + job store, never commit
+engine/downloads/
+engine/models/
+engine/tools/
+/tmp/spool/
+
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*

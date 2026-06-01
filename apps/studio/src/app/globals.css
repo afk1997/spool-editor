@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+/*
+ * Spool theme — light / paper only (no dark mode; spec §6.5). An optional charcoal
+ * media-stage behind the preview is allowed, but lives on that component, not here.
+ * Phase 1 ports the approved demo's full token set (--bg, --text, --accent, --roi-*,
+ * --caption-hl, --radius, --font-*, plus the data-density and data-accent hooks) into this layer.
+ */
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}

@@ -1,0 +1,30 @@
+{
+  "name": "@spool/ui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit",
+    "lint": "prettier --check \"src/**/*.{ts,tsx}\"",
+    "test": "echo \"(@spool/ui: no tests yet)\" && exit 0"
+  },
+  "dependencies": {
+    "@spool/types": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.3"
+  }
+}

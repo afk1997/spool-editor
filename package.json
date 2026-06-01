@@ -1,0 +1,26 @@
+{
+  "name": "spool",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Local-first, open-source clip studio — turn long videos into platform-ready vertical clips, entirely on your machine.",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@10.15.1",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,css,yaml,yml}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md,css,yaml,yml}\""
+  },
+  "devDependencies": {
+    "prettier": "^3.4.2",
+    "turbo": "^2.5.4",
+    "typescript": "^5.7.3"
+  }
+}
