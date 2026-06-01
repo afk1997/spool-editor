@@ -14,9 +14,9 @@ graph TD
       B0["Monorepo bootstrap (pnpm+turbo, CI, Apache-2.0)"]:::done
       B1["Fold trove into engine/ (flat, byte-identical)"]:::done
       B2["Studio app + packages scaffold, types, wired home"]:::done
-      B3["Engine in Docker + green trove test baseline"]:::wip
+      B3["Green test baseline — 591 tests, local uv venv (py3.12)"]:::done
+      B5["Dependency-doctor endpoint (machine probe + tool checks)"]:::done
       B4["Strip htmx UI (templates/static/transcript_editor) — tests-guarded"]:::todo
-      B5["Dependency-doctor endpoint (machine.probe + tool checks)"]:::todo
       B6["De-couple Docker/trove.sh from Tailwind + root docker compose"]:::todo
     end
     subgraph P1["Phase 1 — Core clip loop + own UI (MVP)"]
@@ -41,22 +41,22 @@ graph TD
 
 - [x] **Monorepo bootstrap** — pnpm + turbo workspace, strict TS, Prettier, GitHub Actions CI, Apache-2.0. `pnpm install`+`typecheck`+`build` green. *(commit `58f5763`)*
 - [x] **Fold trove → `engine/`** — flat layout intact, verified **byte-identical** to validated upstream; `engine/clip/` Phase-1 scaffolds; clipify back-half vendored + renamed + MIT-credited (`THIRD_PARTY_LICENSES.md`).
-- [x] **Studio + packages** — real Next.js 16 app; `@spool/types` (full data model, spec §3), `api-client`, `mcp-client`, `ui`; home screen wired to the engine with live connected/offline/loading states. *(fix `d788686`: health() shape)*
+- [x] **Studio + packages** — real Next.js 16 app; `@spool/types` (full data model, spec §3), `api-client`, `mcp-client`, `ui`; home screen wired to the engine. *(fix `d788686`: health() shape)*
 - [x] **whisper.cpp standard** — already the only transcription dep (`pywhispercpp`); no `openai-whisper` to remove.
 - [x] **Progress stream** — already exists: `GET /api/v1/events` (SSE, jobs + transcripts snapshots).
-- [ ] 🟡 **Engine in Docker + green test baseline** — local Python is 3.9; engine needs 3.11+, so run/verify via Docker. Establish trove's full suite passing in a clean container before touching anything.
-- [ ] ◻️ **Strip the htmx UI** — remove `templates/`, `static/`, `styles/`, `tailwind.config.js`, `routes/transcript_editor.py`, the inline `*-card`/HTML page routes in `app.py`, and their tests. **Must preserve** the work-thunk helpers `api_v1` depends on via `app.extensions["trove.actions"]`. Tests stay green.
-- [ ] ◻️ **Dependency-doctor endpoint** — add to `api_v1`: `machine.probe()` + ffmpeg / yt-dlp / whisper.cpp / Python presence + versions. Drives the S0 onboarding screen.
-- [ ] ◻️ **De-couple Docker** — drop the Tailwind builder stage + `templates/`/`static/` copy from `engine/Dockerfile` and `trove.sh`; add a **root `docker-compose.yml`**.
+- [x] **Green test baseline** — **591 tests pass** (whole trove suite) on Python 3.12 via a local **uv venv**. Docker got corrupted by a full disk and was reset; the dev/test loop is now the local venv (seconds per run, vs Docker's 14-min rebuilds). Docker packaging is deferred to B6.
+- [x] **Dependency-doctor endpoint** — `GET /api/v1/doctor` (unauthenticated): `machine.probe()` + ffmpeg / yt-dlp / whisper.cpp / Python presence & versions + available ffmpeg encoders. Test + OpenAPI contract entry; verified in the 591-test run.
+- [ ] ◻️ **Strip the htmx UI** — remove `templates/`, `static/`, `styles/`, `tailwind.config.js`, `routes/transcript_editor.py`, the inline `*-card`/HTML page routes in `app.py`, and their now-obsolete tests. **Must preserve** the work-thunk helpers `api_v1` depends on via `app.extensions["trove.actions"]`. Tests stay green. (Plan: remove surface → run pytest → remove exactly the failing htmx tests → green. `test_mcp.py` is a keeper — it only matched the grep on the `trove://transcript/` URI.)
+- [ ] ◻️ **De-couple Docker** — drop the Tailwind builder stage + `templates/`/`static/` copy from `engine/Dockerfile` and `trove.sh`; add a **root `docker-compose.yml`**. (Needs a working Docker again — it was reset.)
 
-**Phase 0 done-when:** from a clean checkout, `docker compose up` → POST a URL to `api_v1` → file downloads with live progress → transcribe yields `words.json` + `.srt`; the same flow works from Claude Desktop via the MCP server; no htmx anywhere.
+**Phase 0 done-when:** from a clean checkout, the engine runs headless → POST a URL to `api_v1` → file downloads with live progress → transcribe yields `words.json` + `.srt`; the same flow works from Claude Desktop via the MCP server; no htmx anywhere.
 
 ## What's verified now
 
 - `pnpm install` → 6 workspace projects, 354 packages, clean.
-- `pnpm typecheck` → 9/9 tasks pass.
-- `pnpm build` → Next.js 16 compiles, TS checks, static pages generate.
+- `pnpm typecheck` → 9/9 tasks pass. `pnpm build` → Next.js 16 compiles, static pages generate.
 - `engine/` `.py` files diff byte-identical against the validated trove clone.
+- **engine: 591 tests pass** (trove suite + dependency-doctor) on Python 3.12 via uv venv.
 
 ## How to resume (cold start)
 
@@ -66,11 +66,11 @@ pnpm install
 pnpm dev            # studio → http://localhost:3000 (shows engine status)
 pnpm typecheck && pnpm build
 
-# engine (Python 3.11+ required; local is 3.9 → use Docker)
-cd engine && docker build -t spool-engine .        # NOTE: Dockerfile still htmx-coupled until B4/B6
-# trove test baseline (clean container, deps + ffmpeg):
-docker run --rm -v "$PWD/engine":/app -w /app python:3.12-slim \
-  bash -lc "apt-get update -qq && apt-get install -y -qq ffmpeg && pip install -q -r requirements.txt && pytest -q"
+# engine (Python 3.11+; local default is 3.9 → use the uv venv)
+cd engine
+uv venv --python 3.12               # if .venv is missing (uv auto-fetches 3.12)
+uv pip install -r requirements.txt  # heavy once: torch, pywhispercpp, yt-dlp@master, …
+.venv/bin/pytest -q                 # full suite, ~60s
 ```
 
 Spec: `docs/Spool_Engineering-Spec.md` (§5 phases, §6 front-end). Visual source of truth: `docs/Spool (standalone) (1).html`.
@@ -79,10 +79,12 @@ Spec: `docs/Spool_Engineering-Spec.md` (§5 phases, §6 front-end). Visual sourc
 
 - License **Apache-2.0**; diarization kept in **core install** (heavier base, no missing-dep step).
 - Engine = flat fold-in of trove (reuse, don't rebuild); htmx stripped in Phase 0, not at bootstrap.
+- **Dev/test loop = local uv venv (Python 3.12)**, not Docker. Docker is reserved for packaging (B6) and was reset after a full-disk corruption.
 - Internal TS packages export raw source; Next `transpilePackages` compiles them.
 - TS types are currently idealized (camelCase); **Phase-1 wiring reconciles them with the real `api_v1` shape** (snake_case; `/api/v1/openapi.json` can seed generation).
 
 ## Open / deferred
 
+- Docker was reset (empty image) after the disk filled; B6 (Dockerfile de-coupling + compose) needs Docker Desktop working again — verify a clean `docker build engine/` then.
 - `Spool_Design-Brief.md` and `Spool_Design-Review.md` are referenced by the spec but **absent**; proceeding from the demo + §6.6 carried review items.
 - Reclip MIT attribution: confirm before launch whether any reclip source was copied into trove (spec §7.3).

@@ -471,6 +471,79 @@ def capabilities():
     })
 
 
+# ----- dependency doctor ---------------------------------------------
+
+@api_v1_bp.get("/doctor")
+def doctor():
+    """Dependency doctor: machine probe + presence/version of the external
+    tools the pipeline needs (ffmpeg, yt-dlp, whisper.cpp, Python) plus the
+    ffmpeg encoders available for hardware-aware export.
+
+    Unauthenticated by design — like ``/health`` and ``/capabilities``, the
+    onboarding screen calls this before any token exists. Read-only.
+    """
+    import importlib.metadata as ilm
+    import platform
+    import shutil
+    import subprocess
+    import sys
+    import machine
+
+    def _entry(version: str | None) -> dict:
+        return {"present": version is not None, "version": version, "ok": version is not None}
+
+    def _pkg(dist: str) -> str | None:
+        try:
+            return ilm.version(dist)
+        except Exception:
+            return None
+
+    def _ffmpeg_version() -> str | None:
+        if shutil.which("ffmpeg") is None:
+            return None
+        try:
+            out = subprocess.run(["ffmpeg", "-version"],
+                                 capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        head = (out.stdout or "").splitlines()[:1]
+        if not head:
+            return None
+        parts = head[0].split()
+        # "ffmpeg version 7.1.1 Copyright ..." -> "7.1.1"
+        return parts[2] if len(parts) >= 3 and parts[0] == "ffmpeg" else head[0].strip()
+
+    def _encoders() -> list[str]:
+        if shutil.which("ffmpeg") is None:
+            return []
+        try:
+            out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
+                                 capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return []
+        # The hardware/software encoders Spool's exporter picks among.
+        wanted = ("h264_videotoolbox", "hevc_videotoolbox", "h264_nvenc",
+                  "hevc_nvenc", "h264_qsv", "h264_vaapi", "libx264", "libx265")
+        text = out.stdout or ""
+        return [enc for enc in wanted if enc in text]
+
+    py_ok = sys.version_info[:2] >= (3, 11)
+    tools = {
+        "python": {"present": True, "version": platform.python_version(), "ok": py_ok},
+        "ffmpeg": _entry(_ffmpeg_version()),
+        "yt_dlp": _entry(_pkg("yt-dlp")),
+        "whisper_cpp": _entry(_pkg("pywhispercpp")),
+    }
+    required = ("ffmpeg", "yt_dlp", "whisper_cpp")
+    ok = py_ok and all(tools[t]["present"] for t in required)
+    return jsonify({
+        "machine": machine.probe(),
+        "tools": tools,
+        "encoders": _encoders(),
+        "ok": ok,
+    })
+
+
 # ----- jobs -----------------------------------------------------------
 
 @api_v1_bp.get("/jobs")
@@ -1240,6 +1313,7 @@ _OPENAPI_DOC = {
     "paths": {
         "/health":             {"get":  {"summary": "Liveness probe"}},
         "/capabilities":       {"get":  {"summary": "Server feature / limit / scope registry (unauthenticated)"}},
+        "/doctor":             {"get":  {"summary": "Dependency doctor: machine probe + tool presence/versions + encoders (unauthenticated)"}},
         "/jobs":               {
             "get":  {"summary": "List download jobs (paginated, filterable)",
                       "parameters": [
