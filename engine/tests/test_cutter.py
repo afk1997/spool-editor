@@ -1,7 +1,8 @@
 """Tests for clip.cutter — the lossless ffmpeg stream-copy trim.
 
-Mirrors test_transcriber.py: a _FakePopen drives cut()'s wait loop without
-shelling out, so we assert the argv contract + cancel/error handling.
+cutter delegates the subprocess plumbing to clip._ffmpeg, so we patch the Popen
+there. A _FakePopen drives the wait loop without shelling out; we assert the argv
+contract + cancel/error handling.
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from clip import cutter
+from clip import _ffmpeg, cutter
 
 
 class _FakePopen:
@@ -36,7 +37,7 @@ def test_cut_invokes_ffmpeg_stream_copy(monkeypatch, tmp_path):
         Path(argv[-1]).write_bytes(b"CLIP")  # fake a successful cut
         return _FakePopen(argv, **kw)
 
-    monkeypatch.setattr(cutter.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(_ffmpeg.subprocess, "Popen", fake_popen)
 
     src = tmp_path / "src.mp4"
     src.write_bytes(b"x")
@@ -71,7 +72,7 @@ def test_cut_raises_on_ffmpeg_failure(monkeypatch, tmp_path):
         p.returncode = 1
         return p
 
-    monkeypatch.setattr(cutter.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(_ffmpeg.subprocess, "Popen", fake_popen)
     with pytest.raises(RuntimeError, match="ffmpeg cut failed"):
         cutter.cut(str(tmp_path / "s.mp4"), 0.0, 5.0, str(tmp_path / "o.mp4"))
 
@@ -83,13 +84,12 @@ def test_cut_cancellable_mid_cut(monkeypatch, tmp_path):
                 return self.returncode
             raise subprocess.TimeoutExpired("ffmpeg", timeout)
 
-    monkeypatch.setattr(cutter.subprocess, "Popen", _SlowPopen)
+    monkeypatch.setattr(_ffmpeg.subprocess, "Popen", _SlowPopen)
     polls = [False, True]  # cancel on the second poll
-    out = tmp_path / "o.mp4"
 
     with pytest.raises(RuntimeError, match="cancelled"):
         cutter.cut(
-            str(tmp_path / "s.mp4"), 0.0, 5.0, str(out),
+            str(tmp_path / "s.mp4"), 0.0, 5.0, str(tmp_path / "o.mp4"),
             cancel_check=lambda: polls.pop(0) if polls else True,
         )
 
@@ -99,7 +99,7 @@ def test_cut_register_proc_called_then_cleared(monkeypatch, tmp_path):
         Path(argv[-1]).write_bytes(b"x")
         return _FakePopen(argv, **kw)
 
-    monkeypatch.setattr(cutter.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(_ffmpeg.subprocess, "Popen", fake_popen)
     seen = []
     cutter.cut(
         str(tmp_path / "s.mp4"), 0.0, 2.0, str(tmp_path / "o.mp4"),
