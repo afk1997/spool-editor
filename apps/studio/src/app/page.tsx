@@ -6,7 +6,7 @@ import { engine } from "@/lib/engine";
 
 type EngineState =
   | { kind: "checking" }
-  | { kind: "online"; status: string }
+  | { kind: "online"; version: string }
   | { kind: "offline"; reason: string };
 
 export default function Home() {
@@ -17,7 +17,7 @@ export default function Home() {
     engine
       .health()
       .then((h) => {
-        if (active) setState({ kind: "online", status: h.status });
+        if (active) setState({ kind: "online", version: h.version });
       })
       .catch((err: unknown) => {
         if (!active) return;
@@ -72,7 +72,7 @@ function EngineStatus({ state }: { state: EngineState }) {
 
       {state.kind === "online" && (
         <p className="mt-2 text-sm text-neutral-600">
-          Reported status: <code className="font-mono">{state.status}</code>
+          JSON API <code className="font-mono">{state.version}</code> reachable.
         </p>
       )}
 

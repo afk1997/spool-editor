@@ -59,7 +59,8 @@ export class SpoolApiClient {
   }
 
   // ── Core read surface (Phase 0 endpoints) ──
-  health(): Promise<{ status: string }> {
+  /** Liveness probe. Unauthenticated; the engine returns `{ ok, version }`. */
+  health(): Promise<{ ok: boolean; version: string }> {
     return this.request("/health");
   }
   listJobs(): Promise<Job[]> {
