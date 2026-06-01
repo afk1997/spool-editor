@@ -51,12 +51,32 @@ graph TD
 
 **Phase 0 done-when:** from a clean checkout, the engine runs headless → POST a URL to `api_v1` → file downloads with live progress → transcribe yields `words.json` + `.srt`; the same flow works from Claude Desktop via the MCP server; no htmx anywhere.
 
+## Phase 1 — Core clip loop + UI (in progress)
+
+Engine clip modules first (TDD, matching trove's ffmpeg/job conventions), then `api_v1`
+clip endpoints + clip/render job types, then MCP clip tools + elicitation, then the
+studio screens wired to `api_v1` with the demo's design tokens ported in.
+
+- [x] **`cutter`** — lossless `ffmpeg -c copy` trim (input-seek + duration), cancel/
+  error-handled like `transcriber.extract_audio`. 7 tests, green.
+- [ ] ◻️ **`captioner`** — slice `words.json` to the clip range → styled ASS (opus/
+  karaoke/minimal) via vendored `ass_captions`; then burn-in.
+- [ ] ◻️ **`reframe`** — ROI detection + diar⊕ROI speaker timeline (vendored `roi_motion`)
+  → pan/split/center via `pan_expr`.
+- [ ] ◻️ **`moments`** — LLM moment-finding over `words.json` (local Ollama default,
+  hosted opt-in per spec §10).
+- [ ] ◻️ **`exporter`** — final mux + platform/loudness preset + brand kit.
+- [ ] ◻️ **`api_v1` clip endpoints + clip/render job types** (extend `JobManager`).
+- [ ] ◻️ **MCP clip tools** + elicitation + `spool://` resources.
+- [ ] ◻️ **Studio screens** (S0–S5, S7 basic, S8 presets, S10, S11) wired to `api_v1`;
+  port the demo's design tokens; Agent panel + ⌘K. e2e: URL → 9:16 clip.
+
 ## What's verified now
 
 - `pnpm install` → 6 workspace projects, 354 packages, clean.
 - `pnpm typecheck` → 9/9 tasks pass. `pnpm build` → Next.js 16 compiles, static pages generate.
 - `engine/` `.py` files diff byte-identical against the validated trove clone.
-- **engine: 467 tests pass** (exit 0) on Python 3.12 via uv venv — headless after the htmx strip; pipeline coverage migrated to `api_v1`. (Was 591 with the htmx surface + its tests.)
+- **engine: 474 tests pass** (exit 0) on Python 3.12 via uv venv — headless trove suite (467) + `clip.cutter` (7). (Was 591 with the htmx surface + its tests, now removed.)
 - **`docker compose up`** builds the multi-stage image and serves `/api/v1/health` from the host — the packaged engine works end to end.
 - **headless serving** (venv): `/api/v1/doctor` reports real tooling — ffmpeg 7.1.1, whisper.cpp 1.5.0, yt-dlp 2026.3.17, VideoToolbox encoders.
 
