@@ -2,20 +2,32 @@
 #
 # Spool engine — headless JSON API (routes/api_v1.py) + MCP server. No UI:
 # the studio (apps/studio) is a separate Next.js app that talks to this over HTTP.
-FROM python:3.12-slim
+#
+# Multi-stage: compile native deps (webrtcvad's C ext, etc.) in a builder that has
+# the toolchain, then ship a lean runtime carrying only the shared libs the stack
+# needs at run time.
 
+FROM python:3.12-slim AS builder
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg && \
+    apt-get install -y --no-install-recommends build-essential python3-dev && \
     rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY requirements.txt .
+# requirements.txt pins yt-dlp to its master tarball (YouTube extractors break on
+# stable) and includes the diarization stack (core install). Install into an
+# isolated prefix we copy into the runtime stage.
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+FROM python:3.12-slim
+# Runtime system libs: ffmpeg (audio/video), libgomp1 (OpenMP — whisper.cpp / torch),
+# libsndfile1 (soundfile — the diarization/audio stack).
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg libgomp1 libsndfile1 && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=builder /install /usr/local
 
 RUN useradd -m -u 1000 spool
 WORKDIR /app
-
-COPY requirements.txt .
-# requirements.txt pins yt-dlp to its master tarball (YouTube extractors break on
-# stable) and includes the diarization stack (core install — ~1.3 GB once, cached
-# in this layer).
-RUN pip install --no-cache-dir -r requirements.txt
 
 # Persist the whisper.cpp model cache across container restarts.
 VOLUME /app/models

@@ -10,6 +10,7 @@ services:
     environment:
       HOST: 0.0.0.0 # reachable from the host (the studio); safe-bind requires the token below
       PORT: "8899"
+      PYTHONUNBUFFERED: "1" # stream logs to `docker logs` in real time
       # config.assert_safe_bind refuses a public bind without a token. Override in your shell:
       #   TROVE_TOKEN=... docker compose up
       TROVE_TOKEN: ${TROVE_TOKEN:-spool-dev-token}
