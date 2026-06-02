@@ -1,0 +1,12 @@
+import { chromium } from "playwright";
+const CLIP="d872378690";
+const browser = await chromium.launch({ channel: "chrome" });
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+const errs=[]; page.on("pageerror",e=>errs.push(e.message));
+await page.goto("http://localhost:3000/clips/"+CLIP, { waitUntil: "domcontentloaded" });
+await page.waitForTimeout(3000);
+await page.getByText("Export", { exact: true }).click({ force: true });
+await page.waitForTimeout(800);
+await page.screenshot({ path: "/tmp/studio_editor_export.png" });
+console.log(errs.length?"ERR: "+errs.join(" | "):"no client errors");
+await browser.close();

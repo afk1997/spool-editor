@@ -102,7 +102,7 @@ export default function ProjectScreen() {
       {tab === "Transcript" && <TranscriptView lines={lines} speakers={speakers} />}
       {tab === "Candidates" && (candidates.length === 0 && !finding
         ? <Empty icon="scan" title="No candidates yet" action={<Btn variant="primary" icon="scissors" onClick={() => ctx.nav("discovery", { id: s.id })}>Find clips</Btn>}>Run discovery to scan the transcript for clip-worthy moments.</Empty>
-        : <DiscoveryBody candidates={candidates} sourceId={s.id} finding={finding} />)}
+        : <DiscoveryBody key={candidates[0]?.id.split("-")[0] ?? "none"} candidates={candidates} sourceId={s.id} finding={finding} />)}
       {tab === "Clips" && (myClips.length === 0
         ? <Empty icon="film" title="No clips from this source yet" action={<Btn variant="primary" icon="scissors" onClick={() => ctx.nav("discovery", { id: s.id })}>Make clips</Btn>} />
         : <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(180px,1fr))", gap: 16 }}>{myClips.map((c) => <ClipCard key={c.id} c={c} />)}</div>)}

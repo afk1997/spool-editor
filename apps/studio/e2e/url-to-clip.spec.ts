@@ -53,7 +53,7 @@ test("paste URL → 9:16 captioned clip, end to end through the UI", async ({ pa
 
   // 4) The candidate card renders; the default selection drives the sticky "Make N clips".
   await page.reload();
-  const makeBtn = page.getByRole("button", { name: /Make .* clip/i });
+  const makeBtn = page.getByRole("button", { name: /^Make \d+ clips?/i });
   await expect(makeBtn).toBeVisible({ timeout: 30_000 });
   await makeBtn.click();
 

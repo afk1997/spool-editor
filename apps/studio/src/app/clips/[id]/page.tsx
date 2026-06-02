@@ -2,13 +2,14 @@
 
 import { useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { useSpool } from "@/components/spool/context";
+import { useSpool, type SpoolClip } from "@/components/spool/context";
 import { useLive } from "@/lib/engine-context";
 import { Btn, Chip, Empty, Icon, Seg, Switch, Thumb } from "@/components/spool/ui";
 
 /* S6 Editor — connective hub, 1:1 port of the demo (06). Preview · transport · timeline ·
- * inspector (Format / Captions / Brand / Export). Render runs the real engine; the inspector
- * links to the live Reframe + Caption screens; Version history lists the clip's real renders.
+ * inspector (Format / Captions / Brand / Export). Render runs the real engine with the
+ * inspector's chosen aspect / reframe-mode / export-preset; the inspector links to the live
+ * Reframe + Caption screens; Version history lists the clip's real renders.
  * (Deeper timeline editing — trim-render, A/B, word ripple-cut — is the Phase-2 surface.) */
 
 export default function EditorScreen() {
@@ -16,24 +17,38 @@ export default function EditorScreen() {
   const { snapshot } = useLive();
   const id = String(useParams().id);
   const clip = ctx.clips.find((c) => c.id === id);
+
+  // Distinguish "snapshot still loading" from "clip genuinely absent" so a deep link doesn't
+  // flash "not found", and so EditorBody only mounts once the real clip exists (state seeds right).
+  if (!clip) {
+    if (!snapshot) return <div className="mainpad fadein" style={{ color: "var(--text-faint)" }}>Loading clip…</div>;
+    return (
+      <div className="mainpad fadein">
+        <button className="btn subtle sm" style={{ marginBottom: 14, paddingLeft: 0 }} onClick={() => ctx.nav("clips")}><Icon name="chevL" size={15} /> Clips</button>
+        <Empty icon="scissors" title="Clip not found" action={<Btn variant="primary" onClick={() => ctx.nav("clips")}>Back to clips</Btn>}>It may still be rendering, or was cleared from the working set.</Empty>
+      </div>
+    );
+  }
+  return <EditorBody key={clip.id} clip={clip} />;
+}
+
+function EditorBody({ clip }: { clip: SpoolClip }) {
+  const ctx = useSpool();
+  const { snapshot } = useLive();
+  const id = clip.id;
   const [insp, setInsp] = useState("Format");
   const [playing, setPlaying] = useState(false);
   const [pos, setPos] = useState(34);
-  const [aspect, setAspect] = useState(clip?.aspect || "9:16");
+  const [aspect, setAspect] = useState(clip.aspect || "9:16");
   const [reframe, setReframe] = useState("pan");
+  const [preset, setPreset] = useState(clip.platform || "tiktok");
   const [safe, setSafe] = useState(true);
   const [ab, setAb] = useState("A");
   const [trimIn, setTrimIn] = useState(8), [trimOut, setTrimOut] = useState(86);
   const [cut, setCut] = useState<Record<number, boolean>>({});
   const trimRef = useRef<HTMLDivElement>(null);
 
-  if (!clip) return (
-    <div className="mainpad fadein">
-      <button className="btn subtle sm" style={{ marginBottom: 14, paddingLeft: 0 }} onClick={() => ctx.nav("clips")}><Icon name="chevL" size={15} /> Clips</button>
-      <Empty icon="scissors" title="Clip not found" action={<Btn variant="primary" onClick={() => ctx.nav("clips")}>Back to clips</Btn>}>It may still be rendering, or was cleared from the working set.</Empty>
-    </div>
-  );
-
+  const render = () => ctx.makeClipsFrom([{ id }], { aspect, mode: reframe, preset });
   const capWords = (clip.title || "your caption here").split(" ").slice(0, 8);
   const renders = (snapshot?.clips ?? []).filter((c) => c.clip_id === id && (c.kind === "export" || c.kind === "pipeline") && c.status === "done" && c.result.render_id);
   const dragTrim = (e: React.PointerEvent, which: "in" | "out") => {
@@ -62,7 +77,7 @@ export default function EditorScreen() {
         <span className="spacer" />
         <div className="row" style={{ gap: 6 }}>{others.map((o) => <button key={o.id} className="chip" style={{ cursor: "pointer" }} onClick={() => ctx.nav("editor", { id: o.id })}>{o.title.split(" ").slice(0, 3).join(" ")}…</button>)}</div>
         <Btn variant="ghost" size="sm" icon="undo">Undo</Btn>
-        <Btn variant="primary" size="sm" icon="zap" onClick={() => ctx.makeClipsFrom([{ id: clip.id }])}>Render</Btn>
+        <Btn variant="primary" size="sm" icon="zap" onClick={render}>Render</Btn>
       </div>
 
       <div style={{ flex: 1, display: "grid", gridTemplateColumns: "1fr 320px", minHeight: 0 }}>
@@ -145,8 +160,8 @@ export default function EditorScreen() {
             )}
             {insp === "Export" && (
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                <div><span className="field-label">Export preset</span><Seg value={clip.platform} onChange={() => {}} neutral options={[{ value: "tiktok", label: "TikTok" }, { value: "reels", label: "Reels" }, { value: "shorts", label: "Shorts" }]} /></div>
-                <div className="card" style={{ padding: 13, fontSize: 12.5, color: "var(--text-dim)" }}><div className="row" style={{ marginBottom: 6 }}><span>Codec</span><span className="spacer" /><span className="mono">H.264 · VideoToolbox</span></div><div className="row" style={{ marginBottom: 6 }}><span>Resolution</span><span className="spacer" /><span className="mono">{aspect === "9:16" ? "1080×1920" : aspect === "1:1" ? "1080×1080" : "1920×1080"}</span></div><div className="row"><span>Aspect</span><span className="spacer" /><span className="mono">{aspect}</span></div></div>
+                <div><span className="field-label">Export preset</span><Seg value={preset} onChange={setPreset} neutral options={[{ value: "tiktok", label: "TikTok" }, { value: "reels", label: "Reels" }, { value: "shorts", label: "Shorts" }]} /></div>
+                <div className="card" style={{ padding: 13, fontSize: 12.5, color: "var(--text-dim)" }}><div className="row" style={{ marginBottom: 6 }}><span>Codec</span><span className="spacer" /><span className="mono">H.264 · VideoToolbox</span></div><div className="row" style={{ marginBottom: 6 }}><span>Resolution</span><span className="spacer" /><span className="mono">{aspect === "9:16" ? "1080×1920" : aspect === "1:1" ? "1080×1080" : aspect === "4:5" ? "1080×1350" : "1920×1080"}</span></div><div className="row"><span>Aspect</span><span className="spacer" /><span className="mono">{aspect}</span></div></div>
                 <div>
                   <span className="field-label">Renders</span>
                   <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
@@ -156,12 +171,13 @@ export default function EditorScreen() {
                           <span className="mono" style={{ fontSize: 11.5, fontWeight: 600 }}>v{i + 1}</span>
                           <span style={{ fontSize: 11.5, color: "var(--text-faint)" }}>{(r.result.preset as string) || "render"} · {(r.result.aspect as string) || aspect}</span>
                           <span className="spacer" />
-                          {i === renders.length - 1 ? <Chip tone="acc">latest</Chip> : <a className="btn subtle sm" style={{ height: 24, padding: "0 8px" }} href={ctx.client.renderFileUrl(id, r.result.render_id!)} target="_blank" rel="noreferrer">Open</a>}
+                          {i === renders.length - 1 && <Chip tone="acc">latest</Chip>}
+                          <a className="btn subtle sm" style={{ height: 24, padding: "0 8px" }} href={ctx.client.renderFileUrl(id, r.result.render_id!)} target="_blank" rel="noreferrer">Open</a>
                         </div>
                       ))}
                   </div>
                 </div>
-                <Btn variant="primary" icon="zap" onClick={() => ctx.makeClipsFrom([{ id: clip.id }])}>Render &amp; export</Btn>
+                <Btn variant="primary" icon="zap" onClick={render}>Render &amp; export</Btn>
               </div>
             )}
           </div>

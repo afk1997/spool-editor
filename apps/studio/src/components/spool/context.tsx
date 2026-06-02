@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useState } from "react";
+import { createContext, useContext, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { SpoolApiClient } from "@spool/api-client";
 import type { ClipJobView, EventsSnapshot, TranscriptWord } from "@spool/types";
@@ -47,6 +47,8 @@ export interface AgentMessage {
   tag?: string; q?: string; options?: { id: string; title: string; sub?: string; score?: number; def?: boolean }[] | string[]; yes?: string;
   answered?: boolean; answer?: unknown;
   jobChips?: { id: string; kind: string }[];
+  /** source context the turn was asked with — re-sent when this elicit is answered */
+  sourceId?: string;
 }
 
 const RECIPES = ["3 funny shorts", "Insightful carousel", "Hot-take TikToks", "Best moment → 9:16"];
@@ -156,6 +158,8 @@ function mapJobs(snap: EventsSnapshot | null): SpoolJob[] {
       jobs.push({ id: j.id, type: "download", domain: "download", label: j.title || j.url, src: j.id, status: "done", prog: 100, stage: "complete", eta: "—", elapsed: j.human?.elapsed || "—" });
     else if (j.status === "error" || j.status === "cancelled")
       jobs.push({ id: j.id, type: "download", domain: "download", label: j.title || j.url, src: j.id, status: "failed", prog: j.progress_pct, stage: j.error_message || "error", eta: "—", elapsed: j.human?.elapsed || "—", err: true });
+    else if (j.status === "paused")
+      jobs.push({ id: j.id, type: "download", domain: "download", label: j.title || j.url, src: j.id, status: "paused", prog: j.progress_pct, stage: "paused", eta: "—", elapsed: j.human?.elapsed || "—" });
     else
       jobs.push({ id: j.id, type: "download", domain: "download", label: j.title || j.url, src: j.id, status: j.status === "downloading" ? "running" : "queued", prog: j.progress_pct, stage: j.human?.summary || "downloading", eta: j.human?.eta || "—", elapsed: j.human?.elapsed || "—" });
   }
@@ -246,7 +250,7 @@ interface SpoolCtx {
   agentMessages: AgentMessage[]; working: boolean;
   askAgent: (text: string, sourceId?: string) => void;
   answerElicit: (msg: AgentMessage, answer: unknown) => void;
-  makeClipsFrom: (sel: { source_id?: string; start?: number; end?: number; id?: string; title?: string }[]) => void;
+  makeClipsFrom: (sel: { source_id?: string; start?: number; end?: number; id?: string; title?: string }[], opts?: { aspect?: string; mode?: string; style?: string; preset?: string }) => void;
   toasts: Toast[]; pushToast: (t: Omit<Toast, "id">) => void;
   offline: boolean; toggleOffline: () => void;
 }
@@ -271,6 +275,7 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   const [agentMessages, setAgentMessages] = useState<AgentMessage[]>(INITIAL_AGENT);
   const [working, setWorking] = useState(false);
   const [offline, setOffline] = useState(true);
+  const elicitSeq = useRef(0); // monotonic, collision-free ids for elicitation cards
 
   const pushToast = (t: Omit<Toast, "id">) => {
     const id = Date.now() + Math.random();
@@ -307,7 +312,7 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
           pushToast({ icon: "sparkles", tone: "info", title: `Agent started ${r.jobs.length} job${r.jobs.length > 1 ? "s" : ""}`, body: "Track them in the Render Queue" });
         }
         if (r.action === "clarify" && r.question)
-          push({ role: "elicit", id: "e" + Math.round(r.reply.length + (r.options?.length ?? 0)) + agentMessages.length, kind: "enum", tag: "agent needs you", q: r.question, options: r.options ?? [] });
+          push({ role: "elicit", id: "e" + ++elicitSeq.current, kind: "enum", tag: "agent needs you", q: r.question, options: r.options ?? [], sourceId });
       })
       .catch(() => {
         setWorking(false);
@@ -318,17 +323,33 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   const answerElicit = (msg: AgentMessage, answer: unknown) => {
     setAgentMessages((a) => a.map((m) => (m === msg || (msg.id && m.id === msg.id) ? { ...m, answered: true, answer } : m)));
     const text = Array.isArray(answer) ? answer.join(", ") : String(answer ?? "");
-    if (text) askAgent(text);
+    if (text) askAgent(text, msg.sourceId); // re-ask with the source context the clarify was raised in
   };
 
-  const makeClipsFrom = (sel: { source_id?: string; start?: number; end?: number; id?: string; title?: string }[]) => {
-    const n = sel.length || 1;
+  /** Render selected candidates / clips. `opts` lets a screen (e.g. the Editor) pass its chosen
+   *  aspect/reframe-mode/caption-style/export-preset; the discovery flow uses 9:16/pan/opus/tiktok. */
+  const makeClipsFrom = (
+    sel: { source_id?: string; start?: number; end?: number; id?: string; title?: string }[],
+    opts: { aspect?: string; mode?: string; style?: string; preset?: string } = {},
+  ) => {
+    const aspect = opts.aspect ?? "9:16", mode = opts.mode ?? "pan", style = opts.style ?? "opus", preset = opts.preset ?? "tiktok";
+    let started = 0;
     for (const c of sel) {
-      if (c.source_id && c.start != null && c.end != null)
-        client.renderPipeline(c.source_id, { start: c.start, end: c.end, aspect: "9:16", mode: "pan", style: "opus", preset: "tiktok" }).catch(() => {});
-      else if (c.id) client.render(c.id).catch(() => {});
+      if (c.source_id && c.start != null && c.end != null) {
+        client.renderPipeline(c.source_id, { start: c.start, end: c.end, aspect, mode, style, preset }).catch(() => {});
+        started++;
+      } else if (c.id) {
+        // existing clip: apply the chosen format (reframe) before exporting so the Editor's
+        // pickers actually take effect, instead of re-exporting with no params.
+        const ran = opts.aspect || opts.mode
+          ? client.reframe(c.id, { aspect, mode }).then(() => client.render(c.id!, { preset }))
+          : client.render(c.id, { preset });
+        ran.catch(() => {});
+        started++;
+      }
     }
-    pushToast({ icon: "film", tone: "info", title: `Rendering ${n} clip${n > 1 ? "s" : ""}`, body: "Track progress in the Render Queue" });
+    if (!started) { pushToast({ icon: "alert", tone: "warn", title: "Nothing to render", body: "No clip or moment range to act on." }); return; }
+    pushToast({ icon: "film", tone: "info", title: `Rendering ${started} clip${started > 1 ? "s" : ""}`, body: "Track progress in the Render Queue" });
     setAgentOpen(true);
     nav("queue");
   };

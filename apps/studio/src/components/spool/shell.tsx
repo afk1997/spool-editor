@@ -34,7 +34,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
     const h = (e: KeyboardEvent) => {
       const el = document.activeElement as HTMLElement | null;
       const typing = el && ["INPUT", "TEXTAREA"].includes(el.tagName);
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") { e.preventDefault(); if (ctx.paletteOpen) ctx.closePalette(); else ctx.openPalette(); }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); if (ctx.paletteOpen) ctx.closePalette(); else ctx.openPalette(); }
       else if (e.key === "?" && !typing) { e.preventDefault(); if (ctx.shortcutsOpen) ctx.closeShortcuts(); else ctx.openShortcuts(); }
       else if (e.key === "Escape") { ctx.closeShortcuts(); }
       else if (e.key === "/" && !typing) { e.preventDefault(); ctx.openAgent(); }

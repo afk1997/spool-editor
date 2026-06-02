@@ -25,7 +25,7 @@ export default function DiscoveryScreen() {
       {!s ? (
         <Btn variant="primary" icon="import" onClick={() => ctx.nav("import")}>Import a video</Btn>
       ) : (
-        <DiscoveryBody candidates={candidates} sourceId={id} finding={finding} />
+        <DiscoveryBody key={candidates[0]?.id.split("-")[0] ?? "none"} candidates={candidates} sourceId={id} finding={finding} />
       )}
     </div>
   );

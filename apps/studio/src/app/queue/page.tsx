@@ -15,14 +15,29 @@ export default function QueueScreen() {
   const all = ctx.jobs;
   const jobs = all.filter((j) => filter === "all" || (filter === "running" && j.status === "running") || (filter === "queued" && j.status === "queued") || (filter === "done" && j.status === "done") || (filter === "failed" && j.status === "failed"));
   const typeIcon: Record<string, string> = { render: "film", transcribe: "type", download: "download" };
-  const statusChip = (j: SpoolJob) => ({ running: <Chip tone="info" dot>running</Chip>, queued: <Chip tone="warn" dot>queued</Chip>, done: <Chip tone="ok" dot>done</Chip>, failed: <Chip tone="err" dot>failed</Chip> }[j.status] ?? null);
+  const statusChip = (j: SpoolJob) => ({ running: <Chip tone="info" dot>running</Chip>, queued: <Chip tone="warn" dot>queued</Chip>, paused: <Chip tone="warn" dot>paused</Chip>, done: <Chip tone="ok" dot>done</Chip>, failed: <Chip tone="err" dot>failed</Chip> }[j.status] ?? null);
 
   const cancel = (j: SpoolJob) => { if (j.domain === "download") ctx.client.cancelJob(j.id).catch(() => {}); else if (j.domain === "clip") ctx.client.cancelClipJob(j.id).catch(() => {}); };
   const dismiss = (j: SpoolJob) => { if (j.domain === "download") ctx.client.dismissJob(j.id).catch(() => {}); else if (j.domain === "clip") ctx.client.dismissClipJob(j.id).catch(() => {}); };
-  const retry = (j: SpoolJob) => { if (j.domain === "download") ctx.client.resumeJob(j.id).catch(() => {}); else dismiss(j); };
+  const pause = (j: SpoolJob) => ctx.client.pauseJob(j.id).catch(() => {});
+  const resume = (j: SpoolJob) => ctx.client.resumeJob(j.id).catch(() => {});
   const clearFinished = () => { all.filter((j) => j.status === "done" || j.status === "failed").forEach(dismiss); ctx.pushToast({ icon: "trash", tone: "info", title: "Cleared finished jobs" }); };
-  const pauseAll = () => { all.filter((j) => j.domain === "download" && j.status === "running").forEach((j) => ctx.client.pauseJob(j.id).catch(() => {})); };
-  const retryFailed = () => all.filter((j) => j.status === "failed").forEach(retry);
+  const pauseAll = () => all.filter((j) => j.domain === "download" && j.status === "running").forEach(pause);
+  // only downloads have a real retry (resume); failed clip jobs can only be dismissed (re-run from
+  // Discovery); transcribes have no client lifecycle, so they get no action button.
+  const retryFailed = () => all.filter((j) => j.status === "failed" && j.domain === "download").forEach(resume);
+
+  /** The right action button for a row, honoring what the engine can actually do per domain. */
+  function rowAction(j: SpoolJob) {
+    if (j.domain === "transcribe") return null;
+    if (j.status === "failed") return j.domain === "download"
+      ? <button className="iconbtn" title="Retry" onClick={() => resume(j)}><Icon name="refresh" size={15} /></button>
+      : <button className="iconbtn" title="Dismiss" onClick={() => dismiss(j)}><Icon name="trash" size={15} /></button>;
+    if (j.status === "paused") return <button className="iconbtn" title="Resume" onClick={() => resume(j)}><Icon name="play" size={15} /></button>;
+    if (j.status === "done") return <button className="iconbtn" title="Open" onClick={() => ctx.nav("clips")}><Icon name="arrowR" size={15} /></button>;
+    if (j.status === "running" && j.domain === "download") return <button className="iconbtn" title="Pause" onClick={() => pause(j)}><Icon name="pause" size={15} /></button>;
+    return <button className="iconbtn" title="Cancel" onClick={() => cancel(j)}><Icon name="x" size={15} /></button>;
+  }
 
   return (
     <div className="mainpad fadein">
@@ -56,9 +71,7 @@ export default function QueueScreen() {
               </div>
               <div className="row" style={{ gap: 4, flex: "none" }}>
                 <button className="iconbtn" onClick={() => setOpenLog(openLog === j.id ? null : j.id)} title="Logs"><Icon name="terminal" size={15} /></button>
-                {j.status === "failed" ? <button className="iconbtn" title="Retry" onClick={() => retry(j)}><Icon name="refresh" size={15} /></button>
-                  : j.status === "done" ? <button className="iconbtn" title="Open" onClick={() => ctx.nav("clips")}><Icon name="arrowR" size={15} /></button>
-                  : <button className="iconbtn" title="Cancel" onClick={() => cancel(j)}><Icon name="x" size={15} /></button>}
+                {rowAction(j)}
               </div>
             </div>
             {openLog === j.id && (
