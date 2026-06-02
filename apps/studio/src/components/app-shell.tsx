@@ -13,6 +13,7 @@ const NAV = [
   { href: "/", label: "Home", icon: IconHome },
   { href: "/import", label: "Import", icon: IconImport },
   { href: "/library", label: "Library", icon: IconLibrary },
+  { href: "/clips", label: "Clips", icon: IconClips },
   { href: "/queue", label: "Queue", icon: IconQueue },
 ];
 
@@ -104,6 +105,9 @@ function IconImport() {
 }
 function IconLibrary() {
   return svg(<><rect x="3" y="4" width="18" height="14" rx="2" /><path d="M10 9l5 3-5 3V9Z" /></>);
+}
+function IconClips() {
+  return svg(<><circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M20 4 8.5 15.5" /><path d="M20 20 8.5 8.5" /></>);
 }
 function IconQueue() {
   return svg(<><path d="M4 6h16" /><path d="M4 12h16" /><path d="M4 18h10" /></>);

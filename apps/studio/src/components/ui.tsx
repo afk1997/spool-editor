@@ -122,6 +122,38 @@ export function ErrorState({ code, onRetry }: { code: string; onRetry?: () => vo
   );
 }
 
+/** A small segmented control (aspect / mode / style / preset pickers). */
+export function Segmented<T extends string>({
+  options,
+  value,
+  onChange,
+  ariaLabel,
+}: {
+  options: readonly T[];
+  value: T;
+  onChange: (v: T) => void;
+  ariaLabel: string;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1 rounded border border-line p-0.5" role="group" aria-label={ariaLabel}>
+      {options.map((o) => (
+        <button
+          key={o}
+          type="button"
+          aria-pressed={value === o}
+          onClick={() => onChange(o)}
+          className={cn(
+            "min-h-9 rounded-sm px-2.5 text-sm font-medium capitalize",
+            value === o ? "bg-accent text-accent-ink" : "text-text-dim hover:text-text",
+          )}
+        >
+          {o}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /** mm:ss / h:mm:ss from seconds. */
 export function fmtDuration(seconds?: number | null): string {
   if (!seconds || seconds < 0) return "—";
