@@ -8,7 +8,7 @@
 
 // ───────────────────────── Jobs (trove) ─────────────────────────
 
-export type JobStatus = "queued" | "running" | "paused" | "done" | "failed" | "cancelled";
+export type JobStatus = "queued" | "downloading" | "paused" | "done" | "error" | "cancelled";
 
 export interface Job {
   id: string;
@@ -257,7 +257,7 @@ export interface JobView {
   id: string;
   url: string;
   title: string;
-  status: JobStatus | "downloading";
+  status: JobStatus;
   filename: string | null;
   thumbnail: string | null;
   format_choice: string | null;

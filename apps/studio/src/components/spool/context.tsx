@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useState } from "react";
 import { useRouter } from "next/navigation";
+import type { SpoolApiClient } from "@spool/api-client";
 import type { ClipJobView, EventsSnapshot } from "@spool/types";
 import { useEngine, useEngineQuery, useLive } from "@/lib/engine-context";
 
@@ -21,6 +22,7 @@ export interface SpoolJob {
   id: string; type: string; label: string; src: string; status: string; prog: number; stage: string; eta: string;
 }
 export interface SpoolDep { id: string; name: string; note: string; status: string; ver: string }
+export interface SpoolDownload { id: string; title: string; src: string; prog: number; status: string; size: string; speed: string; eta: string; err?: string | null }
 export interface Toast { id: number; icon?: string; tone?: string; title: string; body?: string }
 
 const RECIPES = ["3 funny shorts", "Insightful carousel", "Hot-take TikToks", "Best moment → 9:16"];
@@ -90,8 +92,8 @@ function mapJobs(snap: EventsSnapshot | null): SpoolJob[] {
   if (!snap) return [];
   const jobs: SpoolJob[] = [];
   for (const j of snap.jobs) {
-    if (j.status === "downloading" || j.status === "queued" || j.status === "running")
-      jobs.push({ id: j.id, type: "download", label: j.title || j.url, src: j.id, status: j.status === "downloading" ? "running" : j.status, prog: j.progress_pct, stage: j.human?.summary || "downloading", eta: j.human?.eta || "—" });
+    if (j.status === "downloading" || j.status === "queued")
+      jobs.push({ id: j.id, type: "download", label: j.title || j.url, src: j.id, status: j.status === "downloading" ? "running" : "queued", prog: j.progress_pct, stage: j.human?.summary || "downloading", eta: j.human?.eta || "—" });
   }
   for (const t of snap.transcripts)
     if (t.status === "running" || t.status === "queued")
@@ -102,10 +104,21 @@ function mapJobs(snap: EventsSnapshot | null): SpoolJob[] {
   return jobs;
 }
 
+function mapDownloads(snap: EventsSnapshot | null): SpoolDownload[] {
+  if (!snap) return [];
+  return snap.jobs.map((j) => ({
+    id: j.id, title: j.title || j.url, src: originOf(j.url), prog: j.progress_pct,
+    status: j.status === "done" ? "done" : j.status === "error" ? "error" : j.status === "cancelled" ? "error" : "downloading",
+    size: j.human?.size || "", speed: j.human?.speed || "", eta: j.human?.eta || "—", err: j.error_message,
+  }));
+}
+
 interface SpoolCtx {
+  client: SpoolApiClient;
   sources: SpoolSource[];
   clips: SpoolClip[];
   jobs: SpoolJob[];
+  downloads: SpoolDownload[];
   recipes: string[];
   deps: SpoolDep[];
   nav: (screen: string, params?: { id?: string }) => void;
@@ -158,7 +171,9 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
     : [];
 
   const value: SpoolCtx = {
-    sources: mapSources(snapshot), clips: mapClips(snapshot), jobs: mapJobs(snapshot), recipes: RECIPES, deps,
+    client,
+    sources: mapSources(snapshot), clips: mapClips(snapshot), jobs: mapJobs(snapshot),
+    downloads: mapDownloads(snapshot), recipes: RECIPES, deps,
     nav, agentOpen, openAgent: () => setAgentOpen(true), toggleAgent: () => setAgentOpen((o) => !o), closeAgent: () => setAgentOpen(false),
     paletteOpen, openPalette: () => setPaletteOpen(true), closePalette: () => setPaletteOpen(false),
     shortcutsOpen, openShortcuts: () => setShortcutsOpen(true), closeShortcuts: () => setShortcutsOpen(false),
