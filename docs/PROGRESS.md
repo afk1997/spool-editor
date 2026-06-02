@@ -272,7 +272,15 @@ editing its transcript · full-text search transcripts across the library.
   + e2e green; Editor screenshot shows the word timeline; live probe — clicking a word's ✕
   removes it and surfaces "Re-cut (drop N)". (Draggable trim handles + word/sentence/scene
   *snap* lanes are a further refinement; trim-by-range already works via the transcript
-  cut-from-selection.) Commit: UI commit.
+  cut-from-selection.) Commit: `db2f4b1`.
+
+**Phase-2 milestone (2026-06-03):** all four spec §5 done-whens hold — fix an ROI box AND a
+caption style by hand → re-render (S7+S8); apply a brand kit across clips (S9); cut a clip by
+editing its transcript (S4); full-text search transcripts across the library (⌘K). 6 of the
+prompt's 8 work-items shipped + verified (S6 editor · S7 reframe · S8 caption · transcript
+editing · S9 brand kits · library search). **Remaining (non-gating):** Settings config writes
++ list virtualization/lazy-load perf; the SQLite-FTS5 store migration is deferred per §7.2.
+Every slice: engine TDD + studio screenshot-vs-demo, suites + e2e green, committed.
 - [ ] **Settings writes** · **perf (virtualize long lists / lazy-load editor)** — remaining slices.
 
 ## What's verified now
