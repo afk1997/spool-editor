@@ -1,92 +1,95 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { SpoolApiError } from "@spool/api-client";
-import { engine } from "@/lib/engine";
+import Link from "next/link";
+import { useEngineQuery, useLive } from "@/lib/engine-context";
+import { Badge, Card, Spinner, StatusDot, cn } from "@/components/ui";
 
-type EngineState =
-  | { kind: "checking" }
-  | { kind: "online"; version: string }
-  | { kind: "offline"; reason: string };
-
+/** S1 Home + S0 Dependency-Doctor. Live engine status, the real tool/encoder probe, the
+ *  feature registry, and quick entry points — every value from api_v1, zero mock. */
 export default function Home() {
-  const [state, setState] = useState<EngineState>({ kind: "checking" });
+  const { connection, snapshot } = useLive();
+  const doctor = useEngineQuery((c) => c.doctor());
+  const caps = useEngineQuery((c) => c.capabilities());
 
-  useEffect(() => {
-    let active = true;
-    engine
-      .health()
-      .then((h) => {
-        if (active) setState({ kind: "online", version: h.version });
-      })
-      .catch((err: unknown) => {
-        if (!active) return;
-        setState({ kind: "offline", reason: err instanceof SpoolApiError ? err.code : "unreachable" });
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
+  const jobs = snapshot?.jobs ?? [];
+  const clips = snapshot?.clips ?? [];
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-2xl flex-col justify-center gap-8 px-6 py-16">
-      <header className="space-y-3">
-        <h1 className="text-4xl font-semibold tracking-tight">Spool</h1>
-        <p className="text-pretty text-lg text-neutral-600">
-          Local-first clip studio. Turn long videos into platform-ready vertical clips —
+    <div className="mx-auto flex max-w-4xl flex-col gap-6">
+      <header className="space-y-1">
+        <h1 className="font-display text-3xl font-semibold tracking-tight">Spool</h1>
+        <p className="text-text-dim">
+          Local-first clip studio — turn long videos into platform-ready vertical clips,
           entirely on your machine.
         </p>
       </header>
 
-      <EngineStatus state={state} />
+      {/* engine connection */}
+      <Card className="flex items-center gap-3 p-4">
+        <StatusDot status={connection} pulse={connection === "connecting"} />
+        <span className="font-medium">
+          {connection === "online" ? "Engine connected" : connection === "connecting" ? "Connecting…" : "Engine offline"}
+        </span>
+        {connection === "offline" && (
+          <code className="ml-auto rounded bg-bg-3 px-2 py-1 font-mono text-xs text-text-dim">cd engine &amp;&amp; ./trove.sh</code>
+        )}
+      </Card>
 
-      <footer className="text-sm text-neutral-500">
-        Phase 0 — foundation. The Phase-1 screens (import, library, transcript, discovery,
-        reframe, captions, render queue) wire to this engine next.
-      </footer>
-    </main>
+      {/* dependency doctor (S0) */}
+      <section className="flex flex-col gap-2">
+        <h2 className="text-sm font-semibold text-text-dim">Dependencies</h2>
+        <Card className="p-4">
+          {doctor.loading ? (
+            <Spinner label="Probing tools…" />
+          ) : doctor.error ? (
+            <p className="text-sm text-err">Couldn&rsquo;t probe (<span className="font-mono">{doctor.error}</span>)</p>
+          ) : (
+            <div className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
+              {Object.entries(doctor.data!.tools).map(([name, t]) => (
+                <div key={name} className="flex items-center gap-2">
+                  <StatusDot status={t.present ? "done" : "error"} />
+                  <span className="text-sm text-text">{name}</span>
+                  <span className="ml-auto font-mono text-xs text-text-faint">{t.version ?? "—"}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {doctor.data && (
+            <p className="mt-3 border-t border-line pt-3 text-xs text-text-dim">
+              {doctor.data.encoders.length} hardware encoder{doctor.data.encoders.length === 1 ? "" : "s"}:{" "}
+              <span className="font-mono">{doctor.data.encoders.join(", ") || "x264 (software)"}</span>
+            </p>
+          )}
+        </Card>
+      </section>
+
+      {/* feature registry */}
+      {caps.data && (
+        <div className="flex flex-wrap gap-2">
+          <Badge tone={caps.data.features.diarization ? "ok" : "neutral"}>
+            diarization {caps.data.features.diarization ? "on" : "off"}
+          </Badge>
+          <Badge tone={caps.data.features.clips ? "ok" : "neutral"}>clips</Badge>
+          <Badge tone="info">schema v{caps.data.schema_version}</Badge>
+          {caps.data.auth_required && <Badge tone="warn">auth required</Badge>}
+        </div>
+      )}
+
+      {/* quick entry points */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <QuickLink href="/import" title="Import" body="Paste a URL to download + transcribe." />
+        <QuickLink href="/library" title="Library" body={`${jobs.filter((j) => j.status === "done").length} sources ready.`} />
+        <QuickLink href="/queue" title="Queue" body={`${clips.length} renders, ${jobs.length} downloads.`} />
+      </div>
+    </div>
   );
 }
 
-function EngineStatus({ state }: { state: EngineState }) {
-  const dot =
-    state.kind === "online"
-      ? "bg-green-500"
-      : state.kind === "offline"
-        ? "bg-amber-500"
-        : "bg-neutral-300 animate-pulse";
-
-  const label =
-    state.kind === "online"
-      ? "Engine connected"
-      : state.kind === "offline"
-        ? "Engine offline"
-        : "Checking engine…";
-
+function QuickLink({ href, title, body }: { href: string; title: string; body: string }) {
   return (
-    <section className="rounded-xl border border-neutral-200 p-5">
-      <div className="flex items-center gap-2.5">
-        <span className={`h-2.5 w-2.5 rounded-full ${dot}`} aria-hidden />
-        <span className="font-medium">{label}</span>
-      </div>
-
-      {state.kind === "online" && (
-        <p className="mt-2 text-sm text-neutral-600">
-          JSON API <code className="font-mono">{state.version}</code> reachable.
-        </p>
-      )}
-
-      {state.kind === "offline" && (
-        <div className="mt-2 space-y-2 text-sm text-neutral-600">
-          <p>
-            Couldn&rsquo;t reach the engine (<code className="font-mono">{state.reason}</code>).
-            Start it, then this will reconnect:
-          </p>
-          <pre className="overflow-x-auto rounded-lg bg-neutral-100 p-3 font-mono text-xs">
-            cd engine &amp;&amp; ./trove.sh
-          </pre>
-        </div>
-      )}
-    </section>
+    <Link href={href} className={cn("group rounded-lg border border-line bg-bg-2 p-4 shadow-1", "transition-colors hover:border-line-str")}>
+      <p className="font-medium text-text group-hover:text-accent">{title} →</p>
+      <p className="mt-1 text-sm text-text-dim">{body}</p>
+    </Link>
   );
 }

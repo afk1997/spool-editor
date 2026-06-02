@@ -6,6 +6,7 @@ import {
   Archivo_Black,
 } from "next/font/google";
 import "./globals.css";
+import { Providers } from "./providers";
 
 // The approved demo's type system (spec §6.1). Display fonts are preloaded so there's no
 // FOUT / "Unpacking…" flash (spec §6.4). Each binds to the CSS var the theme layer reads.
@@ -30,7 +31,9 @@ export default function RootLayout({
       data-density="comfortable"
       className={`${ui.variable} ${serif.variable} ${mono.variable} ${caption.variable} h-full antialiased`}
     >
-      <body className="bg-bg text-text font-sans min-h-full">{children}</body>
+      <body className="bg-bg text-text font-sans min-h-full">
+        <Providers>{children}</Providers>
+      </body>
     </html>
   );
 }
