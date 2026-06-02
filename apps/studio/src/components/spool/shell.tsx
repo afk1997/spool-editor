@@ -20,8 +20,6 @@ const NAV = [
   { href: "/analytics", icon: "chart", label: "Analyze" },
 ] as const;
 
-const WORK_ROUTES = ["/sources", "/clips/"]; // deep screens that keep "Library/Clips" lit
-
 function useRunningCount() {
   const { snapshot } = useLive();
   const dl = (snapshot?.jobs ?? []).filter((j) => j.status === "downloading" || j.status === "queued").length;
