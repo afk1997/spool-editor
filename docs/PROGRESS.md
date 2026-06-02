@@ -25,6 +25,23 @@
 > heavy editor. **Decided, not debt:** offline moment-finding (Codex bridge needs network — the locked
 > default; a local LLM provider can be wired later).
 >
+> **Post-Phase-1 hardening (also done, all verified — typecheck/lint/test/e2e green):**
+> (1) **Code review** — fixed 10 correctness/UX bugs: paused downloads now map + show Resume; the
+> Editor's *latest* render is openable; Editor Render honors the chosen aspect/reframe/preset; Discovery
+> selection resets cleanly on a new find (keyed); Editor `aspect` seeds from the real clip (keyed
+> EditorBody + loading gate, no "not found" flash); Queue retry/dismiss/transcribe actions are
+> domain-aware (no retry-that-deletes, no dead buttons); elicitation ids are a monotonic ref (no
+> collisions); answerElicit re-sends sourceId; ⌘K works under Caps Lock. (2) **Wired 3 demo-faithful
+> dead controls** — Discovery "Adjust in/out" (editable MM:SS:FF, persists a per-candidate range
+> override used by render); Clips bulk **Export** (downloads selected renders); Caption preset switch
+> keeps the keyword/emoji toggles. (3) **Real inline video playback** — Editor plays the rendered
+> `.mp4` (`<video controls>`, captions burned in), Project Overview plays the downloaded source
+> (`/jobs/<id>/file`); api-client gained `jobFileUrl`; Export tab shows each render's on-disk path
+> (`engine/downloads/clips/<clip>/renders/<rid>.mp4`) + Copy + Download. (4) **Home "Import / Paste
+> URL"** carries a pasted URL to `/import?url=…` (pre-fills the box; useSearchParams + Suspense).
+> **Known not-yet-wired (next):** the Import screen's 3 toggles (subtitles / chapters / embed
+> metadata+thumbnail) are still UI-only — not passed to the yt-dlp runner.
+>
 > **Glass-box / honesty notes (Phase-1 boundaries, documented deviations from the demo's mock):**
 > candidate cards show real named `signals` + a real transcript excerpt (no fabricated 0-100 score —
 > the `rank` opportunity-score + the Discovery reweight panel are Phase 3); Settings shows the real
