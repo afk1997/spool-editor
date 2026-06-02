@@ -58,6 +58,38 @@ def _clean_segments(segs) -> list[dict]:
     return out
 
 
+def _kept_spans(words_path, start: float, end: float) -> list:
+    """Within ``[start, end]``, the spans to KEEP after removing deleted words' time ranges
+    (the transcript-driven ripple cut). No transcript / no deletions → a single span, so the
+    caller falls back to the lossless stream-copy cut."""
+    deleted = []
+    if words_path and os.path.exists(words_path):
+        try:
+            data = transcript_io.load(words_path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            data = {}
+        for w in data.get("words") or []:
+            if w.get("deleted") and w.get("start") is not None and w.get("end") is not None:
+                s, e = max(start, float(w["start"])), min(end, float(w["end"]))
+                if e > s:
+                    deleted.append((s, e))
+    deleted.sort()
+    merged: list = []
+    for s, e in deleted:
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    kept, cur = [], start
+    for s, e in merged:
+        if s > cur:
+            kept.append((cur, s))
+        cur = max(cur, e)
+    if cur < end:
+        kept.append((cur, end))
+    return kept or [(start, end)]
+
+
 class ClipRunner:
     def __init__(self, *, download_dir, job_manager, clip_manager):
         self.download_dir = Path(download_dir)
@@ -144,14 +176,20 @@ class ClipRunner:
     # ----- per-stage engine work (no staging; reused by targets + pipeline) ----
 
     def _do_cut(self, job, *, source_id: str, clip_id: str, params: dict) -> str:
-        media_path, _ = self.source_paths(source_id)
+        media_path, words_path = self.source_paths(source_id)
         if not media_path:
             raise ValueError(f"source {source_id!r} has no downloaded media to clip")
         start, end = float(params["start"]), float(params["end"])
         job.clip_id = clip_id
         self.write_clip_meta(clip_id, source_id=source_id, start=start, end=end)
         out = str(self.clip_dir(clip_id) / "clip.mp4")
-        cutter.cut(media_path, start, end, out, **self._hooks(job))
+        # Transcript-driven: if words were deleted in this window, ripple-cut them out;
+        # otherwise the lossless single-range stream-copy.
+        spans = _kept_spans(words_path, start, end)
+        if len(spans) <= 1:
+            cutter.cut(media_path, start, end, out, **self._hooks(job))
+        else:
+            cutter.cut_spans(media_path, spans, out, **self._hooks(job))
         return out
 
     def _do_reframe(self, job, *, clip_id: str, params: dict) -> dict:

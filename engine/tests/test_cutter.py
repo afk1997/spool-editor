@@ -55,6 +55,35 @@ def test_cut_invokes_ffmpeg_stream_copy(monkeypatch, tmp_path):
     assert str(src) in argv and str(out) in argv
 
 
+def test_cut_spans_builds_trim_concat_filtergraph(monkeypatch, tmp_path):
+    """Ripple cut (transcript edit drops interior words): trim each kept span and concat."""
+    captured = {}
+
+    def fake_popen(argv, **kw):
+        captured["argv"] = argv
+        Path(argv[-1]).write_bytes(b"CLIP")
+        return _FakePopen(argv, **kw)
+
+    monkeypatch.setattr(_ffmpeg.subprocess, "Popen", fake_popen)
+    src = tmp_path / "src.mp4"; src.write_bytes(b"x")
+    out = tmp_path / "ripple.mp4"
+
+    result = cutter.cut_spans(str(src), [(1.0, 3.0), (5.0, 8.0)], str(out))
+
+    assert result == str(out) and out.exists()
+    argv = captured["argv"]
+    fc = argv[argv.index("-filter_complex") + 1]
+    assert "trim=start=1.000:end=3.000" in fc          # first kept span (video)
+    assert "atrim=start=5.000:end=8.000" in fc          # second kept span (audio)
+    assert "concat=n=2:v=1:a=1[v][a]" in fc             # joined back into one stream
+    assert "[v]" in argv and "[a]" in argv              # mapped out
+
+
+def test_cut_spans_rejects_empty(tmp_path):
+    with pytest.raises(ValueError):
+        cutter.cut_spans(str(tmp_path / "s.mp4"), [], str(tmp_path / "o.mp4"))
+
+
 @pytest.mark.parametrize("start,end", [(5.0, 5.0), (10.0, 3.0)])
 def test_cut_rejects_nonpositive_range(tmp_path, start, end):
     with pytest.raises(ValueError):

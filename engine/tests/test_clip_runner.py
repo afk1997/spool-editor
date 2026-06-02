@@ -212,6 +212,48 @@ def test_caption_target_slices_window_and_burns_onto_reframed(runner, monkeypatc
     assert job.result["captioned_path"] == str(d / "captioned.mp4")
 
 
+def test_kept_spans_excludes_deleted_word_ranges(runner):
+    """The transcript-driven cut keeps everything except deleted words' time ranges."""
+    data = {"words": [
+        {"idx": 0, "w": "a", "start": 3.0, "end": 3.5, "deleted": False},
+        {"idx": 1, "w": "b", "start": 5.0, "end": 6.0, "deleted": True},
+        {"idx": 2, "w": "c", "start": 7.0, "end": 7.5, "deleted": False}], "segments": []}
+    p = runner.download_dir / "src1.words.json"
+    p.write_text(json.dumps(data))
+    assert cr._kept_spans(str(p), 2.0, 12.0) == [(2.0, 5.0), (6.0, 12.0)]
+
+
+def test_kept_spans_single_when_no_deletions_or_no_file(runner):
+    p = runner.download_dir / "ok.words.json"
+    p.write_text(json.dumps({"words": [{"idx": 0, "w": "a", "start": 3.0, "end": 4.0, "deleted": False}], "segments": []}))
+    assert cr._kept_spans(str(p), 2.0, 12.0) == [(2.0, 12.0)]
+    assert cr._kept_spans(None, 2.0, 12.0) == [(2.0, 12.0)]              # no transcript → single span
+
+
+def test_cut_ripple_cuts_when_words_deleted(runner, monkeypatch):
+    """Editing the transcript (deleting words) → the clip is cut to drop those spans."""
+    data = {"words": [
+        {"idx": 0, "w": "keep", "start": 3.0, "end": 3.5, "deleted": False},
+        {"idx": 1, "w": "cut", "start": 5.0, "end": 6.0, "deleted": True}], "segments": []}
+    (runner.download_dir / "src1.words.json").write_text(json.dumps(data))
+    seen = {}
+    _patch(monkeypatch, "cutter", "cut", lambda *a, **k: pytest.fail("deletions present → must ripple-cut"))
+    _patch(monkeypatch, "cutter", "cut_spans",
+           lambda s, spans, out, **k: (seen.update(spans=spans), Path(out).parent.mkdir(parents=True, exist_ok=True), Path(out).write_bytes(b"C"))[-1] or out)
+    runner.cut_target(source_id="src1", clip_id="clipR", params={"start": 2.0, "end": 12.0})(_job("cut", source_id="src1"))
+    assert seen["spans"] == [(2.0, 5.0), (6.0, 12.0)]
+
+
+def test_cut_lossless_when_no_deletions(runner, monkeypatch):
+    _words_file(runner)  # words list is empty → no deletions
+    seen = {}
+    _patch(monkeypatch, "cutter", "cut",
+           lambda s, a, b, out, **k: (seen.update(rng=(a, b)), Path(out).parent.mkdir(parents=True, exist_ok=True), Path(out).write_bytes(b"C"))[-1] or out)
+    _patch(monkeypatch, "cutter", "cut_spans", lambda *a, **k: pytest.fail("no deletions → lossless single-range cut"))
+    runner.cut_target(source_id="src1", clip_id="clipS", params={"start": 2.0, "end": 12.0})(_job("cut", source_id="src1"))
+    assert seen["rng"] == (2.0, 12.0)
+
+
 def test_caption_forwards_style_overrides(runner, monkeypatch):
     """S8 fine-styling overrides reach captioner.generate (mapped to the ASS there)."""
     _words_file(runner)

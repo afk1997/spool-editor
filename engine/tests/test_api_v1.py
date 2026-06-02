@@ -798,6 +798,42 @@ def _seed_done_transcript(app, tmp_path, *, body_text: str | None = None,
     return base
 
 
+# ---- transcript word editing (drives caption re-burn + the ripple cut) ----
+
+def _editable_words():
+    return {"schema_version": 2, "duration": 2.1,
+            "segments": [{"start": 0.0, "end": 2.1, "word_idxs": [0, 1, 2], "speaker": None}],
+            "words": [
+                {"idx": 0, "w": "Hello", "original_w": "Hello", "start": 0.0, "end": 0.5, "edited": False, "deleted": False},
+                {"idx": 1, "w": "machine", "original_w": "machine", "start": 0.5, "end": 1.2, "edited": False, "deleted": False},
+                {"idx": 2, "w": "learning", "original_w": "learning", "start": 1.2, "end": 2.1, "edited": False, "deleted": False}]}
+
+
+def test_edit_transcript_word_set_text_and_delete(client, tmp_path):
+    app, c = client
+    base = _seed_done_transcript(app, tmp_path, words_data=_editable_words())
+    r = c.post("/api/v1/transcripts/t1/words/1", json={"op": "set_text", "w": "robot"})
+    assert r.status_code == 200 and r.get_json()["word"]["w"] == "robot"
+    r2 = c.post("/api/v1/transcripts/t1/words/2", json={"op": "delete"})
+    assert r2.status_code == 200 and r2.get_json()["word"]["deleted"] is True
+    import json as _json
+    saved = _json.load(open(base + ".words.json"))
+    assert saved["words"][1]["w"] == "robot" and saved["words"][1]["edited"] is True
+    assert saved["words"][2]["deleted"] is True
+
+
+def test_edit_transcript_word_404_unknown_idx(client, tmp_path):
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())
+    assert c.post("/api/v1/transcripts/t1/words/99", json={"op": "delete"}).status_code == 404
+
+
+def test_edit_transcript_word_400_bad_op(client, tmp_path):
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())
+    assert c.post("/api/v1/transcripts/t1/words/0", json={"op": "explode"}).status_code == 400
+
+
 def test_chunk_text_format_default_returns_full_body(client, tmp_path):
     app, c = client
     _seed_done_transcript(app, tmp_path, body_text="hello world\n")

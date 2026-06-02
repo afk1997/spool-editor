@@ -1084,6 +1084,36 @@ def _resolve_transcript_artifact(tid, fmt):
     return path, parent, None
 
 
+@api_v1_bp.post("/transcripts/<tid>/words/<int:idx>")
+@token_required
+def edit_transcript_word(tid, idx):
+    """Edit one transcript word in place — trove's transcript-editor behavior, now over the
+    API. ``op`` ∈ set_text / delete / insert_after / merge_next; ``idx`` is the word's stable
+    ``idx`` field. Persists words.json + regenerates .srt/.vtt/.txt so a re-burn / ripple cut
+    picks up the edit. Returns the (possibly new) word dict the UI re-renders."""
+    path, parent, err = _resolve_transcript_artifact(tid, "json")
+    if err:
+        return err
+    try:
+        data = transcript_io.load(path)
+    except (OSError, ValueError) as e:
+        return jsonify({"error": "transcript_unreadable", "detail": str(e)}), 500
+    words = data.get("words") or []
+    pos = next((i for i, w in enumerate(words) if w.get("idx") == idx), None)
+    if pos is None:
+        return jsonify({"error": "word_not_found"}), 404
+    body = request.get_json(silent=True) or {}
+    op = str(body.get("op") or "")
+    kw = {"w": body["w"]} if isinstance(body.get("w"), str) else {}
+    try:
+        word = transcript_io.apply_word_op(data, pos, op, **kw)
+    except transcript_io.WordOpError as e:
+        return jsonify({"error": "bad_word_op", "detail": str(e)}), 400
+    transcript_io.save(path, data)
+    transcript_io.regenerate_artifacts(data, os.path.splitext(parent.file_path)[0])
+    return jsonify({"tid": tid, "word": word})
+
+
 @api_v1_bp.get("/transcripts/<tid>/chunk")
 @token_or_sig_required(SCOPE_TRANSCRIPT_EXPORT, kwarg="tid")
 def chunk_transcript(tid):
@@ -1789,6 +1819,7 @@ _OPENAPI_DOC = {
         "/transcripts/{tid}":           {"get":  {"summary": "Get one transcript"}},
         "/transcripts/{tid}/cancel":    {"post": {"summary": "Cancel a transcribe"}},
         "/transcripts/{tid}/dismiss":   {"post": {"summary": "Drop a finished transcribe"}},
+        "/transcripts/{tid}/words/{idx}": {"post": {"summary": "Edit a transcript word (set_text/delete/insert_after/merge_next)"}},
         "/transcripts/{tid}/export.{fmt}": {"get": {"summary": "Export txt/srt/vtt/json"}},
         "/transcripts/{tid}/chunk": {"get": {
             "summary": "Paginated read of a transcript (for MCP / context-bounded clients)",
