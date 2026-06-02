@@ -281,7 +281,53 @@ prompt's 8 work-items shipped + verified (S6 editor · S7 reframe · S8 caption 
 editing · S9 brand kits · library search). **Remaining (non-gating):** Settings config writes
 + list virtualization/lazy-load perf; the SQLite-FTS5 store migration is deferred per §7.2.
 Every slice: engine TDD + studio screenshot-vs-demo, suites + e2e green, committed.
-- [ ] **Settings writes** · **perf (virtualize long lists / lazy-load editor)** — remaining slices.
+### Remaining Phase-2 work — for the next session
+
+Same discipline as the shipped slices: **extend additively** (suites stay green), **TDD the
+engine**, **screenshot-match the demo**, **zero dummy** (wire it or an honest state), **commit
+each verified slice**, update this file. Reuse the proven seams (`brand_kits.py` store pattern,
+`_validate_*` helpers, the `clipArtifactUrl`/`editWord` client style, `scripts/shot*.mjs`).
+
+- [ ] **6 · Settings config writes (Settings screen, demo 07).** Replace the remaining honest
+  "Phase 2" rows with real controls. **New engine:** a `settings.py` JSON store (mirror
+  `brand_kits.BrandKitStore`, persist under the download dir) + `GET /settings` + `PATCH
+  /settings`; wire `app.extensions["trove.settings"]`; **document the routes in the OpenAPI
+  doc** (`test_openapi_documents_every_v1_route` runs on the full suite — run `pytest -q`, not
+  just `-k`, before committing). What each setting maps to:
+  - **Model switch** — *already real + hot:* endpoints exist (`GET /models`, `POST
+    /models/<name>/use`, `/remove`; `models_store.download` for install). Just add api-client
+    methods + wire the Settings "Models → Model management" row (list installed + active →
+    set-active). Next transcribe uses the active model.
+  - **Fast/quality default** — store a default `fast` bool; have `clip_runner._do_export` read
+    it when `params` omits `fast`. **Hot-applied.**
+  - **Render concurrency** (`TROVE_CLIP_WORKERS`/`TROVE_MAX_WORKERS`) + **MCP transport**
+    (stdio today) — the worker pool + MCP server read these at **startup**, so persist them to
+    the settings store + read at `create_app`, and label the UI control **"applies on
+    restart"** (honest — do *not* fake a live toggle; a live `ThreadPoolExecutor` resize is the
+    only way to hot-apply concurrency and is optional/harder).
+  - **UI:** wire the Settings sections (Models / Hardware "Concurrency & mode" / MCP
+    "Config-from-UI" / General defaults) to the store; keep the read-only live `/doctor` facts.
+
+- [ ] **8 · Perf (§6.4/§6.7).** **Virtualize long lists** — Transcript words (the big one;
+  can be thousands), then Library/Clips grids + Queue rows. No virtualizer is installed —
+  add one (`@tanstack/react-virtual` or `react-window`) or hand-roll windowing; **keep the
+  demo's look pixel-identical** (don't change spacing/markup, only mount the visible window).
+  **Lazy-load the heavy editor** — App-Router already route-splits each `page.tsx`, so confirm
+  the editor/ROI/caption chunks aren't pulled into shared bundles (check `pnpm build` chunk
+  sizes); `next/dynamic` only what's eagerly shared. Honor LCP<2s / CLS<0.1 / 60fps scrub;
+  animate transform/opacity; respect `prefers-reduced-motion`.
+
+- [ ] **7b · SQLite (FTS5) — decide explicitly.** `/transcripts/search` is already correct +
+  library-wide (in-memory scan, always reads current `words.json`); the ⌘K search UI ships.
+  Per spec §7.2 this is **deferred** (JSON until scale demands). If you do it, prefer the
+  *additive* path: an FTS5 **transcript** index (index on transcript-done + on the word-edit
+  endpoint; the search endpoint queries FTS5 to pick candidate transcripts, then the existing
+  word-scan extracts snippet+timing). **Avoid** migrating the whole atomic JSON **job** store
+  (high-risk, optimization-only, no user-facing change) unless scale truly demands it.
+
+**Done-when (remaining):** Settings rows are real controls (hot or honestly restart-labeled,
+none fake); long lists virtualized without visual regression; an explicit, documented call on
+FTS5. Engine + studio suites + e2e stay green; each screen still pixel-matches the demo.
 
 ## What's verified now
 
