@@ -32,6 +32,10 @@ DEFAULT_PROVIDER = "codex"
 CODEX_BIN = os.environ.get("SPOOL_CODEX_BIN", "codex")
 CODEX_MODEL = os.environ.get("SPOOL_CODEX_MODEL") or None  # None → the CLI's own default
 CODEX_TIMEOUT = int(os.environ.get("SPOOL_CODEX_TIMEOUT", "180"))
+# Moment-finding is extraction, not deep reasoning — default codex to "low" effort so the
+# bridge is fast + cheap (xhigh burns ~10x the tokens for the same JSON). Set
+# SPOOL_CODEX_REASONING="" to fall back to the CLI's configured default.
+CODEX_REASONING = os.environ.get("SPOOL_CODEX_REASONING", "low")
 
 _TRUE = {"1", "true", "yes", "on"}
 
@@ -70,11 +74,13 @@ class CodexProvider:
     egress = True
 
     def __init__(self, *, bin: str | None = None, model: str | None = None,
-                 timeout: int | None = None, cwd: str | None = None):
+                 timeout: int | None = None, cwd: str | None = None,
+                 reasoning: str | None = None):
         self.bin = bin or CODEX_BIN
         self.model = model if model is not None else CODEX_MODEL
         self.timeout = timeout if timeout is not None else CODEX_TIMEOUT
         self.cwd = cwd
+        self.reasoning = CODEX_REASONING if reasoning is None else reasoning
 
     def complete(self, prompt: str, *, system: str | None = None) -> str:
         if shutil.which(self.bin) is None:
@@ -97,6 +103,8 @@ class CodexProvider:
         ]
         if self.model:
             argv += ["-m", self.model]
+        if self.reasoning:
+            argv += ["-c", f"model_reasoning_effort={self.reasoning}"]
         argv += ["-"]
         try:
             proc = subprocess.run(

@@ -69,6 +69,7 @@ def test_codex_builds_read_only_exec_argv(monkeypatch):
     # read-only sandbox so the agent can never touch the filesystem
     assert "--sandbox" in argv and argv[argv.index("--sandbox") + 1] == "read-only"
     assert "--skip-git-repo-check" in argv and "--ephemeral" in argv and "-o" in argv
+    assert "model_reasoning_effort=low" in argv  # cheap-by-default (SPOOL_CODEX_REASONING)
     # prompt goes over stdin (transcripts can be large); system is prepended
     assert "find clips" in captured["kw"]["input"]
     assert "you are a producer" in captured["kw"]["input"]
