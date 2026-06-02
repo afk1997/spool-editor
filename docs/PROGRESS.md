@@ -63,8 +63,10 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
   ASS (opus/karaoke/minimal) via the vendored `ass_captions`; `burn` rasterizes via
   ffmpeg's subtitles filter. Shared ffmpeg plumbing extracted to `clip/_ffmpeg.py`
   (cutter refactored onto it; reframe/exporter will reuse it). 6 tests.
-- [ ] ◻️ **`reframe`** — ROI detection + diar⊕ROI speaker timeline (vendored `roi_motion`)
-  → pan/split/center via `pan_expr`.
+- [ ] 🟡 **`reframe`** — **analysis half done**: `detect_faces` (sample frame + default
+  L/R ROIs) and `speaker_track` (per-ROI ffmpeg motion → vendored `roi_motion` →
+  **diar⊕ROI fusion** — still/off-mic speakers resolved by audio turns + distinct-side
+  assignment). 9 tests. Render half (pan/split/center via `pan_expr`) next.
 - [ ] ◻️ **`moments`** — LLM moment-finding over `words.json` (local Ollama default,
   hosted opt-in per spec §10).
 - [ ] ◻️ **`exporter`** — final mux + platform/loudness preset + brand kit.
@@ -78,7 +80,7 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
 - `pnpm install` → 6 workspace projects, 354 packages, clean.
 - `pnpm typecheck` → 9/9 tasks pass. `pnpm build` → Next.js 16 compiles, static pages generate.
 - `engine/` `.py` files diff byte-identical against the validated trove clone.
-- **engine: 480 tests pass** (exit 0) on Python 3.12 via uv venv — headless trove suite (467) + `clip.cutter` (7) + `clip.captioner` (6).
+- **engine: 489 tests pass** (exit 0) on Python 3.12 via uv venv — headless trove suite (467) + `clip.cutter` (7) + `clip.captioner` (6) + `clip.reframe` analysis (9).
 - **`docker compose up`** builds the multi-stage image and serves `/api/v1/health` from the host — the packaged engine works end to end.
 - **headless serving** (venv): `/api/v1/doctor` reports real tooling — ffmpeg 7.1.1, whisper.cpp 1.5.0, yt-dlp 2026.3.17, VideoToolbox encoders.
 
