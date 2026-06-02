@@ -78,7 +78,7 @@ export default function ProjectScreen() {
               <div className="card" style={{ padding: 16 }}>
                 <div className="eyebrow" style={{ marginBottom: 12 }}>Audio energy</div>
                 <svg width="100%" height="54" viewBox="0 0 400 54" preserveAspectRatio="none">
-                  {Array.from({ length: 80 }).map((_, i) => { const h = 8 + Math.abs(Math.sin(i * 0.6) * Math.cos(i * 0.21)) * 40; return <rect key={i} x={i * 5} y={(54 - h) / 2} width="3" height={h} rx="1.5" fill="var(--accent)" opacity={0.4 + 0.5 * Math.sin(i * 0.3)} />; })}
+                  {Array.from({ length: 80 }).map((_, i) => { const h = Math.round(8 + Math.abs(Math.sin(i * 0.6) * Math.cos(i * 0.21)) * 40); return <rect key={i} x={i * 5} y={Math.round((54 - h) / 2)} width="3" height={h} rx="1.5" fill="var(--accent)" opacity={Math.round((0.4 + 0.5 * Math.sin(i * 0.3)) * 100) / 100} />; })}
                 </svg>
                 <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 6 }}>peaks ≈ moments of high engagement</div>
               </div>
