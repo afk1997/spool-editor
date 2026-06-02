@@ -4,9 +4,10 @@
 > `Spool_Engineering-Spec.md` (§5 roadmap, §6 front-end standards). Status legend:
 > ✅ done & verified · 🟡 in progress · ◻️ not started.
 >
-> **Last updated:** 2026-06-02 · **Phase 0 — ✅ COMPLETE.** Phase 1: the full engine chain
-> (moments → cutter → reframe → captioner → exporter) **and** the `api_v1` clip surface
-> (ClipJobManager + clip_runner + endpoints + client) are ✅ done & green. Next: MCP clip tools.
+> **Last updated:** 2026-06-02 · **Phase 0 — ✅ COMPLETE.** Phase 1 backend **done & green**:
+> the engine chain (moments → cutter → reframe → captioner → exporter), the `api_v1` clip
+> surface (ClipJobManager + clip_runner + endpoints + client), **and** the MCP clip tools +
+> elicitation + `spool://` resources (CLI parity kept). Next: the **Studio UI** (Next.js screens).
 
 ## Roadmap at a glance
 
@@ -23,7 +24,7 @@ graph TD
     end
     subgraph P1["Phase 1 — Core clip loop + own UI (MVP)"]
       C1["Engine: moments · cutter · reframe(diar plus ROI) · captioner · exporter"]:::done
-      C2["MCP: clip tools + elicitation + spool:// resources"]:::todo
+      C2["MCP: clip tools + elicitation + spool:// resources"]:::done
       C3["UI: S0-S5, S7 basic, S8 presets, S10, S11 + Agent panel + Cmd-K"]:::todo
       C4["Port demo design tokens into the Tailwind theme; component library"]:::todo
       C5["e2e: URL to 9:16 clip (Playwright)"]:::todo
@@ -89,7 +90,13 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
   `POST /clips/<id>/{reframe,captions,renders}`, `GET /clip-jobs[?kind,status]` +
   get/cancel/dismiss, `GET /clips/<id>/renders/<rid>/file`. Plus `/capabilities` +
   SSE snapshot + OpenAPI + `TroveClient` methods. 13+10+13+23+13 tests.
-- [ ] ◻️ **MCP clip tools** + elicitation + `spool://` resources.
+- [x] **MCP clip tools** + elicitation + `spool://` resources — extended trove's FastMCP
+  server (`mcp_server.py`) with `find_moments`/`cut_clip`/`reframe_clip`/`caption_clip`/
+  `render_clip`/`render_pipeline`/`list`/`get`/`cancel`/`dismiss_clip_job` (delegate to the
+  client → same API → same engine). `reframe_clip` **elicits** `{aspect,mode}` when omitted
+  (graceful fallback). Resources `spool://clips` + `spool://clips/{job_id}`. CLI⇄MCP parity
+  kept (`cli.py` clip subcommands + `MCP_TO_CLI`). 2 MCP tests (incl. a real elicitation
+  round-trip) + parity test.
 - [ ] ◻️ **Studio screens** (S0–S5, S7 basic, S8 presets, S10, S11) wired to `api_v1`;
   port the demo's design tokens; Agent panel + ⌘K. e2e: URL → 9:16 clip.
 
@@ -98,7 +105,7 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
 - `pnpm install` → 6 workspace projects, 354 packages, clean.
 - `pnpm typecheck` → 9/9 tasks pass. `pnpm build` → Next.js 16 compiles, static pages generate.
 - `engine/` `.py` files diff byte-identical against the validated trove clone.
-- **engine: 594 tests pass** (exit 0) on Python 3.12 via uv venv — headless trove suite (467) + `clip.cutter` (7) + `clip.captioner` (6) + `clip.reframe` (15) + `clip.exporter` (9) + `clip.llm` (16) + `clip.moments` (15) + `clip_jobs` (13) + `clip_runner` (10) + `api_v1` clips (23) + `trove_client` clips (13).
+- **engine: 595 tests pass** (exit 0) on Python 3.12 via uv venv — headless trove suite + `clip.cutter` (7) + `clip.captioner` (6) + `clip.reframe` (15) + `clip.exporter` (9) + `clip.llm` (16) + `clip.moments` (15) + `clip_jobs` (13) + `clip_runner` (10) + `api_v1` clips (23) + `trove_client` clips (13) + MCP clip tools/elicitation (e2e). The whole agent + API + CLI clip surface is wired to one engine + one queue.
 - **`docker compose up`** builds the multi-stage image and serves `/api/v1/health` from the host — the packaged engine works end to end.
 - **headless serving** (venv): `/api/v1/doctor` reports real tooling — ffmpeg 7.1.1, whisper.cpp 1.5.0, yt-dlp 2026.3.17, VideoToolbox encoders.
 
