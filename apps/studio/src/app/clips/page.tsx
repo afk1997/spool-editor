@@ -1,83 +1,57 @@
 "use client";
 
-import Link from "next/link";
-import type { ClipJobView } from "@spool/types";
-import { useEngine, useLive } from "@/lib/engine-context";
-import { Badge, Button, Card, EmptyState, StatusDot, fmtDuration } from "@/components/ui";
+import { useState } from "react";
+import { useSpool } from "@/components/spool/context";
+import { ClipCard } from "@/components/spool/cards";
+import { Btn, Empty, Icon, Seg } from "@/components/spool/ui";
 
-/** S11 — Clips Library. A clip is born from a cut/pipeline job; we group the live clip-job
- *  stream by clip_id and show each clip's latest render (previewable + downloadable) or its
- *  current stage. Click through to the workspace to reframe / caption / export. */
-export default function ClipsLibrary() {
-  const client = useEngine();
-  const { snapshot } = useLive();
+/* S11 Clips Library — 1:1 port of the demo (06). Live clips grouped from the clip-job stream.
+ * Aspect / tag / search filters are real; the "Best (85+)" collection lights up with the
+ * Phase-3 opportunity score (no fabricated scores in Phase 1, so it stays empty until then). */
 
-  const byClip = new Map<string, ClipJobView[]>();
-  for (const job of snapshot?.clips ?? []) {
-    if (!job.clip_id) continue;
-    (byClip.get(job.clip_id) ?? byClip.set(job.clip_id, []).get(job.clip_id)!).push(job);
-  }
-  const clips = [...byClip.entries()].reverse();
+export default function ClipsScreen() {
+  const ctx = useSpool();
+  const [aspect, setAspect] = useState("all");
+  const [coll, setColl] = useState("all");
+  const [tag, setTag] = useState<string | null>(null);
+  const [q, setQ] = useState("");
+  const [sel, setSel] = useState<string[]>([]);
+  const allTags = [...new Set(ctx.clips.flatMap((c) => c.tags || []))];
+  const clips = ctx.clips.filter((c) =>
+    (aspect === "all" || c.aspect === aspect) &&
+    (coll === "all" || (coll === "best" && (c.score ?? 0) >= 85) || coll === "week") &&
+    (!tag || (c.tags || []).includes(tag)) &&
+    (!q || c.title.toLowerCase().includes(q.toLowerCase())));
+  const toggle = (id: string) => setSel((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
 
   return (
-    <div className="mx-auto flex max-w-5xl flex-col gap-6">
-      <header>
-        <h1 className="font-display text-2xl font-semibold tracking-tight">Clips</h1>
-        <p className="mt-1 text-sm text-text-dim">Every clip you&rsquo;ve cut — open one to reframe, caption, and export.</p>
-      </header>
-
+    <div className="mainpad fadein">
+      <div className="row" style={{ marginBottom: 18 }}>
+        <div><div className="eyebrow" style={{ marginBottom: 6 }}>Clips</div><h1 style={{ fontSize: 30 }}>Finished clips</h1></div>
+        <span className="spacer" />
+        {sel.length > 0 && <><span className="chip acc">{sel.length} selected</span><Btn variant="ghost" size="sm" icon="download">Export</Btn><Btn variant="primary" size="sm" icon="send" onClick={() => ctx.nav("publish")}>Publish</Btn></>}
+      </div>
+      <div className="row" style={{ gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <Seg value={coll} onChange={setColl} neutral options={[{ value: "all", label: "All clips" }, { value: "best", label: "Best (85+)" }, { value: "week", label: "This week" }]} />
+        <div className="divider" style={{ width: 1, height: 24, background: "var(--line)" }} />
+        <Seg value={aspect} onChange={setAspect} neutral options={[{ value: "all", label: "All" }, { value: "9:16", label: "9:16" }, { value: "1:1", label: "1:1" }, { value: "16:9", label: "16:9" }]} />
+        <div className="spacer" />
+        <div className="cmdk" style={{ maxWidth: 220, flex: "0 1 220px" }}><Icon name="search" size={15} /><input value={q} onChange={(e) => setQ(e.target.value)} style={{ background: "transparent", border: 0, outline: "none", color: "var(--text)", flex: 1, fontFamily: "inherit" }} placeholder="Search clips…" /></div>
+      </div>
+      <div className="kbar" style={{ marginBottom: 20 }}>
+        <button className={"chip" + (tag === null ? " solid" : "")} style={{ cursor: "pointer", height: 28 }} onClick={() => setTag(null)}>All tags</button>
+        {allTags.map((t) => <button key={t} className={"chip" + (tag === t ? " solid" : "")} style={{ cursor: "pointer", height: 28 }} onClick={() => setTag(tag === t ? null : t)}><Icon name="pin" size={12} />{t}</button>)}
+      </div>
       {clips.length === 0 ? (
-        <EmptyState
-          title="No clips yet"
-          hint="Find moments in a source and cut one, or run a quick render."
-          action={
-            <Link href="/library">
-              <Button>Go to Library</Button>
-            </Link>
-          }
-        />
+        <Empty icon="scissors" title="No clips match these filters" action={<Btn variant="ghost" onClick={() => { setColl("all"); setAspect("all"); setTag(null); setQ(""); }}>Clear filters</Btn>} />
       ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {clips.map(([clipId, jobs]) => {
-            const cut = jobs.find((j) => j.kind === "cut") ?? jobs.find((j) => j.kind === "pipeline");
-            const win = cut?.result;
-            const lastRender = jobs
-              .filter((j) => (j.kind === "export" || j.kind === "pipeline") && j.status === "done" && j.result.render_id)
-              .at(-1);
-            const active = jobs.find((j) => j.status === "running" || j.status === "queued");
-            const stage = active ? `${active.kind}…` : lastRender ? "rendered" : "ready";
-
-            return (
-              <Card key={clipId} className="flex flex-col overflow-hidden">
-                <Link href={`/clips/${clipId}`} className="block aspect-video bg-black/90">
-                  {lastRender ? (
-                    <video
-                      src={client.renderFileUrl(clipId, lastRender.result.render_id!)}
-                      preload="metadata"
-                      className="h-full w-full object-contain"
-                    />
-                  ) : (
-                    <div className="grid h-full place-items-center text-sm text-text-faint">
-                      {active ? `${active.kind}…` : "not rendered"}
-                    </div>
-                  )}
-                </Link>
-                <div className="flex items-center gap-2 p-3">
-                  <StatusDot status={active ? active.status : lastRender ? "done" : "ready"} pulse={!!active} />
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate font-mono text-xs text-text">{clipId}</p>
-                    <p className="text-xs text-text-dim">
-                      {win?.start != null && win?.end != null ? fmtDuration(win.end - win.start) : "—"} · {stage}
-                    </p>
-                  </div>
-                  {lastRender && <Badge tone="ok">{lastRender.result.preset}</Badge>}
-                  <Link href={`/clips/${clipId}`} className="text-sm font-medium text-accent hover:underline">
-                    Open
-                  </Link>
-                </div>
-              </Card>
-            );
-          })}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(190px,1fr))", gap: 16 }}>
+          {clips.map((c) => (
+            <div key={c.id} style={{ position: "relative" }}>
+              <div onClick={() => toggle(c.id)} className="checkbox" style={{ position: "absolute", top: 10, left: 10, zIndex: 5, background: sel.includes(c.id) ? "var(--accent)" : "rgba(0,0,0,0.5)", borderColor: sel.includes(c.id) ? "transparent" : "var(--line-str)", color: "var(--accent-ink)", cursor: "pointer" }}>{sel.includes(c.id) && <Icon name="check" size={12} />}</div>
+              <ClipCard c={c} />
+            </div>
+          ))}
         </div>
       )}
     </div>

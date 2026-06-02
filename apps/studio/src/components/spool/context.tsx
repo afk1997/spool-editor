@@ -24,6 +24,8 @@ export interface SpoolClip {
 }
 export interface SpoolJob {
   id: string; type: string; label: string; src: string; status: string; prog: number; stage: string; eta: string; elapsed: string; err?: boolean;
+  /** which engine surface owns this job — routes queue cancel/dismiss/retry actions */
+  domain: "download" | "transcribe" | "clip";
 }
 export interface SpoolDep { id: string; name: string; note: string; status: string; ver: string }
 export interface SpoolDownload { id: string; title: string; src: string; prog: number; status: string; size: string; speed: string; eta: string; err?: string | null }
@@ -150,23 +152,22 @@ function mapJobs(snap: EventsSnapshot | null): SpoolJob[] {
   if (!snap) return [];
   const jobs: SpoolJob[] = [];
   for (const j of snap.jobs) {
-    if (j.status === "done" || j.status === "error" || j.status === "cancelled") {
-      if (j.status === "done")
-        jobs.push({ id: j.id, type: "download", label: j.title || j.url, src: j.id, status: "done", prog: 100, stage: "complete", eta: "—", elapsed: j.human?.elapsed || "—" });
-      else
-        jobs.push({ id: j.id, type: "download", label: j.title || j.url, src: j.id, status: "failed", prog: j.progress_pct, stage: j.error_message || "error", eta: "—", elapsed: j.human?.elapsed || "—", err: true });
-    } else
-      jobs.push({ id: j.id, type: "download", label: j.title || j.url, src: j.id, status: j.status === "downloading" ? "running" : "queued", prog: j.progress_pct, stage: j.human?.summary || "downloading", eta: j.human?.eta || "—", elapsed: j.human?.elapsed || "—" });
+    if (j.status === "done")
+      jobs.push({ id: j.id, type: "download", domain: "download", label: j.title || j.url, src: j.id, status: "done", prog: 100, stage: "complete", eta: "—", elapsed: j.human?.elapsed || "—" });
+    else if (j.status === "error" || j.status === "cancelled")
+      jobs.push({ id: j.id, type: "download", domain: "download", label: j.title || j.url, src: j.id, status: "failed", prog: j.progress_pct, stage: j.error_message || "error", eta: "—", elapsed: j.human?.elapsed || "—", err: true });
+    else
+      jobs.push({ id: j.id, type: "download", domain: "download", label: j.title || j.url, src: j.id, status: j.status === "downloading" ? "running" : "queued", prog: j.progress_pct, stage: j.human?.summary || "downloading", eta: j.human?.eta || "—", elapsed: j.human?.elapsed || "—" });
   }
   for (const t of snap.transcripts)
     if (t.status === "running" || t.status === "queued")
-      jobs.push({ id: t.id, type: "transcribe", label: t.human?.summary || "transcribe", src: t.parent_job_id, status: t.status === "running" ? "running" : "queued", prog: t.progress_pct, stage: "whisper", eta: "—", elapsed: t.human?.elapsed || "—" });
+      jobs.push({ id: t.id, type: "transcribe", domain: "transcribe", label: t.human?.summary || "transcribe", src: t.parent_job_id, status: t.status === "running" ? "running" : "queued", prog: t.progress_pct, stage: "whisper · on-device", eta: "—", elapsed: t.human?.elapsed || "—" });
   for (const c of snap.clips) {
     if (c.status === "done" && c.kind === "moments") continue;
-    const type = c.kind === "moments" ? "transcribe" : c.kind === "export" || c.kind === "pipeline" ? "render" : "render";
+    const type = c.kind === "moments" ? "transcribe" : "render";
     const st = c.status === "running" ? "running" : c.status === "queued" ? "queued" : c.status === "done" ? "done" : c.status === "error" ? "failed" : c.status;
     if (st === "done" || st === "failed" || st === "running" || st === "queued")
-      jobs.push({ id: c.id, type, label: `${cap(c.kind)} · ${(c.clip_id || c.source_id || "").slice(0, 8)}`, src: c.source_id || "", status: st, prog: c.progress_pct, stage: c.stage || c.error_message || c.kind, eta: "—", elapsed: c.human?.elapsed || "—", err: c.status === "error" });
+      jobs.push({ id: c.id, type, domain: "clip", label: `${cap(c.kind)} · ${(c.clip_id || c.source_id || "").slice(0, 8)}`, src: c.source_id || "", status: st, prog: c.progress_pct, stage: c.stage || c.error_message || c.kind, eta: "—", elapsed: c.human?.elapsed || "—", err: c.status === "error" });
   }
   return jobs;
 }
