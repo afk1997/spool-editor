@@ -7,7 +7,7 @@ from runner import build_info_argv, build_download_argv
 def test_info_argv_dash_dash_separator():
     argv = build_info_argv("https://example.com/video")
     assert argv[-2:] == ["--", "https://example.com/video"]
-    assert argv[0] == "yt-dlp"
+    assert argv[0].endswith("yt-dlp")  # bare name or a resolved venv path (_ytdlp_bin)
     assert "--no-playlist" in argv
     assert "-j" in argv
 

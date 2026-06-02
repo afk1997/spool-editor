@@ -1,11 +1,32 @@
 from __future__ import annotations
 import os
 import json
+import shutil
 import subprocess
+import sys
 import glob
 import threading
 import time
 from dataclasses import dataclass, field
+
+
+def _ytdlp_bin() -> str:
+    """Resolve the yt-dlp binary to invoke.
+
+    Order: an explicit ``TROVE_YTDLP_BIN`` override → the yt-dlp installed next to the
+    running interpreter (the project venv — the *pinned, current* yt-dlp the spec requires;
+    YouTube routinely breaks on stale system copies) → whatever ``yt-dlp`` is on PATH.
+
+    This avoids the footgun where the engine silently shells out to an old global
+    ``/usr/local/bin/yt-dlp`` while a fresh one sits in the venv.
+    """
+    override = os.environ.get("TROVE_YTDLP_BIN", "").strip()
+    if override:
+        return override
+    candidate = os.path.join(os.path.dirname(sys.executable or ""), "yt-dlp")
+    if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return candidate
+    return shutil.which("yt-dlp") or "yt-dlp"
 
 
 def _cookie_args() -> list[str]:
@@ -24,7 +45,7 @@ def build_info_argv(url: str) -> list[str]:
     """Build argv for `yt-dlp -j` (info dump). Always uses `--` separator."""
     _check_url_shape(url)
     return [
-        "yt-dlp",
+        _ytdlp_bin(),
         "--no-playlist",
         "-j",
         *_cookie_args(),
@@ -48,7 +69,7 @@ def build_download_argv(
         _cf = 4
     concurrent_fragments = max(1, min(32, _cf))
     argv: list[str] = [
-        "yt-dlp",
+        _ytdlp_bin(),
         "--no-playlist",
         "--concurrent-fragments", str(concurrent_fragments),
         "--retries", "5",
