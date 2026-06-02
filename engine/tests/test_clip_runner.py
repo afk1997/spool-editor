@@ -212,6 +212,24 @@ def test_caption_target_slices_window_and_burns_onto_reframed(runner, monkeypatc
     assert job.result["captioned_path"] == str(d / "captioned.mp4")
 
 
+def test_caption_forwards_style_overrides(runner, monkeypatch):
+    """S8 fine-styling overrides reach captioner.generate (mapped to the ASS there)."""
+    _words_file(runner)
+    _seed_clip(runner, files=("clip.mp4",))
+    seen = {}
+
+    def fake_generate(words_path, **kw):
+        seen["gen"] = kw
+        Path(kw["out_ass_path"]).write_text("[ass]")
+        return kw["out_ass_path"]
+
+    _patch(monkeypatch, "captioner", "generate", fake_generate)
+    _patch(monkeypatch, "captioner", "burn", lambda v, a, out, **kw: (Path(out).write_bytes(b"C"), out)[-1])
+    ov = {"size": 90, "fill": "#ffffff", "highlight": "#FFE94D", "position": 30, "words": 4, "allcaps": True}
+    runner.caption_target(clip_id="clipA", params={"style": "opus", "overrides": ov})(_job("caption", clip_id="clipA"))
+    assert seen["gen"]["overrides"] == ov
+
+
 # ---- export ----------------------------------------------------------
 
 def test_export_target_prefers_captioned_and_writes_render(runner, monkeypatch):

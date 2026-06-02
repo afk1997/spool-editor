@@ -23,6 +23,41 @@ from . import _ffmpeg
 _ASS_SCRIPT = os.path.join(os.path.dirname(__file__), "backhalf", "ass_captions.py")
 _VALID_STYLES = ("opus", "karaoke", "minimal")
 BURN_TIMEOUT = 3600
+_PLAY_H = 1920  # matches ass_captions PlayResY — for the position→MarginV mapping
+
+
+def _hex_to_ass(hexcolor: str) -> str:
+    """'#RRGGBB' (or '#RGB') → ASS '&H00BBGGRR&'."""
+    h = hexcolor.lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    r, g, b = h[0:2], h[2:4], h[4:6]
+    return f"&H00{b}{g}{r}&".upper()
+
+
+def _ass_overrides(overrides: dict) -> dict:
+    """Map S8 fine-styling (UI units) → ass_captions preset keys."""
+    ov: dict = {}
+    if overrides.get("size") is not None:
+        ov["size"] = int(overrides["size"])
+    if overrides.get("outline") is not None:
+        ov["outline"] = int(overrides["outline"])
+    if overrides.get("words") is not None:
+        ov["chunk"] = max(1, int(overrides["words"]))
+    if overrides.get("font"):
+        ov["font"] = str(overrides["font"])
+    if overrides.get("weight") is not None:
+        ov["bold"] = 1 if int(overrides["weight"]) >= 600 else 0
+    if "allcaps" in overrides:
+        ov["allcaps"] = bool(overrides["allcaps"])
+    if overrides.get("fill"):
+        ov["primary"] = _hex_to_ass(str(overrides["fill"]))
+    if "highlight" in overrides:
+        hv = overrides["highlight"]
+        ov["highlight"] = _hex_to_ass(str(hv)) if hv else None
+    if overrides.get("position") is not None:
+        ov["marginv"] = max(0, min(_PLAY_H, round(float(overrides["position"]) / 100 * _PLAY_H)))
+    return ov
 
 
 def generate(
@@ -31,6 +66,7 @@ def generate(
     clip_start: float,
     clip_end: float,
     style: str = "opus",
+    overrides: dict | None = None,
     out_ass_path: str,
 ) -> str:
     """Slice ``words.json`` to ``[clip_start, clip_end]`` (re-based to 0) and write a
@@ -74,10 +110,11 @@ def generate(
     try:
         with os.fdopen(tmp_fd, "w") as f:
             json.dump({"segments": [{"words": sliced}]}, f)
-        proc = subprocess.run(
-            [sys.executable, _ASS_SCRIPT, tmp_path, out_ass_path, style],
-            capture_output=True, text=True, timeout=120,
-        )
+        argv = [sys.executable, _ASS_SCRIPT, tmp_path, out_ass_path, style]
+        ass_ov = _ass_overrides(overrides) if overrides else {}
+        if ass_ov:
+            argv.append(json.dumps(ass_ov))
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
         if proc.returncode != 0:
             raise RuntimeError(
                 f"ass generation failed (rc={proc.returncode}): {proc.stderr.strip()[-300:]}"

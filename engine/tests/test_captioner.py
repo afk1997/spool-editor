@@ -81,6 +81,32 @@ def test_generate_supports_all_presets(tmp_path):
         assert "[Events]" in out.read_text()
 
 
+def test_generate_applies_style_overrides(tmp_path):
+    """S8 fine styling maps to the real ASS: size/outline/fill/highlight/position/allcaps."""
+    words = _write_words(tmp_path)
+    out = tmp_path / "ov.ass"
+    captioner.generate(
+        words, clip_start=10.0, clip_end=12.0, style="opus", out_ass_path=str(out),
+        overrides={"size": 120, "outline": 10, "words": 2, "fill": "#ff0000",
+                   "highlight": "#00ff00", "position": 25, "allcaps": True},
+    )
+    content = out.read_text()
+    assert "Default,Arial Black,120," in content   # size override in the style line
+    assert ",1,10,3,2," in content                 # BorderStyle,Outline=10,Shadow,Alignment
+    assert "&H000000FF&" in content                # fill #ff0000 → ASS BBGGRR primary
+    assert "&H0000FF00&" in content                # active-word highlight #00ff00
+    assert ",60,60,480,1" in content               # position 25% → MarginV 480 of 1920
+    assert "HELLO" in content                       # allcaps uppercased the word text
+
+
+def test_generate_overrides_can_disable_highlight(tmp_path):
+    words = _write_words(tmp_path)
+    out = tmp_path / "nohl.ass"
+    captioner.generate(words, clip_start=10.0, clip_end=12.0, style="opus", out_ass_path=str(out),
+                       overrides={"highlight": None})
+    assert "&H0000FFFF&" not in out.read_text()    # opus default yellow highlight removed
+
+
 # ---- burn ----------------------------------------------------------------
 
 class _FakePopen:

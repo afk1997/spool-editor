@@ -199,7 +199,8 @@ class ClipRunner:
             raise ValueError(f"clip {clip_id!r} has no source transcript to caption from")
         ass = str(d / "captions.ass")
         captioner.generate(words_path, clip_start=float(meta["start"]), clip_end=float(meta["end"]),
-                           style=params.get("style", "opus"), out_ass_path=ass)
+                           style=params.get("style", "opus"), overrides=params.get("overrides"),
+                           out_ass_path=ass)
         video_in = self._stage_input(d, ("reframed.mp4", "clip.mp4"))
         out = str(d / "captioned.mp4")
         captioner.burn(video_in, ass, out, **self._hooks(job))

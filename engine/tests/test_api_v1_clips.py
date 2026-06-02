@@ -227,6 +227,33 @@ def test_caption_400_bad_style(client):
     assert c.post("/api/v1/clips/clipA/captions", json={"style": "neon"}).status_code == 400
 
 
+def test_caption_accepts_style_overrides(client):
+    """S8 sends fine-styling overrides; they reach the caption job params (clamped/validated)."""
+    app, c = client
+    _seed_source(app)
+    _seed_clip(app, files=("clip.mp4",))
+    body = {"style": "opus", "overrides": {"size": 90, "outline": 6, "fill": "#ffffff",
+                                           "highlight": "#FFE94D", "position": 30, "words": 4, "allcaps": True}}
+    r = c.post("/api/v1/clips/clipA/captions", json=body)
+    assert r.status_code == 201
+    p = c.get(f"/api/v1/clip-jobs/{r.get_json()['id']}").get_json()["params"]
+    assert p["overrides"]["size"] == 90 and p["overrides"]["fill"] == "#ffffff"
+    assert p["overrides"]["words"] == 4 and p["overrides"]["allcaps"] is True
+    _await(c, r.get_json()["id"])
+
+
+@pytest.mark.parametrize("body", [
+    {"overrides": "nope"},
+    {"overrides": {"size": "huge"}},
+    {"overrides": {"fill": "nothex"}},
+])
+def test_caption_400_on_bad_overrides(client, body):
+    app, c = client
+    _seed_source(app)
+    _seed_clip(app, files=("clip.mp4",))
+    assert c.post("/api/v1/clips/clipA/captions", json=body).status_code == 400
+
+
 # ---- renders (export) ------------------------------------------------
 
 def test_render_export_creates_job_and_file(client):

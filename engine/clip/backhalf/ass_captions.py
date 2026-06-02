@@ -13,6 +13,7 @@ import json, sys
 WHISPER_JSON = sys.argv[1]
 OUT_ASS = sys.argv[2]
 STYLE = sys.argv[3] if len(sys.argv) > 3 else "opus"
+OVERRIDES = json.loads(sys.argv[4]) if len(sys.argv) > 4 else {}
 
 PLAY_W, PLAY_H = 1080, 1920
 
@@ -21,9 +22,13 @@ PRESETS = {
     "karaoke":  dict(font="Arial Black", size=110, chunk=4, highlight="&H0000FF00&", outline=6, shadow=2),
     "minimal":  dict(font="Helvetica",   size=70,  chunk=6, highlight=None,          outline=4, shadow=1),
 }
-P = PRESETS.get(STYLE, PRESETS["opus"])
+P = dict(PRESETS.get(STYLE, PRESETS["opus"]))
+P.update(OVERRIDES)  # Spool: Caption Studio fine-styling overrides (size/outline/fill/marginv/…)
 WHITE = "&H00FFFFFF&"
 OUTLINE = "&H00000000&"
+PRIMARY = P.get("primary", WHITE)
+ALLCAPS = bool(P.get("allcaps"))
+def _disp(t): return t.upper() if ALLCAPS else t
 
 def fmt_time(t):
     h = int(t // 3600); m = int((t % 3600) // 60); s = t - h*3600 - m*60
@@ -46,7 +51,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{P["font"]},{P["size"]},{WHITE},&H000000FF,{OUTLINE},&H00000000,1,0,0,0,100,100,0,0,1,{P["outline"]},{P["shadow"]},2,60,60,280,1
+Style: Default,{P["font"]},{P["size"]},{PRIMARY},&H000000FF,{OUTLINE},&H00000000,{P.get("bold", 1)},0,0,0,100,100,0,0,1,{P["outline"]},{P["shadow"]},2,60,60,{P.get("marginv", 280)},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -63,12 +68,12 @@ for chunk in chunks:
             parts = []
             for j, ww in enumerate(chunk):
                 if j == i:
-                    parts.append(f"{{\\c{P['highlight']}}}{ww['text']}{{\\c{WHITE}}}")
+                    parts.append(f"{{\\c{P['highlight']}}}{_disp(ww['text'])}{{\\c{PRIMARY}}}")
                 else:
-                    parts.append(ww["text"])
+                    parts.append(_disp(ww["text"]))
             line = " ".join(parts)
         else:
-            line = " ".join(ww["text"] for ww in chunk)
+            line = " ".join(_disp(ww["text"]) for ww in chunk)
         events.append(f"Dialogue: 0,{fmt_time(seg_start)},{fmt_time(seg_end)},Default,,0,0,0,,{line}")
 
 with open(OUT_ASS, "w") as f:

@@ -385,6 +385,41 @@ _CAPTION_STYLES = ("opus", "karaoke", "minimal")
 _CLIP_ARTIFACTS = {"clip": "clip.mp4", "reframed": "reframed.mp4", "captioned": "captioned.mp4"}
 
 
+def _is_hex_color(v) -> bool:
+    if not isinstance(v, str):
+        return False
+    h = v.lstrip("#")
+    return len(h) in (3, 6) and all(ch in "0123456789abcdefABCDEF" for ch in h)
+
+
+def _validate_caption_overrides(ov):
+    """Clamp/validate S8 fine-styling overrides; return the clean dict, or None → 400."""
+    if not isinstance(ov, dict):
+        return None
+    clean: dict = {}
+    for key, lo, hi in (("size", 20, 200), ("outline", 0, 20), ("position", 0, 100),
+                        ("words", 1, 12), ("weight", 100, 900)):
+        if ov.get(key) is not None:
+            try:
+                clean[key] = max(lo, min(hi, int(float(ov[key]))))
+            except (TypeError, ValueError):
+                return None
+    for key in ("fill", "highlight"):
+        if key in ov:
+            v = ov[key]
+            if v is None:
+                clean[key] = None
+            elif _is_hex_color(v):
+                clean[key] = v
+            else:
+                return None
+    if "allcaps" in ov:
+        clean["allcaps"] = bool(ov["allcaps"])
+    if ov.get("font"):
+        clean["font"] = str(ov["font"])[:60]
+    return clean
+
+
 def _download_dir() -> Path:
     return current_app.extensions["trove.download_dir"]
 
@@ -1487,10 +1522,16 @@ def caption_clip(clip_id):
     _, words_path = _cr().source_paths(meta.get("source_id", ""))
     if not words_path or not os.path.exists(words_path):
         return jsonify({"error": "no_transcript"}), 409
-    style = str((request.get_json(silent=True) or {}).get("style") or "opus")
+    data = request.get_json(silent=True) or {}
+    style = str(data.get("style") or "opus")
     if style not in _CAPTION_STYLES:
         return jsonify({"error": "bad_style"}), 400
     params = {"style": style}
+    if data.get("overrides") is not None:
+        clean = _validate_caption_overrides(data["overrides"])
+        if clean is None:
+            return jsonify({"error": "bad_overrides"}), 400
+        params["overrides"] = clean
     jid = _cm().submit(kind="caption", clip_id=clip_id, params=params,
                        target=_cr().caption_target(clip_id=clip_id, params=params))
     return jsonify(_clip_job_view(_cm().get(jid))), 201
@@ -1768,6 +1809,7 @@ _OPENAPI_DOC = {
         "/clips/{clip_id}/captions":    {"post": {"summary": "Generate + burn captions (opus/karaoke/minimal)"}},
         "/clips/{clip_id}/renders":     {"post": {"summary": "Export the clip to a platform preset"}},
         "/clips/{clip_id}/renders/{render_id}/file": {"get": {"summary": "Download a produced render .mp4"}},
+        "/clips/{clip_id}/artifacts/{name}": {"get": {"summary": "Stream a clip's intermediate artifact (cut/reframed/captioned mp4)"}},
         "/clip-jobs":          {"get":  {"summary": "List clip/render jobs (the render queue)",
                                           "parameters": [
                                               {"name": "kind", "in": "query",
