@@ -1,0 +1,13 @@
+import { chromium } from "playwright";
+const sid = process.argv[2] || "c2fa2a9441";
+const browser = await chromium.launch({ channel: "chrome" });
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+const errs = []; page.on("pageerror", e => errs.push("pageerror: " + e.message));
+await page.goto("http://localhost:3000/sources/" + sid, { waitUntil: "domcontentloaded" });
+await page.waitForTimeout(3500);
+await page.screenshot({ path: "/tmp/studio_project.png" });
+await page.getByText("Transcript", { exact: true }).click({ force: true });
+await page.waitForTimeout(1200);
+await page.screenshot({ path: "/tmp/studio_transcript.png" });
+console.log(errs.length ? "ERRORS:\n"+errs.join("\n") : "no client errors");
+await browser.close();
