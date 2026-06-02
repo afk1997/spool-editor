@@ -35,6 +35,15 @@ class _FakeCM:
         self.progress.append((pct, stage))
 
 
+class _FakeSettings:
+    """Stand-in for settings.SettingsStore — only .get() is read by the runner."""
+    def __init__(self, **vals):
+        self._v = vals
+
+    def get(self):
+        return dict(self._v)
+
+
 @pytest.fixture()
 def runner(tmp_path):
     dl = tmp_path / "downloads"
@@ -316,6 +325,34 @@ def test_export_target_falls_back_to_cut_when_no_caption(runner, monkeypatch):
     job = _job("export", clip_id="clipA")
     runner.export_target(clip_id="clipA", render_id="r", params={})(job)
     assert seen["clip_path"] == str(runner.clip_dir("clipA") / "clip.mp4")
+
+
+def test_export_reads_settings_defaults_when_params_omit_them(tmp_path, monkeypatch):
+    """S14: the studio's General "output defaults" (fast/quality + preset) apply *hot* — the
+    runner reads them from the settings store whenever a render leaves them unset. An explicit
+    param always wins; with no store, the hardcoded fast=True/tiktok defaults still hold."""
+    dl = tmp_path / "downloads"
+    dl.mkdir()
+    (dl / "src1.mp4").write_bytes(b"MEDIA")
+    jm = _FakeJM({"src1": str(dl / "src1.mp4")})
+    r = cr.ClipRunner(download_dir=dl, job_manager=jm, clip_manager=_FakeCM(),
+                      settings_store=_FakeSettings(fast_default=False, default_preset="shorts"))
+    _seed_clip(r, files=("clip.mp4", "captioned.mp4"))
+    seen = {}
+    _patch(monkeypatch, "exporter", "export",
+           lambda cp, **kw: (seen.update(kw=kw), Path(kw["out_path"]).parent.mkdir(parents=True, exist_ok=True),
+                             Path(kw["out_path"]).write_bytes(b"O"), kw["out_path"])[-1])
+
+    # params omit fast + preset → the stored defaults are used
+    r.export_target(clip_id="clipA", render_id="r1", params={})(_job("export", clip_id="clipA"))
+    assert seen["kw"]["fast"] is False
+    assert seen["kw"]["preset"] == "shorts"
+
+    # explicit params override the stored defaults
+    seen.clear()
+    r.export_target(clip_id="clipA", render_id="r2", params={"fast": True, "preset": "reels"})(_job("export", clip_id="clipA"))
+    assert seen["kw"]["fast"] is True
+    assert seen["kw"]["preset"] == "reels"
 
 
 # ---- pipeline --------------------------------------------------------

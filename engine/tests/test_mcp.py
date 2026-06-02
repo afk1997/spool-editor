@@ -237,3 +237,29 @@ def test_mcp_reframe_elicits_missing_aspect(tmp_path):
         fired, data = asyncio.run(_drive_elicit(port))
     assert fired == 1, "server should have elicited the aspect/mode"
     assert data.get("error") == "clip_not_found"  # elicited params reached the backend
+
+
+# ---- MCP transport resolution (S14: the Settings "MCP transport" control) ----
+
+def test_resolve_transport_prefers_env_then_settings_then_stdio():
+    """The MCP server boots with the transport the user set in Settings (persisted in the
+    engine's settings store, read here over HTTP) — env override wins, and anything invalid
+    or unreachable degrades to stdio (the desktop-client default), never a crash."""
+    from mcp_server import _resolve_transport
+
+    # explicit, valid env var wins over the stored value
+    assert _resolve_transport({"SPOOL_MCP_TRANSPORT": "sse"},
+                              lambda: {"mcp_transport": "stdio"}) == "sse"
+    # invalid env value → fall through to the settings store
+    assert _resolve_transport({"SPOOL_MCP_TRANSPORT": "telepathy"},
+                              lambda: {"mcp_transport": "streamable-http"}) == "streamable-http"
+    # no env → the stored value
+    assert _resolve_transport({}, lambda: {"mcp_transport": "sse"}) == "sse"
+    # store unreachable (engine down at MCP boot) → stdio
+    def _boom():
+        raise RuntimeError("engine down")
+    assert _resolve_transport({}, _boom) == "stdio"
+    # stored value isn't a real FastMCP transport → stdio
+    assert _resolve_transport({}, lambda: {"mcp_transport": "carrier-pigeon"}) == "stdio"
+    # nothing set anywhere → stdio
+    assert _resolve_transport({}, lambda: {}) == "stdio"

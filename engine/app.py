@@ -14,6 +14,7 @@ import transcriber
 import transcript_io
 import clip_jobs
 import brand_kits
+import settings as settings_store_mod
 import clip_runner
 import time as _time
 from util import sanitize_filename
@@ -56,8 +57,19 @@ def create_app() -> Flask:
     # the env-var-aware resolver only if the module global was cleared.
     download_dir = DOWNLOAD_DIR if DOWNLOAD_DIR is not None else _resolve_download_dir()
     download_dir.mkdir(parents=True, exist_ok=True)
+
+    # Settings store (demo 07 / spec §5 P2 "config from the UI"). Built before the job pools
+    # so a UI-written concurrency takes effect at boot: a persisted override wins over the
+    # env-var default, which still applies when the user never set one ("applies on restart").
+    # The fast/preset/aspect defaults are read hot per-render by the ClipRunner.
+    settings_store = settings_store_mod.SettingsStore(download_dir / "settings.json")
+    _settings_ov = settings_store.overrides()
+    effective_max_workers = int(_settings_ov.get("max_workers", MAX_WORKERS))
+    effective_clip_workers = int(_settings_ov.get("clip_workers", os.environ.get("TROVE_CLIP_WORKERS", "2")))
+    app.extensions["trove.settings"] = settings_store
+
     job_manager = JobManager(
-        max_workers=MAX_WORKERS,
+        max_workers=effective_max_workers,
         ttl_seconds=JOB_TTL,
         store_path=download_dir / "jobs.json",
     )
@@ -103,7 +115,7 @@ def create_app() -> Flask:
     # holds the orchestration; the manager runs it. Both reachable from the v1 blueprint
     # and (later) the MCP server, so manual + agent mode drive the same engine + queue.
     clip_manager = clip_jobs.ClipJobManager(
-        max_workers=int(os.environ.get("TROVE_CLIP_WORKERS", "2")),
+        max_workers=effective_clip_workers,
         store_path=download_dir / "clip_jobs.json",
     )
     app.extensions["trove.clips"] = clip_manager
@@ -111,6 +123,7 @@ def create_app() -> Flask:
         download_dir=download_dir,
         job_manager=job_manager,
         clip_manager=clip_manager,
+        settings_store=settings_store,
     )
     # Brand kits — persisted reusable looks applied across a project's clips (spec §5 P2).
     app.extensions["trove.brand_kits"] = brand_kits.BrandKitStore(download_dir / "brand_kits.json")

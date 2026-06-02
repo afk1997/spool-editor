@@ -375,6 +375,10 @@ def _bk():
     return current_app.extensions["trove.brand_kits"]
 
 
+def _settings():
+    return current_app.extensions["trove.settings"]
+
+
 def _actions():
     return current_app.extensions["trove.actions"]
 
@@ -444,6 +448,40 @@ def _validate_brand_kit(data, *, require_name: bool):
         if data.get(key) is not None and not isinstance(data[key], str):
             return bad
     return None
+
+
+# MCP server transports we can actually honor at boot (mcp_server.main → FastMCP.run, whose
+# transport is Literal['stdio','sse','streamable-http']). stdio = the desktop-client default;
+# sse / streamable-http = headless / self-host.
+_MCP_TRANSPORTS = ("stdio", "sse", "streamable-http")
+
+
+def _validate_settings(data):
+    """Validate/clamp a ``PATCH /settings`` body → ``(clean_dict, None)`` on success, or
+    ``(None, error_response)`` on a bad value. Unknown keys are dropped (the store also
+    whitelists). Concurrency is clamped (like caption overrides); enums + booleans error
+    rather than silently coerce (``bool("false")`` is ``True`` — a footgun)."""
+    bad = (jsonify({"error": "bad_settings"}), 400)
+    if not isinstance(data, dict):
+        return None, bad
+    clean: dict = {}
+    for key, lo, hi in (("clip_workers", 1, 16), ("max_workers", 1, 16)):
+        if data.get(key) is not None:
+            try:
+                clean[key] = max(lo, min(hi, int(data[key])))
+            except (TypeError, ValueError):
+                return None, bad
+    for key, allowed in (("default_preset", _CLIP_PRESETS),
+                         ("mcp_transport", _MCP_TRANSPORTS)):
+        if key in data:
+            if data[key] not in allowed:
+                return None, bad
+            clean[key] = data[key]
+    if "fast_default" in data:
+        if not isinstance(data["fast_default"], bool):
+            return None, bad
+        clean["fast_default"] = data["fast_default"]
+    return clean, None
 
 
 def _download_dir() -> Path:
@@ -1758,6 +1796,27 @@ def delete_brand_kit(kit_id):
     return ("", 204)
 
 
+# ---- settings (S14): writable engine config surfaced by the demo's Settings screen (07) ----
+
+@api_v1_bp.get("/settings")
+@token_required
+def get_settings():
+    """Every writable key, defaults merged with the user's overrides (demo 07)."""
+    return jsonify(_settings().get())
+
+
+@api_v1_bp.patch("/settings")
+@token_required
+def patch_settings():
+    """Persist a partial settings change. fast/preset/aspect apply immediately (read per
+    render); concurrency + MCP transport apply on the next restart."""
+    data = request.get_json(silent=True) or {}
+    clean, err = _validate_settings(data)
+    if err:
+        return err
+    return jsonify(_settings().update(clean))
+
+
 @api_v1_bp.post("/agent")
 @token_required
 def agent_message():
@@ -1915,6 +1974,8 @@ _OPENAPI_DOC = {
         "/clips/{clip_id}/artifacts/{name}": {"get": {"summary": "Stream a clip's intermediate artifact (cut/reframed/captioned mp4)"}},
         "/brand-kits":          {"get": {"summary": "List brand kits"}, "post": {"summary": "Create a brand kit"}},
         "/brand-kits/{kit_id}": {"patch": {"summary": "Update a brand kit"}, "delete": {"summary": "Delete a brand kit"}},
+        "/settings":            {"get":   {"summary": "Read writable engine config (fast/preset/aspect defaults, concurrency, MCP transport)"},
+                                 "patch": {"summary": "Update engine config (fast/preset/aspect apply immediately; concurrency + MCP transport apply on restart)"}},
         "/clip-jobs":          {"get":  {"summary": "List clip/render jobs (the render queue)",
                                           "parameters": [
                                               {"name": "kind", "in": "query",

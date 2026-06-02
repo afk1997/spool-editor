@@ -515,12 +515,34 @@ def _build_server():
     return mcp
 
 
+# The transports FastMCP.run() actually accepts (Literal['stdio','sse','streamable-http']).
+_VALID_TRANSPORTS = ("stdio", "sse", "streamable-http")
+
+
+def _resolve_transport(env, settings_getter) -> str:
+    """Which transport to boot with (the Settings "MCP transport" control, spec §5 P2).
+
+    Order: an explicit ``SPOOL_MCP_TRANSPORT`` env var → the engine's persisted setting
+    (read over HTTP, since the MCP server is just an API client — the golden rule) → ``stdio``.
+    Anything invalid or a settings read that fails (engine not up yet at MCP boot) degrades to
+    ``stdio`` — the desktop-client default — rather than crashing the server."""
+    t = (env.get("SPOOL_MCP_TRANSPORT") or "").strip()
+    if t in _VALID_TRANSPORTS:
+        return t
+    try:
+        stored = str((settings_getter() or {}).get("mcp_transport", "stdio"))
+    except Exception:
+        return "stdio"
+    return stored if stored in _VALID_TRANSPORTS else "stdio"
+
+
 def main() -> int:
     from config import DEFAULT_BASE_URL
     server = _build_server()
     base = os.environ.get("TROVE_URL", DEFAULT_BASE_URL)
-    print(f"trove-mcp: Trove API → {base}", file=sys.stderr)
-    server.run()
+    transport = _resolve_transport(os.environ, lambda: _client.get_settings())
+    print(f"trove-mcp: Trove API → {base} (transport={transport})", file=sys.stderr)
+    server.run(transport=transport)
     return 0
 
 

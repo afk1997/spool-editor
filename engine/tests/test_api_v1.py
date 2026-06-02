@@ -1164,3 +1164,45 @@ def test_list_transcripts_default_returns_all_back_compat(client):
     assert body["returned"] == 150
     assert len(body["transcripts"]) == 150
     assert body["limit"] == 150
+
+
+# ---- settings (writable engine config; demo 07) ---------------------
+
+def test_settings_defaults_and_patch_roundtrip(client):
+    _, c = client
+    r = c.get("/api/v1/settings")
+    assert r.status_code == 200
+    body = r.get_json()
+    # every writable key is present with its default
+    for k in ("fast_default", "default_preset", "clip_workers", "max_workers", "mcp_transport"):
+        assert k in body
+    assert body["fast_default"] is True
+    assert body["clip_workers"] == 2
+    assert body["default_preset"] == "tiktok"
+
+    r = c.patch("/api/v1/settings",
+                json={"fast_default": False, "clip_workers": 4, "default_preset": "reels"})
+    assert r.status_code == 200
+    updated = r.get_json()
+    assert updated["fast_default"] is False
+    assert updated["clip_workers"] == 4
+    assert updated["default_preset"] == "reels"
+    # untouched keys keep their defaults
+    assert updated["max_workers"] == 4
+    assert updated["mcp_transport"] == "stdio"
+    # persisted: a fresh GET reflects it
+    assert c.get("/api/v1/settings").get_json()["clip_workers"] == 4
+
+
+def test_settings_clamps_numeric_and_rejects_bad_enums(client):
+    _, c = client
+    # numeric concurrency is clamped (like caption overrides), not errored
+    assert c.patch("/api/v1/settings", json={"clip_workers": 999}).get_json()["clip_workers"] == 16
+    assert c.patch("/api/v1/settings", json={"clip_workers": 0}).get_json()["clip_workers"] == 1
+    # invalid enums are a 400 (don't silently coerce)
+    assert c.patch("/api/v1/settings", json={"default_preset": "myspace"}).status_code == 400
+    assert c.patch("/api/v1/settings", json={"mcp_transport": "carrier-pigeon"}).status_code == 400
+    # a non-bool for a bool field is a 400 (avoid bool("false") == True footguns)
+    assert c.patch("/api/v1/settings", json={"fast_default": "yes"}).status_code == 400
+    # the rejected writes left the store untouched
+    assert c.get("/api/v1/settings").get_json()["default_preset"] == "tiktok"

@@ -91,10 +91,22 @@ def _kept_spans(words_path, start: float, end: float) -> list:
 
 
 class ClipRunner:
-    def __init__(self, *, download_dir, job_manager, clip_manager):
+    def __init__(self, *, download_dir, job_manager, clip_manager, settings_store=None):
         self.download_dir = Path(download_dir)
         self.job_manager = job_manager
         self.clip_manager = clip_manager
+        # Optional settings.SettingsStore — its in-memory get() is read per render so a
+        # ``PATCH /settings`` is hot (no file re-read; the same object the API mutates).
+        self.settings_store = settings_store
+
+    def _setting(self, key, default):
+        """Read one hot default from the settings store, tolerating its absence."""
+        if self.settings_store is None:
+            return default
+        try:
+            return self.settings_store.get().get(key, default)
+        except Exception:
+            return default
 
     # ----- layout / records ---------------------------------------------
 
@@ -254,8 +266,13 @@ class ClipRunner:
         renders = d / "renders"
         renders.mkdir(parents=True, exist_ok=True)
         out = str(renders / f"{render_id}.mp4")
-        exporter.export(video_in, preset=params.get("preset", "tiktok"),
-                        fast=bool(params.get("fast", True)), out_path=out, **self._hooks(job))
+        # General "output defaults" (S14): an explicit param wins; otherwise fall back to the
+        # hot settings-store default (fast/quality + platform preset), then the engine default.
+        fast = params.get("fast")
+        if fast is None:
+            fast = self._setting("fast_default", True)
+        preset = params.get("preset") or self._setting("default_preset", "tiktok")
+        exporter.export(video_in, preset=preset, fast=bool(fast), out_path=out, **self._hooks(job))
         return out
 
     # ----- work-closure builders (one per ClipJob kind) -----------------

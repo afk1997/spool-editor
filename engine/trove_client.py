@@ -244,6 +244,12 @@ class TroveClient:
     def storage_info(self) -> dict:
         return self.get("/api/v1/storage")
 
+    def get_settings(self) -> dict:
+        return self.get("/api/v1/settings")
+
+    def update_settings(self, patch: dict) -> dict:
+        return self.request("PATCH", "/api/v1/settings", body=patch)
+
     # ----- transcripts ------------------------------------------------
 
     def list_transcripts(self, *, status: str = "", limit: int = 100,
