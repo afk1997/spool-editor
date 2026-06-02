@@ -5,7 +5,8 @@
 > ✅ done & verified · 🟡 in progress · ◻️ not started.
 >
 > **Last updated:** 2026-06-02 · **Phase 0 — ✅ COMPLETE.** Phase 1: the full engine chain
-> (moments → cutter → reframe → captioner → exporter) is ✅ done & green. Next: `api_v1` clip endpoints.
+> (moments → cutter → reframe → captioner → exporter) **and** the `api_v1` clip surface
+> (ClipJobManager + clip_runner + endpoints + client) are ✅ done & green. Next: MCP clip tools.
 
 ## Roadmap at a glance
 
@@ -80,7 +81,14 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
 - [x] **`exporter`** — platform presets (tiktok/reels/shorts/linkedin/x/youtube) →
   codec/bitrate/fps + -14 LUFS loudnorm, hardware encoder (VideoToolbox/NVENC/x264),
   fast-vs-quality. Brand kits deferred to P2. 9 tests.
-- [ ] ◻️ **`api_v1` clip endpoints + clip/render job types** (extend `JobManager`).
+- [x] **`api_v1` clip endpoints + clip/render job types** — `ClipJobManager`
+  (mirrors `transcribe_jobs.py`; one `kind` per op + `params`/`result`) + `clip_runner.py`
+  (orchestration: clip tree, per-clip `meta.json` Clip record, diar⊕ROI prep, artifact
+  chaining, one-shot pipeline, cancel/progress). Wired into `app.py` (extensions +
+  TTL-sweeper pin). Endpoints: `POST /sources/<id>/{moments,cut,render}`,
+  `POST /clips/<id>/{reframe,captions,renders}`, `GET /clip-jobs[?kind,status]` +
+  get/cancel/dismiss, `GET /clips/<id>/renders/<rid>/file`. Plus `/capabilities` +
+  SSE snapshot + OpenAPI + `TroveClient` methods. 13+10+13+23+13 tests.
 - [ ] ◻️ **MCP clip tools** + elicitation + `spool://` resources.
 - [ ] ◻️ **Studio screens** (S0–S5, S7 basic, S8 presets, S10, S11) wired to `api_v1`;
   port the demo's design tokens; Agent panel + ⌘K. e2e: URL → 9:16 clip.
@@ -90,7 +98,7 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
 - `pnpm install` → 6 workspace projects, 354 packages, clean.
 - `pnpm typecheck` → 9/9 tasks pass. `pnpm build` → Next.js 16 compiles, static pages generate.
 - `engine/` `.py` files diff byte-identical against the validated trove clone.
-- **engine: 535 tests pass** (exit 0) on Python 3.12 via uv venv — headless trove suite (467) + `clip.cutter` (7) + `clip.captioner` (6) + `clip.reframe` (15) + `clip.exporter` (9) + `clip.llm` (16) + `clip.moments` (15).
+- **engine: 594 tests pass** (exit 0) on Python 3.12 via uv venv — headless trove suite (467) + `clip.cutter` (7) + `clip.captioner` (6) + `clip.reframe` (15) + `clip.exporter` (9) + `clip.llm` (16) + `clip.moments` (15) + `clip_jobs` (13) + `clip_runner` (10) + `api_v1` clips (23) + `trove_client` clips (13).
 - **`docker compose up`** builds the multi-stage image and serves `/api/v1/health` from the host — the packaged engine works end to end.
 - **headless serving** (venv): `/api/v1/doctor` reports real tooling — ffmpeg 7.1.1, whisper.cpp 1.5.0, yt-dlp 2026.3.17, VideoToolbox encoders.
 
