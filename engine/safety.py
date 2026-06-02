@@ -2,6 +2,7 @@ from __future__ import annotations
 import hmac
 import hashlib
 import ipaddress
+import re
 import socket
 from urllib.parse import urlparse
 import os
@@ -277,6 +278,57 @@ class RateLimiter:
             # Over the limit → seconds until oldest live hit ages out.
             oldest_live = next((ts for ts in q if ts >= cutoff), now)
             return (0, max(0.0, self.per_seconds - (now - oldest_live)))
+
+
+_LOCAL_ORIGIN_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$")
+
+
+def _cors_origin():
+    """The request Origin iff it's a same-machine (loopback) browser origin, else None."""
+    origin = request.headers.get("Origin", "")
+    return origin if origin and _LOCAL_ORIGIN_RE.match(origin) else None
+
+
+def _apply_cors(resp, origin):
+    resp.headers["Access-Control-Allow-Origin"] = origin
+    resp.headers["Vary"] = "Origin"
+    resp.headers["Access-Control-Allow-Credentials"] = "true"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, Idempotency-Key"
+    resp.headers["Access-Control-Expose-Headers"] = (
+        "X-Idempotent-Replay, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Window, Retry-After"
+    )
+    resp.headers["Access-Control-Max-Age"] = "600"
+
+
+def attach_cors(app):
+    """Allow the studio (its own Next.js origin, e.g. localhost:3000) to call the API.
+
+    Only **loopback** origins are permitted — the server is localhost-bound by default
+    (config.assert_safe_bind), so this opens nothing the user's own machine can't already
+    reach, while keeping the door shut to arbitrary websites. Mirrors the spec's "two
+    clients of the same API": the browser studio is one of them.
+    """
+
+    @app.before_request
+    def _cors_preflight():
+        if request.method == "OPTIONS" and request.path.startswith("/api/"):
+            origin = _cors_origin()
+            if origin:
+                resp = app.make_default_options_response()
+                _apply_cors(resp, origin)
+                return resp
+        return None
+
+    @app.after_request
+    def _cors_headers(response):
+        if request.path.startswith("/api/"):
+            origin = _cors_origin()
+            if origin:
+                _apply_cors(response, origin)
+        return response
+
+    return app
 
 
 def attach_security_headers(app):

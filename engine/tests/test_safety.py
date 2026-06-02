@@ -77,6 +77,50 @@ def test_token_required_accepts_correct_token():
     assert r.status_code == 200
 
 
+# --- CORS (studio ↔ engine) ------------------------------------------
+
+from safety import attach_cors
+
+
+def _cors_app():
+    app = Flask(__name__)
+    attach_cors(app)
+
+    @app.get("/api/v1/ping")
+    def ping():
+        return "ok"
+
+    return app
+
+
+def test_cors_echoes_localhost_origin():
+    c = _cors_app().test_client()
+    r = c.get("/api/v1/ping", headers={"Origin": "http://localhost:3000"})
+    assert r.headers.get("Access-Control-Allow-Origin") == "http://localhost:3000"
+    assert "Authorization" in r.headers.get("Access-Control-Allow-Headers", "")
+
+
+def test_cors_denies_remote_origin():
+    c = _cors_app().test_client()
+    r = c.get("/api/v1/ping", headers={"Origin": "https://evil.example.com"})
+    assert "Access-Control-Allow-Origin" not in r.headers
+
+
+def test_cors_no_header_without_origin():
+    c = _cors_app().test_client()
+    r = c.get("/api/v1/ping")
+    assert r.status_code == 200
+    assert "Access-Control-Allow-Origin" not in r.headers
+
+
+def test_cors_preflight_options():
+    c = _cors_app().test_client()
+    r = c.open("/api/v1/ping", method="OPTIONS", headers={"Origin": "http://127.0.0.1:3000"})
+    assert r.status_code in (200, 204)
+    assert r.headers.get("Access-Control-Allow-Origin") == "http://127.0.0.1:3000"
+    assert "POST" in r.headers.get("Access-Control-Allow-Methods", "")
+
+
 import time
 from safety import RateLimiter
 

@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from flask import Flask, jsonify, request
 
-from safety import RateLimiter, attach_security_headers
+from safety import RateLimiter, attach_cors, attach_security_headers
 from runner import run_download
 from jobs import JobManager, Job, JobStatus
 import models_store
@@ -47,6 +47,7 @@ BATCH_MAX_URLS = int(os.environ.get("TROVE_BATCH_MAX_URLS", "50"))
 def create_app() -> Flask:
     app = Flask(__name__)
     attach_security_headers(app)
+    attach_cors(app)
 
     rate_limiter = RateLimiter(rate=RATE_LIMIT_PER_MIN, per_seconds=60)
     # Prefer the module-level DOWNLOAD_DIR so existing tests can use
