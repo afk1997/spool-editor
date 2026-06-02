@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { SpoolApiClient, SpoolApiError } from "@spool/api-client";
 import type { EventsSnapshot } from "@spool/types";
 import { engine } from "./engine";
@@ -22,12 +22,17 @@ interface LiveState {
 interface EngineContextValue {
   client: SpoolApiClient;
   live: LiveState;
+  /** Bumps each time the SSE stream *recovers* from a drop — one-shot queries watch it so
+   *  a transient engine blip doesn't leave them stuck on a stale error (e.g. the doctor probe). */
+  onlineEpoch: number;
 }
 
 const EngineContext = createContext<EngineContextValue | null>(null);
 
 export function EngineProvider({ children }: { children: React.ReactNode }) {
   const [live, setLive] = useState<LiveState>({ snapshot: null, connection: "connecting" });
+  const [onlineEpoch, setOnlineEpoch] = useState(0);
+  const sawOffline = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -40,11 +45,17 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
         (snapshot) => {
           backoff = 1000;
           setLive({ snapshot, connection: "online" });
+          // Recovered after a drop → re-run the one-shot queries (doctor, capabilities, …).
+          if (sawOffline.current) {
+            sawOffline.current = false;
+            setOnlineEpoch((e) => e + 1);
+          }
         },
         {
           interval: 1,
           onError: () => {
             if (cancelled) return;
+            sawOffline.current = true;
             setLive((s) => ({ ...s, connection: "offline" }));
             timer = setTimeout(connect, backoff);
             backoff = Math.min(backoff * 2, 15000);
@@ -61,7 +72,9 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  return <EngineContext.Provider value={{ client: engine, live }}>{children}</EngineContext.Provider>;
+  return (
+    <EngineContext.Provider value={{ client: engine, live, onlineEpoch }}>{children}</EngineContext.Provider>
+  );
 }
 
 function useEngineContext(): EngineContextValue {
@@ -92,7 +105,7 @@ export function useEngineQuery<T>(
   fn: (client: SpoolApiClient) => Promise<T>,
   deps: unknown[] = [],
 ): QueryState<T> {
-  const client = useEngine();
+  const { client, onlineEpoch } = useEngineContext();
   const [state, setState] = useState<{ data?: T; error?: string; loading: boolean }>({ loading: true });
   const [tick, setTick] = useState(0);
 
@@ -107,7 +120,7 @@ export function useEngineQuery<T>(
       active = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tick, ...deps]);
+  }, [tick, onlineEpoch, ...deps]);
 
   const reload = () => {
     setState((s) => ({ ...s, loading: true, error: undefined }));
