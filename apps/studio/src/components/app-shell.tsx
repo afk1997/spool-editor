@@ -1,9 +1,11 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useLive } from "@/lib/engine-context";
 import { cn, StatusDot } from "./ui";
+import { CommandPalette } from "./command-palette";
 
 /** The persistent studio chrome: icon+label rail, top bar, and a live status/queue bar —
  *  all driven by the SSE snapshot (spec §6, the demo's layout). Labels sit under each rail
@@ -19,6 +21,19 @@ const NAV = [
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   return (
     <div className="grid h-dvh grid-cols-[var(--rail-w)_1fr] grid-rows-[var(--top-h)_1fr_var(--status-h)] bg-bg">
       {/* rail */}
@@ -53,9 +68,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       {/* top bar */}
       <header className="col-start-2 flex items-center justify-between border-b border-line bg-bg-1 px-5">
         <span className="font-display text-lg font-semibold tracking-tight text-text">Spool</span>
-        <kbd className="rounded-sm border border-line bg-bg-2 px-2 py-0.5 font-mono text-xs text-text-faint">
-          ⌘K
-        </kbd>
+        <button
+          type="button"
+          onClick={() => setPaletteOpen(true)}
+          aria-label="Open command palette"
+          className="flex items-center gap-2 rounded-sm border border-line bg-bg-2 px-2.5 py-1 text-xs text-text-faint hover:text-text-dim focus-visible:outline-2 focus-visible:outline-accent"
+        >
+          Search
+          <kbd className="font-mono">⌘K</kbd>
+        </button>
       </header>
 
       {/* main */}
@@ -63,6 +84,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       {/* status / queue bar */}
       <StatusBar />
+
+      {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
     </div>
   );
 }
