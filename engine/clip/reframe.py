@@ -214,7 +214,114 @@ def _collapse(segments: list[dict]) -> list[dict]:
     return out
 
 
-def render(clip_path: str, track: dict, *, aspect: str = "9:16", mode: str = "pan", out_path: str) -> str:
-    """Render the reframed clip (pan/split/center; 9:16/16:9/1:1/4:5). Lands in the
-    next commit — drives the crop-x expression from ``pan_expr`` for ``mode='pan'``."""
-    raise NotImplementedError("Phase 1 — pan/split/center render (next commit; spec §4 reframe.render)")
+# Target output dimensions per aspect (1080-wide family — the pan math assumes ~1080p).
+_ASPECTS = {
+    "9:16": (1080, 1920),
+    "16:9": (1920, 1080),
+    "1:1": (1080, 1080),
+    "4:5": (1080, 1350),
+}
+_MODES = ("pan", "split", "center")
+RENDER_TIMEOUT = 1800
+
+
+def render(
+    clip_path: str,
+    track: dict,
+    *,
+    aspect: str = "9:16",
+    mode: str = "pan",
+    out_path: str,
+    cancel_check=None,
+    register_proc=None,
+    timeout: int | None = None,
+) -> str:
+    """Render the reframed clip. ``mode`` ∈ {pan, split, center}; ``aspect`` ∈
+    {9:16, 16:9, 1:1, 4:5}. ``pan`` builds the hard-cut crop-x expression via the
+    vendored ``pan_expr`` from ``track``; ``split`` stacks both ROIs; ``center`` is a
+    centered crop. Returns ``out_path``."""
+    if aspect not in _ASPECTS:
+        raise ValueError(f"unknown aspect {aspect!r}; expected one of {list(_ASPECTS)}")
+    if mode not in _MODES:
+        raise ValueError(f"unknown mode {mode!r}; expected one of {list(_MODES)}")
+
+    out_w, out_h = _ASPECTS[aspect]
+    src_w, src_h = probe_dimensions(clip_path)
+    base = ["ffmpeg", "-y", "-i", clip_path]
+
+    if mode == "split":
+        argv = base + [
+            "-filter_complex", _split_filter(track, out_w, out_h),
+            "-map", "[vout]", "-map", "0:a?", "-c:a", "copy", out_path,
+        ]
+    else:
+        vf = _pan_vf(track, src_w, src_h, out_w, out_h) if mode == "pan" \
+            else _center_vf(src_w, src_h, out_w, out_h)
+        argv = base + ["-vf", vf, "-c:a", "copy", out_path]
+
+    _ffmpeg.run(
+        argv,
+        cancel_check=cancel_check, register_proc=register_proc,
+        timeout=timeout if timeout is not None else RENDER_TIMEOUT,
+        cleanup_path=out_path, label=f"ffmpeg reframe {mode}",
+    )
+    return out_path
+
+
+def _pan_vf(track: dict, src_w: int, src_h: int, out_w: int, out_h: int) -> str:
+    """A vertical strip (target aspect) that hard-cuts its x to the active speaker."""
+    segments = track.get("segments") or []
+    strip_w = min(src_w, round(src_h * out_w / out_h))
+
+    def left_edge(roi: dict) -> int:
+        cx = roi["x"] + roi["w"] / 2
+        return int(max(0, min(src_w - strip_w, round(cx - strip_w / 2))))
+
+    if not segments:
+        # No speaker timeline → nothing to pan to; fall back to a centered crop.
+        return _center_vf(src_w, src_h, out_w, out_h)
+
+    left_x = left_edge(track["roiL"])
+    right_x = left_edge(track["roiR"])
+    expr = _run_pan_expr(segments, left_x, right_x)
+    return f"crop={strip_w}:{src_h}:x='{expr}':y=0,scale={out_w}:{out_h}"
+
+
+def _center_vf(src_w: int, src_h: int, out_w: int, out_h: int) -> str:
+    """Centered crop to the target aspect, then scale."""
+    crop_w = min(src_w, round(src_h * out_w / out_h))
+    crop_h = min(src_h, round(crop_w * out_h / out_w))
+    x = (src_w - crop_w) // 2
+    y = (src_h - crop_h) // 2
+    return f"crop={crop_w}:{crop_h}:{x}:{y},scale={out_w}:{out_h}"
+
+
+def _split_filter(track: dict, out_w: int, out_h: int) -> str:
+    """Both ROIs stacked — left speaker on top, right on the bottom (spec Step 4b)."""
+    half = out_h // 2
+    L, R = track["roiL"], track["roiR"]
+    return (
+        f"[0:v]crop={int(L['w'])}:{int(L['h'])}:{int(L['x'])}:{int(L['y'])},scale={out_w}:{half}[top];"
+        f"[0:v]crop={int(R['w'])}:{int(R['h'])}:{int(R['x'])}:{int(R['y'])},scale={out_w}:{half}[bot];"
+        f"[top][bot]vstack=inputs=2[vout]"
+    )
+
+
+def _run_pan_expr(segments: list[dict], left_x: int, right_x: int) -> str:
+    """Vendored pan_expr CLI: segments + the two strip x-coords → ffmpeg crop-x expr."""
+    fd, seg_path = tempfile.mkstemp(prefix="spool-pan-segs.", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(segments, f)
+        out = subprocess.run(
+            [sys.executable, _PAN_EXPR_SCRIPT, seg_path, str(left_x), str(right_x)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if out.returncode != 0:
+            raise RuntimeError(f"pan_expr failed (rc={out.returncode}): {out.stderr.strip()[-300:]}")
+        return out.stdout.strip()
+    finally:
+        try:
+            os.unlink(seg_path)
+        except OSError:
+            pass

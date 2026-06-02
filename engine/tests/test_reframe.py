@@ -125,3 +125,67 @@ def test_detect_faces_returns_default_half_rois(monkeypatch, tmp_path):
     assert out["width"] == 1920 and out["height"] == 1080
     assert out["rois"]["left"] == {"x": 0, "y": 0, "w": 960, "h": 1080}
     assert out["rois"]["right"] == {"x": 960, "y": 0, "w": 960, "h": 1080}
+
+
+# ---- render (ffmpeg mocked; pan_expr runs for real) -----------------------
+
+def _track():
+    return {
+        "segments": [{"start": 0.0, "end": 5.0, "speaker": "left"},
+                     {"start": 5.0, "end": 10.0, "speaker": "right"}],
+        "roiL": {"x": 0, "y": 0, "w": 960, "h": 1080},
+        "roiR": {"x": 960, "y": 0, "w": 960, "h": 1080},
+        "source": "fused",
+    }
+
+
+def _capture_render(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(reframe, "probe_dimensions", lambda p: (1920, 1080))
+    monkeypatch.setattr(reframe._ffmpeg, "run", lambda argv, **kw: captured.update(argv=argv))
+    return captured
+
+
+def test_render_pan_builds_crop_strip_and_pan_expr(monkeypatch, tmp_path):
+    captured = _capture_render(monkeypatch)
+    result = reframe.render("clip.mp4", _track(), aspect="9:16", mode="pan", out_path=str(tmp_path / "o.mp4"))
+    assert result == str(tmp_path / "o.mp4")
+    vf = captured["argv"][captured["argv"].index("-vf") + 1]
+    assert vf.startswith("crop=608:1080:x='")     # vertical 9:16 strip from 1080p
+    assert "scale=1080:1920" in vf
+    assert "176" in vf and "1136" in vf            # left/right strip x derived from the ROIs
+
+
+def test_render_center_is_a_centered_crop(monkeypatch, tmp_path):
+    captured = _capture_render(monkeypatch)
+    reframe.render("clip.mp4", _track(), aspect="9:16", mode="center", out_path=str(tmp_path / "o.mp4"))
+    vf = captured["argv"][captured["argv"].index("-vf") + 1]
+    assert vf.startswith("crop=608:1080:")
+    assert "x='" not in vf                          # static crop, no pan expression
+    assert "scale=1080:1920" in vf
+
+
+def test_render_split_stacks_both_rois(monkeypatch, tmp_path):
+    captured = _capture_render(monkeypatch)
+    reframe.render("clip.mp4", _track(), aspect="9:16", mode="split", out_path=str(tmp_path / "o.mp4"))
+    argv = captured["argv"]
+    assert "-filter_complex" in argv
+    graph = argv[argv.index("-filter_complex") + 1]
+    assert "vstack=inputs=2[vout]" in graph
+    assert graph.count("crop=") == 2                # one per ROI
+    assert "-map" in argv and "[vout]" in argv
+
+
+def test_render_pan_without_segments_falls_back_to_center(monkeypatch, tmp_path):
+    captured = _capture_render(monkeypatch)
+    track = _track()
+    track["segments"] = []
+    reframe.render("clip.mp4", track, aspect="9:16", mode="pan", out_path=str(tmp_path / "o.mp4"))
+    vf = captured["argv"][captured["argv"].index("-vf") + 1]
+    assert "x='" not in vf                          # no timeline → centered crop fallback
+
+
+@pytest.mark.parametrize("kw", [{"aspect": "3:2"}, {"mode": "zoom"}])
+def test_render_rejects_unknown_aspect_or_mode(tmp_path, kw):
+    with pytest.raises(ValueError):
+        reframe.render("clip.mp4", _track(), out_path=str(tmp_path / "o.mp4"), **kw)
