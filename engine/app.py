@@ -405,6 +405,7 @@ def create_app() -> Flask:
     def _enqueue_download(
         url: str, format_choice: str, format_id, title: str,
         thumbnail: str = "", *, auto_transcribe: bool = False,
+        subtitles: bool = False, chapters: bool = False, embed: bool = False,
     ) -> str:
         def _work(job: Job):
             job.thumbnail = thumbnail
@@ -432,6 +433,9 @@ def create_app() -> Flask:
                 progress_cb=_on_progress,
                 register_process=_register_proc,
                 was_paused_check=lambda: job._was_paused,
+                subtitles=subtitles,
+                chapters=chapters,
+                embed=embed,
             )
             if result.error_category:
                 if not job._was_paused:

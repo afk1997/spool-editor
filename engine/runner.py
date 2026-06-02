@@ -60,8 +60,16 @@ def build_download_argv(
     out_template: str,
     format_choice: str,
     format_id: str | None,
+    subtitles: bool = False,
+    chapters: bool = False,
+    embed: bool = False,
 ) -> list[str]:
-    """Build argv for the actual download. Always uses `--` separator."""
+    """Build argv for the actual download. Always uses `--` separator.
+
+    ``subtitles`` writes available + auto captions; ``chapters`` embeds chapter
+    markers; ``embed`` writes metadata + thumbnail into the file. All default off,
+    so the argv is byte-identical to before unless a caller opts in.
+    """
     _check_url_shape(url)
     try:
         _cf = int(os.environ.get("TROVE_CONCURRENT_FRAGMENTS", "4"))
@@ -83,6 +91,14 @@ def build_download_argv(
         argv += ["-f", f"{format_id}+bestaudio/best", "--merge-output-format", "mp4"]
     else:
         argv += ["-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4"]
+    if subtitles:
+        # real uploaded subs only (English) + don't let a subtitle 4xx abort the whole
+        # download — auto-translated variants (--write-auto-subs) are rate-limit-prone.
+        argv += ["--write-subs", "--sub-langs", "en.*", "--no-abort-on-error"]
+    if chapters:
+        argv += ["--embed-chapters"]
+    if embed:
+        argv += ["--embed-metadata", "--embed-thumbnail"]
     argv += ["--", url]
     return argv
 
@@ -242,6 +258,9 @@ def run_download(
     progress_cb=None,
     register_process=None,
     was_paused_check: object = None,
+    subtitles: bool = False,
+    chapters: bool = False,
+    embed: bool = False,
 ) -> DownloadResult:
     """Run yt-dlp to download a media file.
 
@@ -261,6 +280,9 @@ def run_download(
         out_template=out_template,
         format_choice=format_choice,
         format_id=format_id,
+        subtitles=subtitles,
+        chapters=chapters,
+        embed=embed,
     )
 
     # Legacy blocking path: tests monkeypatch subprocess.run, so keep it intact

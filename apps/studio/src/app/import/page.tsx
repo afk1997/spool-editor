@@ -22,7 +22,7 @@ function ImportScreen() {
     const urls = url.split(/\s+/).filter(Boolean);
     if (!urls.length) return;
     for (const u of urls) {
-      ctx.client.submitDownload({ url: u, format: quality === "Audio" ? "audio" : "video", auto_transcribe: true }).catch(() => {});
+      ctx.client.submitDownload({ url: u, format: quality === "Audio" ? "audio" : "video", auto_transcribe: true, subtitles: opts.subs, chapters: opts.chapters, embed: opts.meta }).catch(() => {});
     }
     ctx.pushToast({ icon: "download", tone: "info", title: `Downloading ${urls.length} URL${urls.length > 1 ? "s" : ""}`, body: "Progress shows below + in the queue" });
     setUrl("");

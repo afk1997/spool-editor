@@ -655,7 +655,8 @@ def get_job(job_id):
 
 def _submit_one(url: str, *, format_choice: str = "video",
                 format_id: str | None = None, title: str = "",
-                thumbnail: str = "", auto_transcribe: bool = False
+                thumbnail: str = "", auto_transcribe: bool = False,
+                subtitles: bool = False, chapters: bool = False, embed: bool = False
                 ) -> tuple[dict | None, dict | None]:
     """Shared download-submission core used by both the single-URL
     POST /jobs path and the bulk POST /jobs/bulk path.
@@ -684,6 +685,7 @@ def _submit_one(url: str, *, format_choice: str = "video",
         job_id = _actions()["enqueue_download"](
             url, format_choice, format_id, title, thumbnail,
             auto_transcribe=auto_transcribe,
+            subtitles=subtitles, chapters=chapters, embed=embed,
         )
     except RuntimeError:
         return None, {"error": "busy"}
@@ -735,6 +737,9 @@ def submit_job():
             title=(data.get("title") or "").strip(),
             thumbnail=(data.get("thumbnail") or "").strip(),
             auto_transcribe=bool(data.get("auto_transcribe")),
+            subtitles=bool(data.get("subtitles")),
+            chapters=bool(data.get("chapters")),
+            embed=bool(data.get("embed")),
         )
     except BaseException:
         _idempotency_store.release(idem_key)

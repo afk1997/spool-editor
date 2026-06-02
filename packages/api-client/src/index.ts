@@ -162,6 +162,10 @@ export class SpoolApiClient {
     format?: "video" | "audio";
     auto_transcribe?: boolean;
     title?: string;
+    /** yt-dlp download options (engine maps to --write-subs / --embed-chapters / --embed-metadata+thumbnail) */
+    subtitles?: boolean;
+    chapters?: boolean;
+    embed?: boolean;
   }): Promise<JobView> {
     return this.post("/jobs", input);
   }

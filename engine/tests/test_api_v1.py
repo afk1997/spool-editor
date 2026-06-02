@@ -192,7 +192,7 @@ def test_submit_job_calls_enqueue_with_supplied_title(client, monkeypatch):
     app, c = client
     captured = {}
 
-    def fake_enqueue(url, fmt, fmt_id, title, thumbnail="", *, auto_transcribe=False):
+    def fake_enqueue(url, fmt, fmt_id, title, thumbnail="", *, auto_transcribe=False, subtitles=False, chapters=False, embed=False):
         captured.update(dict(
             url=url, fmt=fmt, fmt_id=fmt_id, title=title,
             thumbnail=thumbnail, auto_transcribe=auto_transcribe,
@@ -216,6 +216,27 @@ def test_submit_job_calls_enqueue_with_supplied_title(client, monkeypatch):
     assert captured["title"] == "My clip"
     assert captured["fmt"] == "audio"
     assert captured["auto_transcribe"] is True
+
+
+def test_submit_job_forwards_download_opts(client):
+    """subtitles/chapters/embed in the body reach enqueue_download (→ yt-dlp flags)."""
+    app, c = client
+    captured = {}
+
+    def fake_enqueue(url, fmt, fmt_id, title, thumbnail="", *, auto_transcribe=False,
+                     subtitles=False, chapters=False, embed=False):
+        captured.update(subtitles=subtitles, chapters=chapters, embed=embed)
+        jm = app.extensions["trove.jobs"]
+        jm._jobs["optid"] = Job(id="optid", url=url, title=title, status=JobStatus.QUEUED)
+        return "optid"
+
+    app.extensions["trove.actions"]["enqueue_download"] = fake_enqueue
+    r = c.post("/api/v1/jobs", json={
+        "url": "https://example.com/v", "title": "t",
+        "subtitles": True, "chapters": True, "embed": True,
+    })
+    assert r.status_code == 201
+    assert captured == {"subtitles": True, "chapters": True, "embed": True}
 
 
 def test_submit_job_busy_returns_503(client, monkeypatch):
@@ -560,7 +581,7 @@ def test_list_transcripts_pagination(client):
 
 def test_submit_bulk_partial_failure(client, monkeypatch):
     app, c = client
-    def fake_enqueue(url, fmt, fmt_id, title, thumbnail="", *, auto_transcribe=False):
+    def fake_enqueue(url, fmt, fmt_id, title, thumbnail="", *, auto_transcribe=False, subtitles=False, chapters=False, embed=False):
         jm = app.extensions["trove.jobs"]
         jid = f"id{len(jm._jobs)}"
         jm._jobs[jid] = Job(id=jid, url=url, title=title, status=JobStatus.QUEUED)
