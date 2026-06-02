@@ -1574,6 +1574,74 @@ def get_render_file(clip_id, render_id):
     return send_file(str(path), as_attachment=True, download_name=f"{clip_id}-{render_id}.mp4")
 
 
+@api_v1_bp.post("/agent")
+@token_required
+def agent_message():
+    """The studio Agent panel's turn: NL message (+ optional source context) → one
+    structured action via the LLM, executed with the real clip tools (spec §2). A
+    ``clarify`` action is the spec's elicitation — the studio renders it as a card.
+
+    Body: ``{message, source_id?}``. Returns ``{reply, action, jobs[], question?, options?}``.
+    Blocks while the LLM plans (the codex bridge), so the client shows a thinking state.
+    """
+    from clip import agent as clip_agent, llm as clip_llm, moments as clip_moments
+
+    data = request.get_json(silent=True) or {}
+    message = (data.get("message") or "").strip()
+    if not message:
+        return jsonify({"error": "missing_message"}), 400
+    source_id = (data.get("source_id") or "").strip() or None
+
+    # Source context: feed the transcript to the planner when we have one.
+    lines, words_path = None, None
+    if source_id:
+        _, words_path = _cr().source_paths(source_id)
+        if words_path and os.path.exists(words_path):
+            try:
+                lines = clip_moments._transcript_lines(transcript_io.load(words_path), None)
+            except (OSError, ValueError):
+                lines = None
+
+    try:
+        action = clip_agent.plan(message, transcript_lines=lines)
+    except (clip_llm.OfflineError, clip_llm.ProviderUnavailableError) as e:
+        return jsonify({"error": "llm_unavailable", "message": str(e)}), 503
+
+    has_transcript = bool(source_id and words_path and os.path.exists(words_path))
+    kind = action["action"]
+    jobs: list[dict] = []
+
+    if kind in ("find_moments", "make_clip") and not has_transcript:
+        action = {
+            "action": "clarify",
+            "reply": "Open a transcribed source first — I clip from its transcript.",
+            "question": "Which source? Pick a transcribed one from your Library.",
+            "options": [],
+        }
+        kind = "clarify"
+
+    if kind == "find_moments":
+        params = {"mode": action["mode"], "count": action["count"]}
+        jid = _cm().submit(kind="moments", source_id=source_id, params=params,
+                           target=_cr().find_moments_target(source_id=source_id, params=params))
+        jobs.append(_clip_job_view(_cm().get(jid)))
+    elif kind == "make_clip":
+        for c in action["clips"]:
+            clip_id, render_id = uuid.uuid4().hex[:10], uuid.uuid4().hex[:10]
+            params = {"start": c["start"], "end": c["end"], "aspect": c["aspect"],
+                      "mode": c["mode"], "style": c["style"], "preset": c["preset"]}
+            jid = _cm().submit(kind="pipeline", source_id=source_id, clip_id=clip_id, params=params,
+                               target=_cr().pipeline_target(source_id=source_id, clip_id=clip_id,
+                                                            render_id=render_id, params=params))
+            jobs.append(_clip_job_view(_cm().get(jid)))
+
+    resp = {"reply": action.get("reply", ""), "action": kind, "jobs": jobs}
+    if kind == "clarify":
+        resp["question"] = action.get("question", "")
+        resp["options"] = action.get("options", [])
+    return jsonify(resp)
+
+
 # ----- OpenAPI schema -------------------------------------------------
 
 # Hand-rolled because pulling in flask-openapi3 / apispec for ~25
@@ -1672,6 +1740,7 @@ _OPENAPI_DOC = {
         "/clip-jobs/{job_id}":          {"get":  {"summary": "Get one clip job"}},
         "/clip-jobs/{job_id}/cancel":   {"post": {"summary": "Cancel a clip job"}},
         "/clip-jobs/{job_id}/dismiss":  {"post": {"summary": "Drop a finished clip job"}},
+        "/agent":              {"post": {"summary": "Agent turn: NL message → a clip-tool action (find_moments / make_clip / clarify / reply)"}},
         "/storage":            {"get":  {"summary": "Disk-usage report"}},
         "/openapi.json":       {"get":  {"summary": "This document"}},
         "/events":             {"get":  {"summary": "Server-Sent Events stream of jobs+transcripts",
