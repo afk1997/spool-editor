@@ -1,18 +1,24 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { useSpool } from "@/components/spool/context";
 import { MediaCard, ClipCard } from "@/components/spool/cards";
 import { Btn, Icon, Progress } from "@spool/ui";
 
+const URL_RE = /\bhttps?:\/\/\S+/i;
+
 /* HomeScreen — 1:1 port of the demo (03), wired to live data via useSpool. */
 export default function Home() {
   const ctx = useSpool();
+  const router = useRouter();
   const [prompt, setPrompt] = useState("");
   const recent = ctx.sources.slice(0, 4);
   const recentClips = ctx.clips.filter((c) => c.status === "ready").slice(0, 5);
   const active = ctx.jobs.filter((j) => j.status === "running");
   const submit = () => { if (!prompt.trim()) return; ctx.askAgent(prompt.trim()); setPrompt(""); ctx.openAgent(); };
+  // If the box holds a URL, carry it to /import pre-filled; otherwise just open Import.
+  const goImport = () => { const t = prompt.trim(); if (URL_RE.test(t)) { router.push("/import?url=" + encodeURIComponent(t)); setPrompt(""); } else ctx.nav("import"); };
 
   return (
     <div className="mainpad fadein">
@@ -30,7 +36,7 @@ export default function Home() {
           </div>
         </div>
         <div className="row" style={{ gap: 12 }}>
-          <Btn variant="primary" size="lg" icon="import" onClick={() => ctx.nav("import")}>Import / Paste URL</Btn>
+          <Btn variant="primary" size="lg" icon="import" onClick={goImport}>Import / Paste URL</Btn>
           <Btn variant="ghost" size="lg" icon="scissors" onClick={() => ctx.nav("library")}>Make clips</Btn>
           <div className="spacer" />
           <div className="kbar">

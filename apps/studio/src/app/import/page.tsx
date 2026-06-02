@@ -1,15 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useSpool } from "@/components/spool/context";
 import { Btn, Chip, Icon, Progress, Seg, Switch, Thumb } from "@spool/ui";
 
 /* ImportScreen — 1:1 port of the demo (03), wired: Resolve submits real downloads via
- * ingest.download; the Downloads list is the live jobs snapshot. */
-export default function ImportScreen() {
+ * ingest.download; the Downloads list is the live jobs snapshot. A `?url=` query (e.g. from
+ * Home's "Import / Paste URL") pre-fills the box. */
+function ImportScreen() {
   const ctx = useSpool();
+  const params = useSearchParams();
   const [tab, setTab] = useState("URL");
-  const [url, setUrl] = useState("");
+  const [url, setUrl] = useState(() => params.get("url") ?? "");
   const [quality, setQuality] = useState("1080p");
   const [opts, setOpts] = useState({ subs: true, chapters: true, meta: false });
   const [legal, setLegal] = useState(true);
@@ -116,5 +119,14 @@ export default function ImportScreen() {
         )}
       </div>
     </div>
+  );
+}
+
+/* useSearchParams needs a Suspense boundary in a statically-rendered route. */
+export default function ImportPage() {
+  return (
+    <Suspense fallback={null}>
+      <ImportScreen />
+    </Suspense>
   );
 }
