@@ -300,6 +300,61 @@ class TroveClient:
               f"&limit={int(limit)}&context={int(context)}")
         return self.get("/api/v1/transcripts/search" + qs)
 
+    # ----- clips (the render queue) -----------------------------------
+
+    def find_moments(self, source_id: str, *, mode: str = "funny", count: int = 5,
+                     window: tuple[float, float] | None = None) -> dict:
+        """Submit an LLM moment-finding job over a source transcript. Returns the
+        clip-job view; poll ``get_clip_job`` for ``result.candidates``."""
+        body: dict = {"mode": mode, "count": count}
+        if window is not None:
+            body["window"] = [float(window[0]), float(window[1])]
+        return self.post(f"/api/v1/sources/{source_id}/moments", body=body)
+
+    def cut_clip(self, source_id: str, *, start: float, end: float) -> dict:
+        return self.post(f"/api/v1/sources/{source_id}/cut", body={"start": start, "end": end})
+
+    def reframe_clip(self, clip_id: str, *, aspect: str = "9:16", mode: str = "pan",
+                     rois: dict | None = None) -> dict:
+        body: dict = {"aspect": aspect, "mode": mode}
+        if rois is not None:
+            body["rois"] = rois
+        return self.post(f"/api/v1/clips/{clip_id}/reframe", body=body)
+
+    def caption_clip(self, clip_id: str, *, style: str = "opus") -> dict:
+        return self.post(f"/api/v1/clips/{clip_id}/captions", body={"style": style})
+
+    def render_clip(self, clip_id: str, *, preset: str = "tiktok", fast: bool = True) -> dict:
+        return self.post(f"/api/v1/clips/{clip_id}/renders", body={"preset": preset, "fast": fast})
+
+    def render_pipeline(self, source_id: str, *, start: float, end: float,
+                        aspect: str = "9:16", mode: str = "pan",
+                        style: str = "opus", preset: str = "tiktok") -> dict:
+        """Submit the one-shot cut→reframe→caption→export pipeline for a source window."""
+        return self.post(f"/api/v1/sources/{source_id}/render", body={
+            "start": start, "end": end, "aspect": aspect, "mode": mode,
+            "style": style, "preset": preset,
+        })
+
+    def list_clip_jobs(self, *, kind: str = "", status: str = "", limit: int = 100,
+                       offset: int = 0, order: str = "newest") -> dict:
+        qs = _page_qs(status, limit, offset, order)
+        if kind:
+            qs += ("&" if qs else "?") + "kind=" + urllib.parse.quote(kind)
+        return self.get("/api/v1/clip-jobs" + qs)
+
+    def get_clip_job(self, job_id: str) -> dict:
+        return self.get(f"/api/v1/clip-jobs/{job_id}")
+
+    def cancel_clip_job(self, job_id: str):  return self.post(f"/api/v1/clip-jobs/{job_id}/cancel")
+    def dismiss_clip_job(self, job_id: str): return self.post(f"/api/v1/clip-jobs/{job_id}/dismiss")
+
+    def download_render(self, clip_id: str, render_id: str, *,
+                        stream_to: str | None = None):
+        """Fetch (or stream-save) a produced render .mp4."""
+        return self.get(f"/api/v1/clips/{clip_id}/renders/{render_id}/file",
+                        stream_to=stream_to)
+
     # ----- models -----------------------------------------------------
 
     def capabilities(self) -> dict:
