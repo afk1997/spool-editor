@@ -1,7 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { Icon } from "./ui";
+import { Icon } from "@spool/ui";
 
 /* Shared chrome for the Settings / Brand screens (SettingCard, Row) and the Phase 2/4
  * "designed — coming soon" screens (FutureScreen). Ported 1:1 from the demo (07). */

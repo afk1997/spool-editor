@@ -7,7 +7,7 @@ import { useSpool } from "./context";
 import { useLive } from "@/lib/engine-context";
 import { AgentPanel } from "./agent";
 import { CommandPalette, ShortcutSheet, Toasts } from "./overlays";
-import { Icon, SpoolMark } from "./ui";
+import { Icon, SpoolMark } from "@spool/ui";
 
 /* Faithful port of the demo's shell (app.jsx) — Rail · TopBar · bodywrap(main + AgentPanel) ·
  * StatusBar — plus the ⌘K palette, ? shortcut sheet and toasts. Same markup + class names so

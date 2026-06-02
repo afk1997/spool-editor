@@ -4,7 +4,7 @@ import { useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { useSpool, type SpoolClip } from "@/components/spool/context";
 import { useLive } from "@/lib/engine-context";
-import { Btn, Chip, Empty, Icon, Seg, Switch, Thumb } from "@/components/spool/ui";
+import { Btn, Chip, Empty, Icon, Seg, Switch, Thumb } from "@spool/ui";
 
 /* S6 Editor — connective hub, 1:1 port of the demo (06). Preview · transport · timeline ·
  * inspector (Format / Captions / Brand / Export). Render runs the real engine with the

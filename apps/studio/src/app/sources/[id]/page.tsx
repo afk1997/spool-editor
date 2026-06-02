@@ -6,7 +6,7 @@ import { useSpool, buildTranscript, mapCandidates } from "@/components/spool/con
 import { useEngineQuery, useLive } from "@/lib/engine-context";
 import { ClipCard } from "@/components/spool/cards";
 import { DiscoveryBody, TranscriptView } from "@/components/spool/work";
-import { Btn, Chip, Empty, Icon, Progress, SourceGlyph, Stat, Thumb, fmtDur } from "@/components/spool/ui";
+import { Btn, Chip, Empty, Icon, Progress, SourceGlyph, Stat, Thumb, fmtDur } from "@spool/ui";
 
 /* S4 Project detail — 1:1 port of the demo (04). Source + transcript + candidates are all
  * live: the transcript view reads words.json; the Candidates tab embeds the real Discovery

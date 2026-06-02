@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useSpool } from "@/components/spool/context";
 import { useEngineQuery } from "@/lib/engine-context";
 import { SettingCard, Row } from "@/components/spool/panels";
-import { Btn, Icon, Progress, Seg, Switch } from "@/components/spool/ui";
+import { Btn, Icon, Progress, Seg, Switch } from "@spool/ui";
 
 /* S14 Settings — 1:1 port of the demo (07). Privacy (offline), Hardware (encoder), Storage
  * (disk) and the LLM provider reflect the real engine; the Moment-finding card shows the

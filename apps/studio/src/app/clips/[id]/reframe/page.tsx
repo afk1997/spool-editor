@@ -3,7 +3,7 @@
 import { useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { useSpool } from "@/components/spool/context";
-import { Btn, Icon, Seg, Switch, Thumb, fmtTC } from "@/components/spool/ui";
+import { Btn, Icon, Seg, Switch, Thumb, fmtTC } from "@spool/ui";
 
 /* S7 Reframe / ROI editor — 1:1 port of the demo (05). Draggable ROI boxes; pan/split/center;
  * speaker-track lane; live 9:16 preview. "Apply & re-render" sends the ROIs to the real

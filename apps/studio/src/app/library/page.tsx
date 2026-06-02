@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useSpool } from "@/components/spool/context";
 import { MediaCard } from "@/components/spool/cards";
-import { Btn, Chip, Icon, Seg, SourceGlyph, fmtDur } from "@/components/spool/ui";
+import { Btn, Chip, Icon, Seg, SourceGlyph, fmtDur } from "@spool/ui";
 
 /* LibraryScreen — 1:1 port of the demo (03). Sources are live-mapped; batch actions call
  * the real engine (transcribe / find moments). Table columns we don't track yet show "—". */

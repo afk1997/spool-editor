@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useSpool } from "@/components/spool/context";
 import { ClipCard } from "@/components/spool/cards";
-import { Btn, Empty, Icon, Seg } from "@/components/spool/ui";
+import { Btn, Empty, Icon, Seg } from "@spool/ui";
 
 /* S11 Clips Library — 1:1 port of the demo (06). Live clips grouped from the clip-job stream.
  * Aspect / tag / search filters are real; the "Best (85+)" collection lights up with the

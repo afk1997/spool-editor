@@ -3,7 +3,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useParams } from "next/navigation";
 import { useSpool } from "@/components/spool/context";
-import { Btn, Icon, Seg, Switch, Thumb } from "@/components/spool/ui";
+import { Btn, Icon, Seg, Switch, Thumb } from "@spool/ui";
 
 /* S8 Caption Studio — 1:1 port of the demo (05). opus / karaoke / minimal presets, live
  * animated caption preview, full style controls, caption lane. "Burn captions" applies the

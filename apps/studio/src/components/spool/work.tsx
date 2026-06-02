@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useSpool, type Candidate, type TranscriptLine, type SpeakerInfo } from "./context";
-import { Btn, Chip, Empty, Icon, Thumb, fmtTC, parseTC } from "./ui";
+import { Btn, Chip, Empty, Icon, Thumb, fmtTC, parseTC } from "@spool/ui";
 
 /* Shared work-screen components ported 1:1 from the demo (04): CandidateCard, AdjustModal,
  * DiscoveryBody, TranscriptView. Used by both Project (S4) and Discovery (S5).

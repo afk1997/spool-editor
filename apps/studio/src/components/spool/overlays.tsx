@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSpool } from "./context";
-import { Icon } from "./ui";
+import { Icon } from "@spool/ui";
 
 /* 1:1 ports of the demo's CommandPalette (agent.jsx) + ShortcutSheet + Toasts (app.jsx).
  * Wired to the live context: navigation is real, "run an action" / recipes drive the real

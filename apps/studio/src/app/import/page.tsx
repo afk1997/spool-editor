@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useSpool } from "@/components/spool/context";
-import { Btn, Chip, Icon, Progress, Seg, Switch, Thumb } from "@/components/spool/ui";
+import { Btn, Chip, Icon, Progress, Seg, Switch, Thumb } from "@spool/ui";
 
 /* ImportScreen — 1:1 port of the demo (03), wired: Resolve submits real downloads via
  * ingest.download; the Downloads list is the live jobs snapshot. */

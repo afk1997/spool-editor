@@ -4,7 +4,7 @@ import { useParams } from "next/navigation";
 import { useSpool, mapCandidates } from "@/components/spool/context";
 import { useEngineQuery, useLive } from "@/lib/engine-context";
 import { DiscoveryBody } from "@/components/spool/work";
-import { Btn, Icon } from "@/components/spool/ui";
+import { Btn, Icon } from "@spool/ui";
 
 /* S5 Clip Discovery — 1:1 port of the demo (04). "Proposed moments": real candidates from
  * the source's find_moments result (glass-box = named signals + transcript excerpt). */

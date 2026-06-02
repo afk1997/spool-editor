@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useSpool } from "@/components/spool/context";
 import { useEngineQuery } from "@/lib/engine-context";
-import { Btn, Chip, Icon, Progress, Seg, SpoolMark } from "@/components/spool/ui";
+import { Btn, Chip, Icon, Progress, Seg, SpoolMark } from "@spool/ui";
 
 /* S0 Onboarding / Dependency Doctor — 1:1 port of the demo (07). Full-screen, no shell.
  * The Dependency Doctor step reads the LIVE /doctor report (real tools, versions, disk,

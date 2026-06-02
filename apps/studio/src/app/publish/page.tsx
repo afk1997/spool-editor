@@ -2,7 +2,7 @@
 
 import { useSpool } from "@/components/spool/context";
 import { FutureScreen } from "@/components/spool/panels";
-import { Thumb } from "@/components/spool/ui";
+import { Thumb } from "@spool/ui";
 
 /* Publish & Calendar — Phase 4. 1:1 port of the demo's FutureScreen placeholder (07). */
 export default function PublishScreen() {

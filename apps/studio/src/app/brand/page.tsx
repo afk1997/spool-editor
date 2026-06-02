@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useSpool } from "@/components/spool/context";
 import { SettingCard, Row } from "@/components/spool/panels";
-import { Btn, Chip, Icon, Seg, Switch, Thumb } from "@/components/spool/ui";
+import { Btn, Chip, Icon, Seg, Switch, Thumb } from "@spool/ui";
 
 /* Brand kits — 1:1 port of the demo (07). A local kit editor (type, palette, caption style,
  * watermark, lower-third) with a live applied preview; "Apply to project" drives the agent.

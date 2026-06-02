@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useSpool, type SpoolJob } from "@/components/spool/context";
-import { Btn, Chip, Empty, Icon, Progress, Seg, Thumb } from "@/components/spool/ui";
+import { Btn, Chip, Empty, Icon, Progress, Seg, Thumb } from "@spool/ui";
 
 /* S10 Render Queue — 1:1 port of the demo (06). The whole live work set (downloads,
  * transcribes, clip/render jobs) from the SSE snapshot; cancel/dismiss/retry route to the

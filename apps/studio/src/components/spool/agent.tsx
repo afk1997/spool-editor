@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useSpool, type AgentMessage } from "./context";
-import { Btn, Icon, Progress, Thumb } from "./ui";
+import { Btn, Icon, Progress, Thumb } from "@spool/ui";
 
 /* 1:1 port of the demo's agent.jsx — AgentPanel, ElicitationCard, ToolTrace — wired to the
  * live agent loop: messages come from real `/agent` turns, elicitation = the agent's

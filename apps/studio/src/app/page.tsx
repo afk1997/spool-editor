@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useSpool } from "@/components/spool/context";
 import { MediaCard, ClipCard } from "@/components/spool/cards";
-import { Btn, Icon, Progress } from "@/components/spool/ui";
+import { Btn, Icon, Progress } from "@spool/ui";
 
 /* HomeScreen — 1:1 port of the demo (03), wired to live data via useSpool. */
 export default function Home() {

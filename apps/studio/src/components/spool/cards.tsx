@@ -1,7 +1,7 @@
 "use client";
 
 import { useSpool, type SpoolClip, type SpoolSource } from "./context";
-import { AspectBadge, Chip, Icon, Progress, SourceGlyph, Thumb, fmtDur } from "./ui";
+import { AspectBadge, Chip, Icon, Progress, SourceGlyph, Thumb, fmtDur } from "@spool/ui";
 
 /* 1:1 ports of the demo's MediaCard + ClipCard (03), fed by the live-mapped shapes. */
 

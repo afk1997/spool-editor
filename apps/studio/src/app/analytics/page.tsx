@@ -1,7 +1,7 @@
 "use client";
 
 import { FutureScreen } from "@/components/spool/panels";
-import { Stat } from "@/components/spool/ui";
+import { Stat } from "@spool/ui";
 
 /* Analytics — Phase 4. 1:1 port of the demo's FutureScreen placeholder (07). */
 export default function AnalyticsScreen() {

@@ -195,14 +195,15 @@ export function Thumb({ seed = "", kind = "talking-head", vertical = false, chil
   );
 }
 
+const FILE_GLYPH = { c: "var(--text-dim)", label: "FILE" };
 const SOURCE_GLYPH: Record<string, { c: string; label: string }> = {
   youtube: { c: "#FF3B30", label: "YT" },
   instagram: { c: "#E0529C", label: "IG" },
   tiktok: { c: "#25F4EE", label: "TT" },
-  file: { c: "var(--text-dim)", label: "FILE" },
+  file: FILE_GLYPH,
   x: { c: "#fff", label: "X" },
 };
 export function SourceGlyph({ type = "file" }: { type?: string }) {
-  const g = SOURCE_GLYPH[type] || SOURCE_GLYPH.file;
+  const g = SOURCE_GLYPH[type] ?? FILE_GLYPH;
   return <span className="badge" style={{ color: g.c, background: "rgba(0,0,0,0.62)", fontWeight: 700 }}>{g.label}</span>;
 }
