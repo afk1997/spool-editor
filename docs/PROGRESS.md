@@ -4,7 +4,7 @@
 > `Spool_Engineering-Spec.md` (§5 roadmap, §6 front-end standards). Status legend:
 > ✅ done & verified · 🟡 in progress · ◻️ not started.
 >
-> **Last updated:** 2026-06-03 · **Phase 0 — ✅ · Phase 1 — ✅ · Phase 2 — 🟡 IN PROGRESS** (S7 reframe + S8 caption + transcript editing + S9 brand kits done & verified; done-when #1 + #2 + #3 met).
+> **Last updated:** 2026-06-03 · **Phase 0 — ✅ · Phase 1 — ✅ · Phase 2 — 🟡 IN PROGRESS** (S7 reframe + S8 caption + transcript editing + S9 brand kits + library search done & verified; **all 4 done-whens met**).
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,
@@ -247,8 +247,21 @@ editing its transcript · full-text search transcripts across the library.
   typecheck/lint/12-unit/build + e2e green; real media — created a kit, applied → ASS carries
   `{\an9…}@acme` + `{\an8…}Local First`, captioned mp4 produced. **→ done-when #2 met** (apply
   a brand kit across clips). Commits: `970671c` (engine) + UI commit.
-- [ ] **Editor timeline (S6)** · **Settings writes** · **SQLite FTS5 + library search** ·
-  **perf (virtualize / lazy-load)** — next slices.
+- [x] **Library-wide transcript Search (done-when #4)** — the `/transcripts/search` engine
+  endpoint (substring across every completed transcript, with snippet + timing for
+  deep-linking) is now surfaced in the studio: the ⌘K palette (which the TopBar search opens)
+  runs a debounced library search and shows a **Transcripts** group of real matches; selecting
+  one jumps to the source. api-client `searchTranscripts` + `TranscriptMatch`. **Verified:**
+  studio typecheck/lint/12-unit/build + e2e green; live probe — searching "elephant" returns
+  matches across the 3 transcribed sources. **→ done-when #4 met** (full-text search across
+  the library).
+  - ⏳ **SQLite (FTS5) store migration — deliberately deferred** (spec §7.2: "JSON now;
+    SQLite when search/scale demand it"). The search is already correct + library-wide
+    (always reads the current words.json, so it reflects edits/deletes with no index to keep
+    in sync); FTS5 is a *scale* optimization (faster filtering over a large library) with no
+    user-facing change, and migrating the atomic JSON job store is a high-risk core change.
+    Revisit when a library outgrows the in-memory scan. **Done-when #4 does not depend on it.**
+- [ ] **Editor timeline (S6)** · **Settings writes (S? )** · **perf (virtualize / lazy-load)** — remaining slices.
 
 ## What's verified now
 

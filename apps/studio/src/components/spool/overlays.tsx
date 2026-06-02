@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSpool } from "./context";
+import { useEngineQuery } from "@/lib/engine-context";
 import { Icon } from "@spool/ui";
 
 /* 1:1 ports of the demo's CommandPalette (agent.jsx) + ShortcutSheet + Toasts (app.jsx).
@@ -35,9 +36,21 @@ function PaletteInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ctx.sources, ctx.recipes]);
 
+  // Library-wide transcript search (debounced) — the demo's global search, made real:
+  // every completed transcript across the library, with deep-links into the source.
+  const [dq, setDq] = useState("");
+  useEffect(() => { const id = setTimeout(() => setDq(q.trim()), 180); return () => clearTimeout(id); }, [q]);
+  const search = useEngineQuery((c) => (dq.length >= 2 ? c.searchTranscripts(dq, { limit: 6 }) : Promise.resolve({ matches: [], returned: 0, query: dq })), [dq]);
+  const hitItems = useMemo<PItem[]>(() => (search.data?.matches ?? []).map((m) => ({
+    group: "Transcripts", title: m.snippet, icon: "type", hint: "↵",
+    run: () => { const src = ctx.sources.find((s) => s.transcriptId === m.transcript_id); ctx.nav(src ? "project" : "library", src ? { id: src.id } : {}); },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  })), [search.data]);
+
   const filtered = q ? items.filter((i) => i.title.toLowerCase().includes(q.toLowerCase())) : items;
-  const asAgent = q.trim().length > 6 && filtered.length === 0;
-  const groups = filtered.reduce<Record<string, PItem[]>>((a, i) => { (a[i.group] = a[i.group] || []).push(i); return a; }, {});
+  const shown = [...filtered, ...hitItems];
+  const asAgent = q.trim().length > 6 && shown.length === 0;
+  const groups = shown.reduce<Record<string, PItem[]>>((a, i) => { (a[i.group] = a[i.group] || []).push(i); return a; }, {});
   const flat: PItem[] = [];
   Object.values(groups).forEach((g) => flat.push(...g));
 
@@ -76,7 +89,7 @@ function PaletteInner() {
               ); })}
             </div>
           ))}
-          {filtered.length === 0 && !asAgent && <div style={{ padding: "20px", textAlign: "center", color: "var(--text-faint)", fontSize: 13 }}>Keep typing to ask the agent…</div>}
+          {shown.length === 0 && !asAgent && <div style={{ padding: "20px", textAlign: "center", color: "var(--text-faint)", fontSize: 13 }}>{search.loading ? "Searching transcripts…" : "Keep typing to ask the agent…"}</div>}
         </div>
       </div>
     </div>

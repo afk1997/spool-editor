@@ -77,6 +77,19 @@ export interface TrackSegment {
   end: number;
   speaker: "left" | "right";
 }
+/** One library-wide transcript search hit (deep-linkable into the source/transcript). */
+export interface TranscriptMatch {
+  transcript_id: string;
+  title: string;
+  snippet: string;
+  start_seconds: number;
+  end_seconds: number;
+}
+export interface TranscriptSearchResult {
+  matches: TranscriptMatch[];
+  returned: number;
+  query: string;
+}
 /** A persisted brand kit (S9) — a reusable look applied across a project's clips on render. */
 export interface BrandKit {
   id: string;
@@ -234,6 +247,11 @@ export class SpoolApiClient {
   }
   startTranscribe(parentJobId: string): Promise<TranscribeJobView> {
     return this.post(`/jobs/${encodeURIComponent(parentJobId)}/transcribe`);
+  }
+  /** Full-text search across every completed transcript in the library — returns matches
+   *  with a contextual snippet + the timing range, for deep-linking into the source. */
+  searchTranscripts(q: string, opts: { limit?: number; context?: number } = {}): Promise<TranscriptSearchResult> {
+    return this.get(`/transcripts/search${qs({ q, limit: opts.limit, context: opts.context })}`);
   }
   /** Edit one transcript word in place (set_text / delete / insert_after / merge_next) —
    *  trove's transcript-editor behavior; drives caption re-burns + the transcript ripple cut. */
