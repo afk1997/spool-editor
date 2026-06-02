@@ -104,8 +104,19 @@ async def _drive_mcp(port: int) -> dict:
             out["install_bad"] = await call(
                 "install_model", {"name": "not-real.bin"})
 
+            # ---- clip surface (read + validation paths only; no real ffmpeg) ----
+            out["list_clip_jobs"] = await call("list_clip_jobs")
+            out["get_clip_job_bad"] = await call("get_clip_job", {"job_id": "nope"})
+            out["moments_bad"] = await call("find_moments", {"source_id": "nope"})
+            out["cut_bad"] = await call("cut_clip", {"source_id": "nope", "start": 1.0, "end": 5.0})
+            # aspect+mode provided → no elicitation; bogus clip → clip_not_found
+            out["reframe_bad"] = await call(
+                "reframe_clip", {"clip_id": "nope", "aspect": "9:16", "mode": "pan"})
+
             jobs_res = await session.read_resource("trove://jobs")
             out["jobs_resource"] = jobs_res.contents[0].text
+            clips_res = await session.read_resource("spool://clips")
+            out["clips_resource"] = clips_res.contents[0].text
 
             # Read the alias and the legacy text resource for the same
             # bogus tid; both should produce identical (error) payloads
@@ -138,9 +149,14 @@ def test_mcp_end_to_end(tmp_path):
         "set_active_model", "remove_model",
         "storage_info",
         "server_capabilities",
+        # clip surface
+        "find_moments", "cut_clip", "reframe_clip", "caption_clip",
+        "render_clip", "render_pipeline",
+        "list_clip_jobs", "get_clip_job", "cancel_clip_job", "dismiss_clip_job",
     }
     assert set(result["tool_names"]) == expected_tools, result["tool_names"]
     assert "trove://transcript/{tid}" in result["templates"]
+    assert "spool://clips/{job_id}" in result["templates"]
     # New plural/.txt alias must be advertised alongside the legacy URI
     # so MCP clients can address per-transcript text via the REST-shaped
     # path ``trove://transcripts/<id>.txt``.
@@ -174,3 +190,50 @@ def test_mcp_end_to_end(tmp_path):
     # Resources return JSON text, not Python repr.
     assert json.loads(result["jobs_resource"])["jobs"] is not None or \
            "jobs" in json.loads(result["jobs_resource"])
+
+    # Clip surface: read path returns the render queue, validation paths return
+    # structured errors (never a stack trace), mirroring the trove tools.
+    assert "clip_jobs" in result["list_clip_jobs"]
+    for key in ("get_clip_job_bad", "moments_bad", "cut_bad", "reframe_bad"):
+        v = result[key]
+        assert isinstance(v, dict) and "error" in v, (key, v)
+        assert "Traceback" not in str(v), (key, v)
+    assert result["moments_bad"]["error"] == "source_not_ready"
+    assert result["reframe_bad"]["error"] == "clip_not_found"
+    assert "clip_jobs" in json.loads(result["clips_resource"])
+
+
+async def _drive_elicit(port: int) -> tuple[int, dict]:
+    """Open a session WITH an elicitation handler; call reframe_clip without an
+    aspect so the server must elicit the choice."""
+    import mcp.types as mt
+
+    fired = {"n": 0}
+
+    async def on_elicit(ctx, params):
+        fired["n"] += 1
+        return mt.ElicitResult(action="accept", content={"aspect": "1:1", "mode": "split"})
+
+    env = {**os.environ, "TROVE_URL": f"http://127.0.0.1:{port}"}
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=[os.path.join(REPO_ROOT, "mcp_server.py")],
+        env=env,
+    )
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write, elicitation_callback=on_elicit) as session:
+            await session.initialize()
+            r = await session.call_tool("reframe_clip", {"clip_id": "nope"})
+            data = json.loads(r.content[0].text)
+    return fired["n"], data
+
+
+@pytest.mark.timeout(60)
+def test_mcp_reframe_elicits_missing_aspect(tmp_path):
+    """When reframe_clip is called without an aspect, the server elicits the choice
+    (spec §4) and feeds it through — proven by the callback firing and the elicited
+    clip flowing to the (bogus here) backend call."""
+    with _trove_server(tmp_path) as port:
+        fired, data = asyncio.run(_drive_elicit(port))
+    assert fired == 1, "server should have elicited the aspect/mode"
+    assert data.get("error") == "clip_not_found"  # elicited params reached the backend

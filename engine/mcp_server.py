@@ -66,12 +66,17 @@ def _build_server():
     metadata without forcing the dep.
     """
     try:
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.fastmcp import Context, FastMCP
     except ImportError as e:
         raise SystemExit(
             "trove-mcp: the 'mcp' package is required.\n"
             "  Install with: pip install 'trove[mcp]'  (or just: pip install mcp)"
         ) from e
+
+    # ``from __future__ import annotations`` stringizes tool signatures, and FastMCP
+    # eval()s them against this module's globals. ``Context`` is imported lazily (so the
+    # module stays importable without the SDK), so publish it into globals for the eval.
+    globals()["Context"] = Context
 
     mcp = FastMCP("trove")
 
@@ -355,6 +360,103 @@ def _build_server():
         r = _safe(lambda: _client.remove_model(name))
         return {"ok": True, "name": name} if r is None else r
 
+    # ---- clips (the render queue) -----------------------------------
+    # Same delegation pattern as the trove tools: each calls the shared client →
+    # the same /api/v1 surface → the same engine + job store the studio uses (the
+    # golden rule). Clip ops are async jobs: the tool returns a clip-job view; poll
+    # get_clip_job (or the spool://clips resource) for staged progress + result.
+
+    from pydantic import BaseModel, Field  # ships with the mcp SDK
+
+    class _ReframeChoice(BaseModel):
+        aspect: str = Field(default="9:16", description="Aspect ratio: 9:16, 16:9, 1:1, or 4:5")
+        mode: str = Field(default="pan", description="Reframe mode: pan (speaker pan), split, or center")
+
+    @mcp.tool()
+    def find_moments(source_id: str, mode: str = "funny", count: int = 5) -> dict:
+        """Find clip-worthy moments in a source's transcript via the moment-finding LLM
+        (default: the codex bridge — the user's ChatGPT/Codex subscription, no key/GPU).
+
+        ``mode`` ∈ funny / insightful / hot-take / story / how-to / q&a. Returns a
+        clip-job; poll ``get_clip_job`` for ``result.candidates`` —
+        ``[{start, end, title, rationale, signals}]``. Only transcript text egresses.
+        """
+        return _safe(lambda: _client.find_moments(source_id, mode=mode, count=count))
+
+    @mcp.tool()
+    def cut_clip(source_id: str, start: float, end: float) -> dict:
+        """Cut a clip ``[start, end]`` (seconds) from a source. The clip-job's
+        ``result.clip_id`` drives the subsequent reframe/caption/render calls."""
+        return _safe(lambda: _client.cut_clip(source_id, start=start, end=end))
+
+    @mcp.tool()
+    async def reframe_clip(clip_id: str, aspect: str | None = None,
+                           mode: str | None = None, ctx: Context = None) -> dict:
+        """Reframe a clip to a target aspect with the diar⊕ROI speaker pan.
+
+        If ``aspect``/``mode`` are omitted, the server **elicits** the choice from the
+        user (aspect ∈ 9:16/16:9/1:1/4:5; mode ∈ pan/split/center) — the spec's
+        human-judgment pause. Clients without elicitation support fall back to defaults.
+        """
+        if (aspect is None or mode is None) and ctx is not None:
+            try:
+                res = await ctx.elicit(
+                    "Choose the reframe aspect ratio and mode for this clip.",
+                    schema=_ReframeChoice,
+                )
+                if res.action == "accept" and res.data is not None:
+                    aspect = aspect or res.data.aspect
+                    mode = mode or res.data.mode
+            except Exception:
+                pass  # elicitation unsupported / failed → fall through to defaults
+        return _safe(lambda: _client.reframe_clip(
+            clip_id, aspect=aspect or "9:16", mode=mode or "pan"))
+
+    @mcp.tool()
+    def caption_clip(clip_id: str, style: str = "opus") -> dict:
+        """Generate + burn styled captions (``style`` ∈ opus/karaoke/minimal), sliced to
+        the clip window from the source transcript — no re-transcribe."""
+        return _safe(lambda: _client.caption_clip(clip_id, style=style))
+
+    @mcp.tool()
+    def render_clip(clip_id: str, preset: str = "tiktok", fast: bool = True) -> dict:
+        """Export the clip to a platform preset (tiktok/reels/shorts/youtube/linkedin/x)
+        at -14 LUFS. ``result.render_id`` identifies the produced .mp4."""
+        return _safe(lambda: _client.render_clip(clip_id, preset=preset, fast=fast))
+
+    @mcp.tool()
+    def render_pipeline(source_id: str, start: float, end: float, aspect: str = "9:16",
+                        mode: str = "pan", style: str = "opus", preset: str = "tiktok") -> dict:
+        """One-shot cut→reframe→caption→export of a source window into a finished vertical
+        clip. Returns a clip-job; poll ``get_clip_job`` for staged progress + ``result``
+        (clip_id, render_id, output_path)."""
+        return _safe(lambda: _client.render_pipeline(
+            source_id, start=start, end=end, aspect=aspect, mode=mode,
+            style=style, preset=preset))
+
+    @mcp.tool()
+    def list_clip_jobs(kind: str = "", status: str = "", limit: int = 100) -> dict:
+        """List clip/render jobs (the render queue). Filter by ``kind`` (moments/cut/
+        reframe/caption/export/pipeline) and/or ``status`` (comma-separated)."""
+        return _safe(lambda: _client.list_clip_jobs(kind=kind, status=status, limit=limit))
+
+    @mcp.tool()
+    def get_clip_job(job_id: str) -> dict:
+        """Get one clip/render job — status, staged progress, and ``result`` (candidates
+        for moments jobs; clip_id / render_id / output_path for the rest)."""
+        return _safe(lambda: _client.get_clip_job(job_id))
+
+    @mcp.tool()
+    def cancel_clip_job(job_id: str) -> dict:
+        """Cancel a queued/running clip job (kills the underlying ffmpeg)."""
+        return _safe(lambda: _client.cancel_clip_job(job_id))
+
+    @mcp.tool()
+    def dismiss_clip_job(job_id: str) -> dict:
+        """Drop a finished (done/error/cancelled) clip job from the queue."""
+        r = _safe(lambda: _client.dismiss_clip_job(job_id))
+        return {"ok": True, "job_id": job_id} if r is None else r
+
     # ---- resources --------------------------------------------------
     # Resources let the agent surface live application state to the user
     # without spending tool-call budget on plain reads.
@@ -396,6 +498,19 @@ def _build_server():
     def storage_resource() -> str:
         import json as _json
         return _json.dumps(_safe(lambda: _client.storage_info()), indent=2)
+
+    @mcp.resource("spool://clips")
+    def clips_resource() -> str:
+        """The render queue — every clip/render job and its status (spec §4)."""
+        import json as _json
+        return _json.dumps(_safe(lambda: _client.list_clip_jobs()), indent=2)
+
+    @mcp.resource("spool://clips/{job_id}")
+    def clip_resource(job_id: str) -> str:
+        """One clip/render job, including its ``result`` — candidates for a moments job,
+        or the produced render's id + output path."""
+        import json as _json
+        return _json.dumps(_safe(lambda: _client.get_clip_job(job_id)), indent=2)
 
     return mcp
 

@@ -56,6 +56,17 @@ MCP_TO_CLI: dict[str, str] = {
     "remove_model":            "model-rm",
     "storage_info":            "du",
     "server_capabilities":     "capabilities",
+    # clips (the render queue)
+    "find_moments":            "moments",
+    "cut_clip":                "cut",
+    "reframe_clip":            "reframe",
+    "caption_clip":            "caption",
+    "render_clip":             "render",
+    "render_pipeline":         "pipeline",
+    "list_clip_jobs":          "clips",
+    "get_clip_job":            "clip",
+    "cancel_clip_job":         "clip-cancel",
+    "dismiss_clip_job":        "clip-rm",
 }
 
 
@@ -756,6 +767,104 @@ def cmd_events(args) -> int:
 
 # ----- argparse wiring ------------------------------------------------
 
+# ----- clips (the render queue) ---------------------------------------
+# Thin wrappers over the same /api/v1 clip surface the studio + MCP use. Clip
+# ops are async jobs: each command submits one and prints its clip-job view —
+# poll with `trove clip <id>` or `trove clips` for progress + result.
+
+def _print_clip(cj: dict, *, json_out: bool) -> None:
+    if json_out:
+        _print_json(cj)
+        return
+    h = cj.get("human") or {}
+    print(f"{cj['id']}  {cj.get('kind','?')}  {cj.get('status','?')}")
+    if cj.get("clip_id"):
+        print(f"  clip:    {cj['clip_id']}")
+    print(f"  {h.get('summary', '—')}")
+    res = cj.get("result") or {}
+    if res.get("output_path"):
+        print(f"  output:  {res['output_path']}")
+    if cj.get("error_message"):
+        print(f"  error:   {cj.get('error_category')} — {cj['error_message']}")
+
+
+def cmd_moments(args) -> int:
+    body: dict = {"mode": args.mode, "count": args.count}
+    if args.start is not None and args.end is not None:
+        body["window"] = [args.start, args.end]
+    _print_clip(post(f"/api/v1/sources/{args.source_id}/moments", body),
+                json_out=getattr(args, "json", False))
+    return 0
+
+
+def cmd_cut(args) -> int:
+    cj = post(f"/api/v1/sources/{args.source_id}/cut",
+              {"start": args.start, "end": args.end})
+    _print_clip(cj, json_out=getattr(args, "json", False))
+    return 0
+
+
+def cmd_reframe(args) -> int:
+    _print_clip(post(f"/api/v1/clips/{args.clip_id}/reframe",
+                     {"aspect": args.aspect, "mode": args.mode}),
+                json_out=getattr(args, "json", False))
+    return 0
+
+
+def cmd_caption(args) -> int:
+    _print_clip(post(f"/api/v1/clips/{args.clip_id}/captions", {"style": args.style}),
+                json_out=getattr(args, "json", False))
+    return 0
+
+
+def cmd_render(args) -> int:
+    _print_clip(post(f"/api/v1/clips/{args.clip_id}/renders",
+                     {"preset": args.preset, "fast": not args.quality}),
+                json_out=getattr(args, "json", False))
+    return 0
+
+
+def cmd_pipeline(args) -> int:
+    body = {"start": args.start, "end": args.end, "aspect": args.aspect,
+            "mode": args.mode, "style": args.style, "preset": args.preset}
+    _print_clip(post(f"/api/v1/sources/{args.source_id}/render", body),
+                json_out=getattr(args, "json", False))
+    return 0
+
+
+def cmd_clips(args) -> int:
+    qs = _list_query(args, key_field="clip_jobs")
+    if getattr(args, "kind", None):
+        kq = "kind=" + urllib.parse.quote(args.kind)
+        qs = (qs + "&" + kq) if qs else ("?" + kq)
+    data = get("/api/v1/clip-jobs" + qs)
+    if getattr(args, "json", False):
+        _print_json(data)
+        return 0
+    for cj in data.get("clip_jobs", []):
+        h = cj.get("human") or {}
+        print(f"{cj['id']:<10}  {cj.get('kind',''):<9} {cj.get('status',''):<9}  {h.get('summary','')}")
+    if data.get("total", 0) > data.get("returned", 0):
+        print(f"  (showing {data['returned']} of {data['total']} — use --offset)")
+    return 0
+
+
+def cmd_clip(args) -> int:
+    _print_clip(get(f"/api/v1/clip-jobs/{args.id}"), json_out=getattr(args, "json", False))
+    return 0
+
+
+def cmd_clip_action(args, action: str) -> int:
+    out = post(f"/api/v1/clip-jobs/{args.id}/{action}")
+    if out is None:
+        print(f"{args.id}: {action}")
+    elif getattr(args, "json", False):
+        _print_json(out)
+    else:
+        _print_clip(out, json_out=False)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     # `--json` lives on a parent parser so it works in EITHER position
     # (`trove --json list` or `trove list --json`). Argparse otherwise
@@ -905,6 +1014,69 @@ def build_parser() -> argparse.ArgumentParser:
     s = _sub("model-rm", help="delete an installed model")
     s.add_argument("name")
     s.set_defaults(func=cmd_model_remove)
+
+    # ---- clips (the render queue) ----
+    s = _sub("moments", help="find clip-worthy moments in a source transcript (LLM)")
+    s.add_argument("source_id")
+    s.add_argument("--mode", default="funny",
+                   help="funny / insightful / hot-take / story / how-to / q&a")
+    s.add_argument("--count", type=int, default=5)
+    s.add_argument("--start", type=float, default=None, help="scope to a window (with --end)")
+    s.add_argument("--end", type=float, default=None)
+    s.set_defaults(func=cmd_moments)
+
+    s = _sub("cut", help="cut a clip [start,end] (seconds) from a source")
+    s.add_argument("source_id")
+    s.add_argument("start", type=float)
+    s.add_argument("end", type=float)
+    s.set_defaults(func=cmd_cut)
+
+    s = _sub("reframe", help="reframe a clip with the diar⊕ROI speaker pan")
+    s.add_argument("clip_id")
+    s.add_argument("--aspect", default="9:16", choices=("9:16", "16:9", "1:1", "4:5"))
+    s.add_argument("--mode", default="pan", choices=("pan", "split", "center"))
+    s.set_defaults(func=cmd_reframe)
+
+    s = _sub("caption", help="generate + burn captions onto a clip")
+    s.add_argument("clip_id")
+    s.add_argument("--style", default="opus", choices=("opus", "karaoke", "minimal"))
+    s.set_defaults(func=cmd_caption)
+
+    s = _sub("render", help="export a clip to a platform preset")
+    s.add_argument("clip_id")
+    s.add_argument("--preset", default="tiktok",
+                   choices=("tiktok", "reels", "shorts", "youtube", "linkedin", "x"))
+    s.add_argument("--quality", action="store_true", help="favor quality over speed")
+    s.set_defaults(func=cmd_render)
+
+    s = _sub("pipeline", help="one-shot cut→reframe→caption→export from a source window")
+    s.add_argument("source_id")
+    s.add_argument("start", type=float)
+    s.add_argument("end", type=float)
+    s.add_argument("--aspect", default="9:16", choices=("9:16", "16:9", "1:1", "4:5"))
+    s.add_argument("--mode", default="pan", choices=("pan", "split", "center"))
+    s.add_argument("--style", default="opus", choices=("opus", "karaoke", "minimal"))
+    s.add_argument("--preset", default="tiktok",
+                   choices=("tiktok", "reels", "shorts", "youtube", "linkedin", "x"))
+    s.set_defaults(func=cmd_pipeline)
+
+    s = _sub("clips", help="list clip/render jobs (the render queue)")
+    _add_list_flags(s)
+    s.add_argument("--kind", default=None,
+                   help="filter: moments,cut,reframe,caption,export,pipeline")
+    s.set_defaults(func=cmd_clips)
+
+    s = _sub("clip", help="inspect one clip/render job")
+    s.add_argument("id")
+    s.set_defaults(func=cmd_clip)
+
+    s = _sub("clip-cancel", help="cancel a queued/running clip job")
+    s.add_argument("id")
+    s.set_defaults(func=lambda a: cmd_clip_action(a, "cancel"))
+
+    s = _sub("clip-rm", help="drop a finished clip/render job")
+    s.add_argument("id")
+    s.set_defaults(func=lambda a: cmd_clip_action(a, "dismiss"))
 
     return p
 
