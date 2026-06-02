@@ -236,6 +236,11 @@ export class SpoolApiClient {
     return `${this.baseUrl}/api/v1/clips/${encodeURIComponent(clipId)}/renders/${encodeURIComponent(renderId)}/file`;
   }
 
+  /** Stream URL for a source's downloaded file (`/jobs/<id>/file`) — feed an inline <video>. */
+  jobFileUrl(jobId: string): string {
+    return `${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}/file`;
+  }
+
   /**
    * Subscribe to the engine's SSE progress stream. Calls `onSnapshot` with each full
    * `{ts, jobs, transcripts, clips}` frame; returns an unsubscribe. Uses fetch streaming

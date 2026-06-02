@@ -49,10 +49,14 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   const trimRef = useRef<HTMLDivElement>(null);
   const maskInRef = useRef<HTMLDivElement>(null), maskOutRef = useRef<HTMLDivElement>(null);
   const edgeInRef = useRef<HTMLDivElement>(null), edgeOutRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   const render = () => ctx.makeClipsFrom([{ id }], { aspect, mode: reframe, preset });
   const capWords = (clip.title || "your caption here").split(" ").slice(0, 8);
   const renders = (snapshot?.clips ?? []).filter((c) => c.clip_id === id && (c.kind === "export" || c.kind === "pipeline") && c.status === "done" && c.result.render_id);
+  const latestRender = renders.at(-1);
+  const renderSrc = latestRender ? ctx.client.renderFileUrl(id, latestRender.result.render_id!) : null;
+  const togglePlay = () => { const v = videoRef.current; if (v) { if (v.paused) void v.play(); else v.pause(); setPlaying(!v.paused); } else setPlaying((p) => !p); };
   // §6.3: update the trim mask/edge elements imperatively during the drag; commit to state on release.
   const dragTrim = (e: React.PointerEvent, which: "in" | "out") => {
     e.preventDefault();
@@ -92,16 +96,25 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
         <div style={{ display: "flex", flexDirection: "column", minHeight: 0, borderRight: "1px solid var(--line)" }}>
           <div style={{ flex: 1, display: "grid", placeItems: "center", padding: 24, background: "#070809", minHeight: 0 }}>
             <div style={{ height: "100%", aspectRatio: aspect === "9:16" ? "9/16" : aspect === "1:1" ? "1/1" : aspect === "4:5" ? "4/5" : "16/9", maxHeight: "52vh", borderRadius: 10, overflow: "hidden", position: "relative", border: "1px solid var(--line-str)" }}>
-              <Thumb seed={clip.id} vertical={aspect === "9:16"} kind="" label={false} />
-              {safe && <div style={{ position: "absolute", inset: "8% 6%", border: "1px dashed rgba(255,255,255,0.3)", borderRadius: 6 }} />}
-              <div style={{ position: "absolute", left: 0, right: 0, bottom: ab === "B" ? "23%" : "16%", textAlign: "center", fontFamily: "var(--font-caption)", fontSize: 18, color: "#fff", textShadow: "0 2px 6px #000", padding: "0 8%", lineHeight: 1.15 }}>
-                {capWords.filter((_, i) => !cut[i]).map((w, i) => <span key={i} style={{ color: i === 1 ? (ab === "B" ? "#37E2A0" : "var(--caption-hl)") : "#fff" }}>{w} </span>)}
-              </div>
-              <div className="badge" style={{ position: "absolute", top: 8, left: 8 }}>version {ab}</div>
+              {renderSrc ? (
+                /* a rendered clip: play the REAL .mp4 (captions already burned in) */
+                <video ref={videoRef} src={renderSrc} controls playsInline onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)}
+                  style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", background: "#000" }} />
+              ) : (
+                /* not rendered yet: the framing placeholder + caption preview */
+                <>
+                  <Thumb seed={clip.id} vertical={aspect === "9:16"} kind="" label={false} />
+                  {safe && <div style={{ position: "absolute", inset: "8% 6%", border: "1px dashed rgba(255,255,255,0.3)", borderRadius: 6 }} />}
+                  <div style={{ position: "absolute", left: 0, right: 0, bottom: ab === "B" ? "23%" : "16%", textAlign: "center", fontFamily: "var(--font-caption)", fontSize: 18, color: "#fff", textShadow: "0 2px 6px #000", padding: "0 8%", lineHeight: 1.15 }}>
+                    {capWords.filter((_, i) => !cut[i]).map((w, i) => <span key={i} style={{ color: i === 1 ? (ab === "B" ? "#37E2A0" : "var(--caption-hl)") : "#fff" }}>{w} </span>)}
+                  </div>
+                </>
+              )}
+              <div className="badge" style={{ position: "absolute", top: 8, left: 8 }}>{renderSrc ? "rendered" : "preview"}</div>
             </div>
           </div>
           <div className="row" style={{ gap: 14, padding: "10px 18px", borderTop: "1px solid var(--line)", flex: "none" }}>
-            <button className="iconbtn" onClick={() => setPlaying((p) => !p)} style={{ background: "var(--accent)", color: "var(--accent-ink)" }}><Icon name={playing ? "pause" : "play"} size={16} /></button>
+            <button className="iconbtn" onClick={togglePlay} style={{ background: "var(--accent)", color: "var(--accent-ink)" }}><Icon name={playing ? "pause" : "play"} size={16} /></button>
             <span className="mono" style={{ fontSize: 12 }}>00:{String(Math.floor(pos * 0.52)).padStart(2, "0")} / 00:{Math.round(clip.dur)}</span>
             <span className="spacer" />
             <span className="mono" style={{ fontSize: 11, color: "var(--text-faint)" }}>trim {trimSecs}s</span>
@@ -174,15 +187,26 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
                   <span className="field-label">Renders</span>
                   <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
                     {renders.length === 0 ? <div style={{ fontSize: 12.5, color: "var(--text-faint)", padding: "6px 2px" }}>No renders yet — hit Render to make one.</div>
-                      : renders.map((r, i) => (
-                        <div key={r.id} className="card" style={{ padding: "9px 11px", display: "flex", alignItems: "center", gap: 10, borderColor: i === renders.length - 1 ? "var(--accent)" : "var(--line)" }}>
-                          <span className="mono" style={{ fontSize: 11.5, fontWeight: 600 }}>v{i + 1}</span>
-                          <span style={{ fontSize: 11.5, color: "var(--text-faint)" }}>{(r.result.preset as string) || "render"} · {(r.result.aspect as string) || aspect}</span>
-                          <span className="spacer" />
-                          {i === renders.length - 1 && <Chip tone="acc">latest</Chip>}
-                          <a className="btn subtle sm" style={{ height: 24, padding: "0 8px" }} href={ctx.client.renderFileUrl(id, r.result.render_id!)} target="_blank" rel="noreferrer">Open</a>
-                        </div>
-                      ))}
+                      : renders.map((r, i) => {
+                        const path = (r.result.output_path as string) || "";
+                        return (
+                          <div key={r.id} className="card" style={{ padding: "9px 11px", display: "flex", flexDirection: "column", gap: 6, borderColor: i === renders.length - 1 ? "var(--accent)" : "var(--line)" }}>
+                            <div className="row" style={{ gap: 10 }}>
+                              <span className="mono" style={{ fontSize: 11.5, fontWeight: 600 }}>v{i + 1}</span>
+                              <span style={{ fontSize: 11.5, color: "var(--text-faint)" }}>{(r.result.preset as string) || "render"} · {(r.result.aspect as string) || aspect}</span>
+                              <span className="spacer" />
+                              {i === renders.length - 1 && <Chip tone="acc">latest</Chip>}
+                              <a className="btn subtle sm" style={{ height: 24, padding: "0 8px" }} href={ctx.client.renderFileUrl(id, r.result.render_id!)} download>Download</a>
+                            </div>
+                            {path && (
+                              <div className="row" style={{ gap: 6 }}>
+                                <span className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", direction: "rtl", textAlign: "left" }} title={path}>{path}</span>
+                                <button className="iconbtn" style={{ width: 22, height: 22, flex: "none" }} title="Copy file path" onClick={() => { navigator.clipboard?.writeText(path); ctx.pushToast({ icon: "copy", tone: "ok", title: "Path copied", body: "Paste in Finder → Go to Folder (⌘⇧G)" }); }}><Icon name="copy" size={12} /></button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                   </div>
                 </div>
                 <Btn variant="primary" icon="zap" onClick={render}>Render &amp; export</Btn>

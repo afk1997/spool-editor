@@ -72,8 +72,9 @@ export default function ProjectScreen() {
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 24 }}>
             <div>
-              <div className="card" style={{ overflow: "hidden", marginBottom: 20 }}>
-                <Thumb seed={s.id} kind={s.kind}><div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center" }}><button className="roundbtn" style={{ width: 54, height: 54 }}><Icon name="play" size={22} /></button></div></Thumb>
+              <div className="card" style={{ overflow: "hidden", marginBottom: 20, background: "#000", aspectRatio: "16/9" }}>
+                {/* the real downloaded source streamed from /jobs/<id>/file */}
+                <video src={ctx.client.jobFileUrl(s.id)} controls playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000" }} />
               </div>
               <div className="card" style={{ padding: 16 }}>
                 <div className="eyebrow" style={{ marginBottom: 12 }}>Audio energy</div>
