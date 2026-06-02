@@ -1,95 +1,80 @@
 "use client";
 
-import Link from "next/link";
-import { useEngineQuery, useLive } from "@/lib/engine-context";
-import { Badge, Card, Spinner, StatusDot, cn } from "@/components/ui";
+import { useState } from "react";
+import { useSpool } from "@/components/spool/context";
+import { MediaCard, ClipCard } from "@/components/spool/cards";
+import { Btn, Icon, Progress } from "@/components/spool/ui";
 
-/** S1 Home + S0 Dependency-Doctor. Live engine status, the real tool/encoder probe, the
- *  feature registry, and quick entry points — every value from api_v1, zero mock. */
+/* HomeScreen — 1:1 port of the demo (03), wired to live data via useSpool. */
 export default function Home() {
-  const { connection, snapshot } = useLive();
-  const doctor = useEngineQuery((c) => c.doctor());
-  const caps = useEngineQuery((c) => c.capabilities());
-
-  const jobs = snapshot?.jobs ?? [];
-  const clips = snapshot?.clips ?? [];
+  const ctx = useSpool();
+  const [prompt, setPrompt] = useState("");
+  const recent = ctx.sources.slice(0, 4);
+  const recentClips = ctx.clips.filter((c) => c.status === "ready").slice(0, 5);
+  const active = ctx.jobs.filter((j) => j.status === "running");
+  const submit = () => { if (!prompt.trim()) return; ctx.askAgent(prompt.trim()); setPrompt(""); ctx.openAgent(); };
 
   return (
-    <div className="mx-auto flex max-w-4xl flex-col gap-6">
-      <header className="space-y-1">
-        <h1 className="font-display text-3xl font-semibold tracking-tight">Spool</h1>
-        <p className="text-text-dim">
-          Local-first clip studio — turn long videos into platform-ready vertical clips,
-          entirely on your machine.
-        </p>
-      </header>
+    <div className="mainpad fadein">
+      <div style={{ marginBottom: 6 }} className="eyebrow">Welcome back</div>
+      <h1 style={{ fontSize: 34, marginBottom: 24 }}>What are we clipping today?</h1>
 
-      {/* engine connection */}
-      <Card className="flex items-center gap-3 p-4">
-        <StatusDot status={connection} pulse={connection === "connecting"} />
-        <span className="font-medium">
-          {connection === "online" ? "Engine connected" : connection === "connecting" ? "Connecting…" : "Engine offline"}
-        </span>
-        {connection === "offline" && (
-          <code className="ml-auto rounded bg-bg-3 px-2 py-1 font-mono text-xs text-text-dim">cd engine &amp;&amp; ./trove.sh</code>
-        )}
-      </Card>
-
-      {/* dependency doctor (S0) */}
-      <section className="flex flex-col gap-2">
-        <h2 className="text-sm font-semibold text-text-dim">Dependencies</h2>
-        <Card className="p-4">
-          {doctor.loading ? (
-            <Spinner label="Probing tools…" />
-          ) : doctor.error ? (
-            <p className="text-sm text-err">Couldn&rsquo;t probe (<span className="font-mono">{doctor.error}</span>)</p>
-          ) : (
-            <div className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
-              {Object.entries(doctor.data!.tools).map(([name, t]) => (
-                <div key={name} className="flex items-center gap-2">
-                  <StatusDot status={t.present ? "done" : "error"} />
-                  <span className="text-sm text-text">{name}</span>
-                  <span className="ml-auto font-mono text-xs text-text-faint">{t.version ?? "—"}</span>
-                </div>
-              ))}
-            </div>
-          )}
-          {doctor.data && (
-            <p className="mt-3 border-t border-line pt-3 text-xs text-text-dim">
-              {doctor.data.encoders.length} hardware encoder{doctor.data.encoders.length === 1 ? "" : "s"}:{" "}
-              <span className="font-mono">{doctor.data.encoders.join(", ") || "x264 (software)"}</span>
-            </p>
-          )}
-        </Card>
-      </section>
-
-      {/* feature registry */}
-      {caps.data && (
-        <div className="flex flex-wrap gap-2">
-          <Badge tone={caps.data.features.diarization ? "ok" : "neutral"}>
-            diarization {caps.data.features.diarization ? "on" : "off"}
-          </Badge>
-          <Badge tone={caps.data.features.clips ? "ok" : "neutral"}>clips</Badge>
-          <Badge tone="info">schema v{caps.data.schema_version}</Badge>
-          {caps.data.auth_required && <Badge tone="warn">auth required</Badge>}
+      <div className="panel" style={{ padding: 20, marginBottom: 34, background: "linear-gradient(135deg, var(--bg-1), var(--bg-2))" }}>
+        <div className="agent-input" style={{ marginBottom: 16, padding: "12px 14px" }}>
+          <div className="row" style={{ gap: 10 }}>
+            <Icon name="sparkles" size={18} style={{ color: "var(--accent)", flex: "none" }} />
+            <input className="input" style={{ border: 0, background: "transparent", padding: 0, height: 26, fontSize: 15 }}
+              placeholder="Tell the agent what to clip…  e.g. “grab 3 funny moments from my last import”"
+              value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
+            <Btn variant="primary" size="sm" icon="arrowR" onClick={submit}>Run</Btn>
+          </div>
         </div>
-      )}
+        <div className="row" style={{ gap: 12 }}>
+          <Btn variant="primary" size="lg" icon="import" onClick={() => ctx.nav("import")}>Import / Paste URL</Btn>
+          <Btn variant="ghost" size="lg" icon="scissors" onClick={() => ctx.nav("library")}>Make clips</Btn>
+          <div className="spacer" />
+          <div className="kbar">
+            {ctx.recipes.slice(0, 3).map((r) => (
+              <button key={r} className="chip" style={{ cursor: "pointer", height: 30 }} onClick={() => { ctx.askAgent(r); ctx.openAgent(); }}>
+                <Icon name="zap" size={13} />{r}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
 
-      {/* quick entry points */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <QuickLink href="/import" title="Import" body="Paste a URL to download + transcribe." />
-        <QuickLink href="/library" title="Library" body={`${jobs.filter((j) => j.status === "done").length} sources ready.`} />
-        <QuickLink href="/queue" title="Queue" body={`${clips.length} renders, ${jobs.length} downloads.`} />
+      <div className="sectionhead"><h2>Recent projects</h2><span className="sub">{ctx.sources.length} sources</span><span className="spacer" /><button className="btn subtle sm" onClick={() => ctx.nav("library")}>View all <Icon name="arrowR" size={14} /></button></div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16, marginBottom: 36 }}>
+        {recent.length === 0 && <div style={{ color: "var(--text-faint)", fontSize: 13 }}>No sources yet — import a video to begin.</div>}
+        {recent.map((s) => <MediaCard key={s.id} s={s} onOpen={() => ctx.nav("project", { id: s.id })} />)}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 340px", gap: 24 }}>
+        <div>
+          <div className="sectionhead"><h2>Recent clips</h2><span className="spacer" /><button className="btn subtle sm" onClick={() => ctx.nav("clips")}>Library <Icon name="arrowR" size={14} /></button></div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
+            {recentClips.length === 0 && <div style={{ color: "var(--text-faint)", fontSize: 13 }}>No clips yet.</div>}
+            {recentClips.slice(0, 3).map((c) => <ClipCard key={c.id} c={c} />)}
+          </div>
+        </div>
+        <div>
+          <div className="sectionhead"><h2>Queue</h2><span className="spacer" /><button className="btn subtle sm" onClick={() => ctx.nav("queue")}>Open</button></div>
+          <div className="panel" style={{ padding: 14, display: "flex", flexDirection: "column", gap: 13 }}>
+            {active.length === 0 && <div style={{ color: "var(--text-faint)", fontSize: 13, padding: "14px 4px" }}>No active jobs.</div>}
+            {active.map((j) => (
+              <div key={j.id} style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                <div className="row" style={{ gap: 8 }}>
+                  <Icon name={j.type === "transcribe" ? "type" : "film"} size={14} style={{ color: "var(--accent)" }} />
+                  <span style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{j.label}</span>
+                  <span className="spacer" /><span className="mono" style={{ fontSize: 11, color: "var(--text-dim)" }}>{Math.round(j.prog)}%</span>
+                </div>
+                <Progress value={j.prog} striped />
+                <div className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)" }}>{j.stage} · ETA {j.eta}</div>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
     </div>
-  );
-}
-
-function QuickLink({ href, title, body }: { href: string; title: string; body: string }) {
-  return (
-    <Link href={href} className={cn("group rounded-lg border border-line bg-bg-2 p-4 shadow-1", "transition-colors hover:border-line-str")}>
-      <p className="font-medium text-text group-hover:text-accent">{title} →</p>
-      <p className="mt-1 text-sm text-text-dim">{body}</p>
-    </Link>
   );
 }

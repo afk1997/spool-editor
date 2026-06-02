@@ -154,3 +154,33 @@ export function AspectBadge({ a = "9:16" }: { a?: string }) {
 }
 
 export const fmtDur = (s: number) => { s = Math.round(s); const m = Math.floor(s / 60), ss = s % 60; return `${m}:${String(ss).padStart(2, "0")}`; };
+
+/* deterministic hue from a string (video-frame placeholder thumbnail) */
+function seedHue(s: string) { let h = 0; for (let i = 0; i < (s || "").length; i++) h = (h * 31 + s.charCodeAt(i)) % 360; return h; }
+
+export function Thumb({ seed = "", kind = "talking-head", vertical = false, children, label }: { seed?: string; kind?: string; vertical?: boolean; children?: ReactNode; label?: false }) {
+  const h = seedHue(seed);
+  const bg = `radial-gradient(125% 100% at 32% 16%, oklch(0.355 0.022 ${h}) 0%, oklch(0.215 0.015 ${h}) 52%, oklch(0.14 0.009 ${h}) 100%)`;
+  return (
+    <div className={"thumb" + (vertical ? " v" : "")}>
+      <div className="ph" style={{ background: bg }} />
+      <div className="ph" style={{ background: "repeating-linear-gradient(115deg, rgba(255,255,255,0.035) 0 2px, transparent 2px 9px)" }} />
+      <div className="ph" style={{ background: "radial-gradient(80% 60% at 50% 38%, rgba(0,0,0,0) 40%, rgba(0,0,0,0.42) 100%)" }} />
+      {label !== false && <div style={{ position: "absolute", left: 0, right: 0, top: "50%", transform: "translateY(-50%)", textAlign: "center", fontFamily: "var(--font-mono)", fontSize: 10.5, color: "rgba(255,255,255,0.5)", letterSpacing: ".04em" }}>{kind}</div>}
+      <div className="grad" />
+      {children}
+    </div>
+  );
+}
+
+const SOURCE_GLYPH: Record<string, { c: string; label: string }> = {
+  youtube: { c: "#FF3B30", label: "YT" },
+  instagram: { c: "#E0529C", label: "IG" },
+  tiktok: { c: "#25F4EE", label: "TT" },
+  file: { c: "var(--text-dim)", label: "FILE" },
+  x: { c: "#fff", label: "X" },
+};
+export function SourceGlyph({ type = "file" }: { type?: string }) {
+  const g = SOURCE_GLYPH[type] || SOURCE_GLYPH.file;
+  return <span className="badge" style={{ color: g.c, background: "rgba(0,0,0,0.62)", fontWeight: 700 }}>{g.label}</span>;
+}
