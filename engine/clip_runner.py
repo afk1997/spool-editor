@@ -33,6 +33,31 @@ import transcript_io
 from clip import captioner, cutter, exporter, moments, reframe
 
 
+def _scale_roi(roi: dict, width: int, height: int) -> dict:
+    """Fractional ROI (0–1, resolution-independent — what the studio sends) → source pixels."""
+    return {
+        "x": int(round(float(roi.get("x", 0.0)) * width)),
+        "y": int(round(float(roi.get("y", 0.0)) * height)),
+        "w": int(round(float(roi.get("w", 0.0)) * width)),
+        "h": int(round(float(roi.get("h", 0.0)) * height)),
+    }
+
+
+def _clean_segments(segs) -> list[dict]:
+    """Sanitize an edited speaker track from S7 → ``[{start, end, speaker:'left'|'right'}]``."""
+    out = []
+    for s in segs or []:
+        if not isinstance(s, dict) or s.get("speaker") not in ("left", "right"):
+            continue
+        try:
+            st, en = float(s["start"]), float(s["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if en > st:
+            out.append({"start": st, "end": en, "speaker": s["speaker"]})
+    return out
+
+
 class ClipRunner:
     def __init__(self, *, download_dir, job_manager, clip_manager):
         self.download_dir = Path(download_dir)
@@ -138,21 +163,30 @@ class ClipRunner:
 
         rois = params.get("rois")
         if rois:
-            roi_l, roi_r = rois["left"], rois["right"]
+            # the studio sends fractional ROIs (0–1); the engine crops in source pixels.
+            w, h = reframe.probe_dimensions(clip_path)
+            roi_l, roi_r = _scale_roi(rois["left"], w, h), _scale_roi(rois["right"], w, h)
         else:
             faces = reframe.detect_faces(clip_path, frame_path=str(d / "frame.jpg"))
             roi_l, roi_r = faces["rois"]["left"], faces["rois"]["right"]
 
-        words_path = self.source_paths(meta["source_id"])[1] if meta.get("source_id") else None
-        diar = self.diarization_from_words(words_path)
-        track = reframe.speaker_track(
-            clip_path, roi_left=roi_l, roi_right=roi_r, diarization=diar,
-            work_dir=str(d), **self._hooks(job),
-        )
+        edited = _clean_segments(params.get("segments"))
+        if edited:
+            # a hand-edited speaker track (drag/flip in S7) renders verbatim — no diar⊕ROI.
+            track = {"segments": edited, "roiL": roi_l, "roiR": roi_r, "source": "manual"}
+        else:
+            words_path = self.source_paths(meta["source_id"])[1] if meta.get("source_id") else None
+            diar = self.diarization_from_words(words_path)
+            track = reframe.speaker_track(
+                clip_path, roi_left=roi_l, roi_right=roi_r, diarization=diar,
+                min_dwell=float(params.get("min_dwell", 1.0)), smoothing=params.get("smoothing"),
+                work_dir=str(d), **self._hooks(job),
+            )
         (d / "track.json").write_text(json.dumps(track))
         out = str(d / "reframed.mp4")
         reframe.render(clip_path, track, aspect=params.get("aspect", "9:16"),
-                       mode=params.get("mode", "pan"), out_path=out, **self._hooks(job))
+                       mode=params.get("mode", "pan"), crop_margin=float(params.get("crop_margin", 0.0)),
+                       out_path=out, **self._hooks(job))
         return {"reframed_path": out, "track": track}
 
     def _do_caption(self, job, *, clip_id: str, params: dict) -> dict:

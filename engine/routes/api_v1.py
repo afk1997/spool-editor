@@ -1450,6 +1450,27 @@ def reframe_clip(clip_id):
     params = {"aspect": aspect, "mode": mode}
     if isinstance(data.get("rois"), dict):
         params["rois"] = data["rois"]
+    # Phase-2 S7 tuning knobs: numeric, clamped to safe ranges.
+    for key, lo, hi in (("min_dwell", 0.0, 10.0), ("smoothing", 1.0, 121.0), ("crop_margin", 0.0, 0.5)):
+        if data.get(key) is not None:
+            try:
+                params[key] = max(lo, min(hi, float(data[key])))
+            except (TypeError, ValueError):
+                return jsonify({"error": "bad_params"}), 400
+    # Edited speaker track (drag/flip the segments in S7) → render verbatim.
+    if data.get("segments") is not None:
+        segs = data["segments"]
+        if not isinstance(segs, list):
+            return jsonify({"error": "bad_params"}), 400
+        clean = []
+        for s in segs:
+            if not isinstance(s, dict) or s.get("speaker") not in ("left", "right"):
+                return jsonify({"error": "bad_params"}), 400
+            try:
+                clean.append({"start": float(s["start"]), "end": float(s["end"]), "speaker": s["speaker"]})
+            except (KeyError, TypeError, ValueError):
+                return jsonify({"error": "bad_params"}), 400
+        params["segments"] = clean
     jid = _cm().submit(kind="reframe", clip_id=clip_id, params=params,
                        target=_cr().reframe_target(clip_id=clip_id, params=params))
     return jsonify(_clip_job_view(_cm().get(jid))), 201

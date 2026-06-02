@@ -169,11 +169,12 @@ def test_reframe_target_uses_confirmed_rois_without_detection(runner, monkeypatc
     _words_file(runner, with_speakers=False)
     _seed_clip(runner)
     detected = []
+    _patch(monkeypatch, "reframe", "probe_dimensions", lambda p: (1920, 1080))
     _patch(monkeypatch, "reframe", "detect_faces", lambda *a, **k: detected.append(1))
     _patch(monkeypatch, "reframe", "speaker_track", lambda c, **kw: {"segments": [], "roiL": kw["roi_left"], "roiR": kw["roi_right"], "source": "roi"})
     _patch(monkeypatch, "reframe", "render", lambda c, t, **kw: Path(kw["out_path"]).write_bytes(b"R"))
 
-    rois = {"left": {"x": 1, "y": 2, "w": 3, "h": 4}, "right": {"x": 5, "y": 6, "w": 7, "h": 8}}
+    rois = {"left": {"x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0}, "right": {"x": 0.5, "y": 0.0, "w": 0.5, "h": 1.0}}
     job = _job("reframe", clip_id="clipA")
     runner.reframe_target(clip_id="clipA", params={"rois": rois})(job)
     assert detected == []  # confirmed ROIs → no auto-detect
@@ -286,3 +287,63 @@ def test_target_swallows_cancellation_cleanly(runner, monkeypatch):
     # A cancelled ffmpeg must not surface as a job error — return cleanly.
     runner.cut_target(source_id="src1", clip_id="c", params={"start": 0, "end": 1})(job)
     assert job.result == {} and job.error_message is None
+
+
+# ---- reframe: Phase-2 tuning (fractional ROIs · knobs · edited track) ------
+
+def test_reframe_scales_fractional_rois_to_pixels(runner, monkeypatch):
+    """The studio sends resolution-independent fractional ROIs (0–1); the runner scales
+    them to source pixels before the engine (which crops in pixels)."""
+    _words_file(runner, with_speakers=False)
+    _seed_clip(runner)
+    seen = {}
+    _patch(monkeypatch, "reframe", "probe_dimensions", lambda p: (1920, 1080))
+    _patch(monkeypatch, "reframe", "detect_faces", lambda *a, **k: pytest.fail("rois given → no detect"))
+    _patch(monkeypatch, "reframe", "speaker_track",
+           lambda c, **kw: (seen.update(roi_left=kw["roi_left"], roi_right=kw["roi_right"]),
+                            {"segments": [], "roiL": kw["roi_left"], "roiR": kw["roi_right"], "source": "roi"})[-1])
+    _patch(monkeypatch, "reframe", "render", lambda c, t, **kw: Path(kw["out_path"]).write_bytes(b"R"))
+    rois = {"left": {"x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0},
+            "right": {"x": 0.5, "y": 0.0, "w": 0.5, "h": 1.0}}
+    runner.reframe_target(clip_id="clipA", params={"rois": rois})(_job("reframe", clip_id="clipA"))
+    assert seen["roi_left"] == {"x": 0, "y": 0, "w": 960, "h": 1080}
+    assert seen["roi_right"] == {"x": 960, "y": 0, "w": 960, "h": 1080}
+
+
+def test_reframe_forwards_tuning_params(runner, monkeypatch):
+    """min-dwell + smoothing reach speaker_track; crop-margin reaches render (S7 knobs)."""
+    _words_file(runner)
+    _seed_clip(runner)
+    seen = {}
+    _patch(monkeypatch, "reframe", "probe_dimensions", lambda p: (1920, 1080))
+    _patch(monkeypatch, "reframe", "detect_faces", lambda c, **k: {
+        "width": 1920, "height": 1080, "frame_path": k.get("frame_path"),
+        "rois": {"left": {"x": 0, "y": 0, "w": 960, "h": 1080},
+                 "right": {"x": 960, "y": 0, "w": 960, "h": 1080}}})
+    _patch(monkeypatch, "reframe", "speaker_track",
+           lambda c, **kw: (seen.update(track=kw),
+                            {"segments": [], "roiL": kw["roi_left"], "roiR": kw["roi_right"], "source": "fused"})[-1])
+    _patch(monkeypatch, "reframe", "render",
+           lambda c, t, **kw: (seen.update(render=kw), Path(kw["out_path"]).write_bytes(b"R"))[-1])
+    runner.reframe_target(clip_id="clipA", params={
+        "min_dwell": 2.0, "smoothing": 25, "crop_margin": 0.2, "aspect": "9:16", "mode": "pan"},
+    )(_job("reframe", clip_id="clipA"))
+    assert seen["track"]["min_dwell"] == 2.0 and seen["track"]["smoothing"] == 25
+    assert seen["render"]["crop_margin"] == 0.2
+
+
+def test_reframe_uses_edited_segments_override(runner, monkeypatch):
+    """An edited speaker track (drag/flip in S7) renders verbatim — skip the diar⊕ROI
+    builder and mark the track source 'manual'."""
+    _words_file(runner)
+    d = _seed_clip(runner)
+    seen = {}
+    _patch(monkeypatch, "reframe", "probe_dimensions", lambda p: (1920, 1080))
+    _patch(monkeypatch, "reframe", "speaker_track", lambda *a, **k: pytest.fail("edited track → skip speaker_track"))
+    _patch(monkeypatch, "reframe", "render", lambda c, t, **kw: (seen.update(track=t), Path(kw["out_path"]).write_bytes(b"R"))[-1])
+    rois = {"left": {"x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0}, "right": {"x": 0.5, "y": 0.0, "w": 0.5, "h": 1.0}}
+    segs = [{"start": 0.0, "end": 3.0, "speaker": "right"}, {"start": 3.0, "end": 8.0, "speaker": "left"}]
+    runner.reframe_target(clip_id="clipA", params={"rois": rois, "segments": segs})(_job("reframe", clip_id="clipA"))
+    assert seen["track"]["segments"] == segs and seen["track"]["source"] == "manual"
+    saved = json.loads((d / "track.json").read_text())
+    assert saved["source"] == "manual" and saved["segments"] == segs

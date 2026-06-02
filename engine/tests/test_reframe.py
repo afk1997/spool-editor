@@ -92,7 +92,7 @@ def test_speaker_track_fused_when_diarization_present(monkeypatch, tmp_path):
     monkeypatch.setattr(reframe, "_measure_roi_motion",
                         lambda clip, roi, out, **kw: measured.append(roi))
     monkeypatch.setattr(reframe, "_roi_motion_segments",
-                        lambda l, r, m: [{"start": 0.0, "end": 5.0, "speaker": "left"},
+                        lambda l, r, m, smoothing=None: [{"start": 0.0, "end": 5.0, "speaker": "left"},
                                          {"start": 5.0, "end": 10.0, "speaker": "right"}])
     left, right = _rois()
     track = reframe.speaker_track(
@@ -110,7 +110,7 @@ def test_speaker_track_fused_when_diarization_present(monkeypatch, tmp_path):
 def test_speaker_track_roi_only_without_diarization(monkeypatch, tmp_path):
     monkeypatch.setattr(reframe, "_measure_roi_motion", lambda *a, **k: None)
     monkeypatch.setattr(reframe, "_roi_motion_segments",
-                        lambda l, r, m: [{"start": 0.0, "end": 3.0, "speaker": "left"},
+                        lambda l, r, m, smoothing=None: [{"start": 0.0, "end": 3.0, "speaker": "left"},
                                          {"start": 3.0, "end": 4.0, "speaker": "left"}])
     left, right = _rois()
     track = reframe.speaker_track("clip.mp4", roi_left=left, roi_right=right, work_dir=str(tmp_path))
@@ -189,3 +189,63 @@ def test_render_pan_without_segments_falls_back_to_center(monkeypatch, tmp_path)
 def test_render_rejects_unknown_aspect_or_mode(tmp_path, kw):
     with pytest.raises(ValueError):
         reframe.render("clip.mp4", _track(), out_path=str(tmp_path / "o.mp4"), **kw)
+
+
+# ---- Phase 2: tunable speaker-track + crop margin (S7) --------------------
+
+def test_speaker_track_forwards_min_dwell_and_smoothing(monkeypatch, tmp_path):
+    """min-dwell + smoothing are real S7 knobs, forwarded to the timeline builder."""
+    seen = {}
+    monkeypatch.setattr(reframe, "_measure_roi_motion", lambda *a, **k: None)
+    monkeypatch.setattr(
+        reframe, "_roi_motion_segments",
+        lambda l, r, min_dwell, smoothing=None: (seen.update(min_dwell=min_dwell, smoothing=smoothing), [])[-1],
+    )
+    left, right = _rois()
+    reframe.speaker_track("clip.mp4", roi_left=left, roi_right=right,
+                          work_dir=str(tmp_path), min_dwell=2.5, smoothing=31)
+    assert seen["min_dwell"] == 2.5
+    assert seen["smoothing"] == 31
+
+
+def _write_motion(path, vals):
+    """Synthesize a roi_motion input file: one frame = a pts_time line + a YAVG line."""
+    from pathlib import Path
+    lines = []
+    for i, v in enumerate(vals):
+        lines.append(f"frame:{i} pts:{i} pts_time:{i / 30:.6f}")
+        lines.append(f"lavfi.signalstats.YAVG={v:.6f}")
+    Path(path).write_text("\n".join(lines) + "\n")
+
+
+def test_roi_motion_smoothing_changes_segmentation(tmp_path):
+    """Smoothing is a real knob in the vendored timeline builder: a tiny window follows
+    every alternation a heavy window averages away. Runs the real roi_motion CLI with
+    min_dwell=0 so the merge step doesn't mask the effect."""
+    left_vals, right_vals = [], []
+    for block in range(6):                       # 6 × 15 frames, alternating dominance
+        hi = block % 2 == 0
+        left_vals += [2.0 if hi else 1.0] * 15
+        right_vals += [1.0 if hi else 2.0] * 15
+    lz, rz = str(tmp_path / "l.txt"), str(tmp_path / "r.txt")
+    _write_motion(lz, left_vals)
+    _write_motion(rz, right_vals)
+    sharp = reframe._roi_motion_segments(lz, rz, 0.0, smoothing=1)
+    smooth = reframe._roi_motion_segments(lz, rz, 0.0, smoothing=91)
+    assert len(sharp) >= 6                        # tiny window keeps every alternation
+    assert len(smooth) <= 2                        # heavy window collapses them away
+    assert len(sharp) > len(smooth)                # smoothing demonstrably reduces switching
+
+
+def test_render_pan_crop_margin_tightens_crop(monkeypatch, tmp_path):
+    """crop-margin (S7) zooms the pan crop in — a tighter box than the full-height strip,
+    still scaled to the target aspect. crop_margin=0 is byte-identical to today (above)."""
+    import re
+    captured = _capture_render(monkeypatch)
+    reframe.render("clip.mp4", _track(), aspect="9:16", mode="pan",
+                   crop_margin=0.25, out_path=str(tmp_path / "o.mp4"))
+    vf = captured["argv"][captured["argv"].index("-vf") + 1]
+    m = re.match(r"crop=(\d+):(\d+):", vf)
+    cw, ch = int(m.group(1)), int(m.group(2))
+    assert ch < 1080 and cw < 608                # tighter than the crop_margin=0 strip
+    assert "scale=1080:1920" in vf               # still fills 9:16

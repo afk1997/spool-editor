@@ -44,6 +44,7 @@ def mock_engine(monkeypatch):
     monkeypatch.setattr(cr.reframe, "detect_faces", lambda c, **k: {
         "width": 2, "height": 1, "frame_path": k.get("frame_path"),
         "rois": {"left": {"x": 0, "y": 0, "w": 1, "h": 1}, "right": {"x": 1, "y": 0, "w": 1, "h": 1}}})
+    monkeypatch.setattr(cr.reframe, "probe_dimensions", lambda p: (1920, 1080))
     monkeypatch.setattr(cr.reframe, "speaker_track", lambda c, **k: {
         "segments": [], "roiL": k["roi_left"], "roiR": k["roi_right"], "source": "fused"})
     monkeypatch.setattr(cr.reframe, "render", lambda c, t, **k: w(k["out_path"], b"R"))
@@ -158,6 +159,37 @@ def test_reframe_400_bad_aspect(client):
     app, c = client
     _seed_clip(app)
     assert c.post("/api/v1/clips/clipA/reframe", json={"aspect": "3:2"}).status_code == 400
+
+
+def test_reframe_accepts_tuning_and_fractional_rois(client):
+    """S7 sends the knobs (min-dwell/smoothing/crop-margin), fractional ROIs, and an
+    optionally edited speaker track — all reach the job params."""
+    app, c = client
+    _seed_source(app)
+    _seed_clip(app)
+    body = {"aspect": "9:16", "mode": "pan", "min_dwell": 1.5, "smoothing": 21, "crop_margin": 0.15,
+            "rois": {"left": {"x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0},
+                     "right": {"x": 0.5, "y": 0.0, "w": 0.5, "h": 1.0}},
+            "segments": [{"start": 0.0, "end": 5.0, "speaker": "left"}]}
+    r = c.post("/api/v1/clips/clipA/reframe", json=body)
+    assert r.status_code == 201
+    p = c.get(f"/api/v1/clip-jobs/{r.get_json()['id']}").get_json()["params"]
+    assert p["min_dwell"] == 1.5 and p["smoothing"] == 21 and p["crop_margin"] == 0.15
+    assert p["rois"]["left"]["w"] == 0.5
+    assert p["segments"][0]["speaker"] == "left"
+    _await(c, r.get_json()["id"])
+
+
+@pytest.mark.parametrize("body", [
+    {"segments": "nope"},
+    {"segments": [{"start": 0.0, "end": 1.0, "speaker": "middle"}]},
+    {"crop_margin": "x"},
+    {"smoothing": "lots"},
+])
+def test_reframe_400_on_bad_tuning(client, body):
+    app, c = client
+    _seed_clip(app)
+    assert c.post("/api/v1/clips/clipA/reframe", json=body).status_code == 400
 
 
 # ---- captions --------------------------------------------------------

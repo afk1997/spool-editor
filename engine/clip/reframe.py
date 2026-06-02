@@ -85,6 +85,7 @@ def speaker_track(
     roi_right: dict,
     diarization: list[dict] | None = None,
     min_dwell: float = 1.0,
+    smoothing: int | None = None,
     work_dir: str | None = None,
     cancel_check=None,
     register_proc=None,
@@ -103,7 +104,7 @@ def speaker_track(
     _measure_roi_motion(clip_path, roi_left, left_txt, cancel_check=cancel_check, register_proc=register_proc)
     _measure_roi_motion(clip_path, roi_right, right_txt, cancel_check=cancel_check, register_proc=register_proc)
 
-    video_segments = _roi_motion_segments(left_txt, right_txt, min_dwell)
+    video_segments = _roi_motion_segments(left_txt, right_txt, min_dwell, smoothing)
 
     if diarization:
         segments = _fuse_diar_roi(video_segments, diarization)
@@ -132,12 +133,14 @@ def _measure_roi_motion(clip_path, roi, out_txt, *, cancel_check=None, register_
     )
 
 
-def _roi_motion_segments(left_txt: str, right_txt: str, min_dwell: float) -> list[dict]:
-    """Run the vendored roi_motion CLI on the two motion files → L/R segments."""
-    out = subprocess.run(
-        [sys.executable, _ROI_MOTION_SCRIPT, left_txt, right_txt, str(min_dwell)],
-        capture_output=True, text=True, timeout=120,
-    )
+def _roi_motion_segments(left_txt: str, right_txt: str, min_dwell: float,
+                         smoothing: int | None = None) -> list[dict]:
+    """Run the vendored roi_motion CLI on the two motion files → L/R segments.
+    ``smoothing`` (optional) tunes the builder's averaging window (its 4th CLI arg)."""
+    argv = [sys.executable, _ROI_MOTION_SCRIPT, left_txt, right_txt, str(min_dwell)]
+    if smoothing is not None:
+        argv.append(str(int(smoothing)))
+    out = subprocess.run(argv, capture_output=True, text=True, timeout=120)
     if out.returncode != 0:
         raise RuntimeError(f"roi_motion failed (rc={out.returncode}): {out.stderr.strip()[-300:]}")
     return json.loads(out.stdout)
@@ -231,6 +234,7 @@ def render(
     *,
     aspect: str = "9:16",
     mode: str = "pan",
+    crop_margin: float = 0.0,
     out_path: str,
     cancel_check=None,
     register_proc=None,
@@ -255,7 +259,7 @@ def render(
             "-map", "[vout]", "-map", "0:a?", "-c:a", "copy", out_path,
         ]
     else:
-        vf = _pan_vf(track, src_w, src_h, out_w, out_h) if mode == "pan" \
+        vf = _pan_vf(track, src_w, src_h, out_w, out_h, crop_margin) if mode == "pan" \
             else _center_vf(src_w, src_h, out_w, out_h)
         argv = base + ["-vf", vf, "-c:a", "copy", out_path]
 
@@ -268,10 +272,15 @@ def render(
     return out_path
 
 
-def _pan_vf(track: dict, src_w: int, src_h: int, out_w: int, out_h: int) -> str:
-    """A vertical strip (target aspect) that hard-cuts its x to the active speaker."""
+def _pan_vf(track: dict, src_w: int, src_h: int, out_w: int, out_h: int, crop_margin: float = 0.0) -> str:
+    """A vertical strip (target aspect) that hard-cuts its x to the active speaker.
+    ``crop_margin`` (0–0.5) tightens the crop around the speaker (zoom in), keeping aspect;
+    crop_margin=0 is the full-height strip (byte-identical to before)."""
     segments = track.get("segments") or []
-    strip_w = min(src_w, round(src_h * out_w / out_h))
+    m = max(0.0, min(0.5, float(crop_margin)))
+    strip_h = max(1, round(src_h * (1.0 - m)))
+    strip_w = min(src_w, round(strip_h * out_w / out_h))
+    y0 = (src_h - strip_h) // 2
 
     def left_edge(roi: dict) -> int:
         cx = roi["x"] + roi["w"] / 2
@@ -284,7 +293,7 @@ def _pan_vf(track: dict, src_w: int, src_h: int, out_w: int, out_h: int) -> str:
     left_x = left_edge(track["roiL"])
     right_x = left_edge(track["roiR"])
     expr = _run_pan_expr(segments, left_x, right_x)
-    return f"crop={strip_w}:{src_h}:x='{expr}':y=0,scale={out_w}:{out_h}"
+    return f"crop={strip_w}:{strip_h}:x='{expr}':y={y0},scale={out_w}:{out_h}"
 
 
 def _center_vf(src_w: int, src_h: int, out_w: int, out_h: int) -> str:

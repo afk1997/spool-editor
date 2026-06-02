@@ -37,7 +37,7 @@ def norm(v):
 
 n_l = norm(v_l); n_d = norm(v_d)
 
-WIN = 15
+WIN = int(sys.argv[4]) if len(sys.argv) > 4 else 15
 def smooth(v):
     out = []
     for i in range(len(v)):
@@ -47,7 +47,7 @@ def smooth(v):
 
 s_l = smooth(n_l); s_d = smooth(n_d)
 
-MARGIN = 1.15
+MARGIN = float(sys.argv[5]) if len(sys.argv) > 5 else 1.15
 speaker = []
 cur = 0 if s_l[0] >= s_d[0] else 1
 for i in range(len(s_l)):
