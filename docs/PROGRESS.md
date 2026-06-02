@@ -39,8 +39,20 @@
 > (`/jobs/<id>/file`); api-client gained `jobFileUrl`; Export tab shows each render's on-disk path
 > (`engine/downloads/clips/<clip>/renders/<rid>.mp4`) + Copy + Download. (4) **Home "Import / Paste
 > URL"** carries a pasted URL to `/import?url=…` (pre-fills the box; useSearchParams + Suspense).
-> **Known not-yet-wired (next):** the Import screen's 3 toggles (subtitles / chapters / embed
-> metadata+thumbnail) are still UI-only — not passed to the yt-dlp runner.
+>
+> **"1:1 = functional, zero dummy" sweep — ✅ done (Kaivan clarified 1:1 means functional, not just
+> pixel-match):** audited every screen for fake-interactive controls / fabricated data and fixed all:
+> (a) **Import toggles** now reach yt-dlp (`--write-subs` / `--embed-chapters` / `--embed-metadata
+> --embed-thumbnail`) — verified in the output file (embedded title/artist/date/chapters + thumbnail);
+> +1 engine test (609). (b) **Caption Studio** previews the clip's **real transcript words**;
+> (c) **Reframe** shows the **real diar⊕ROI segments**; (d) real inline **video playback** (source +
+> render, prior commit). (e) **Settings** = honest read-only real values (no fake selectors).
+> (f) **Neutralized** all Phase-2/3 mocks to honest disabled/"Phase N" states (no fabricated data):
+> Editor timeline/A-B/word-cut/brand-tab → Phase 2; Reframe min-dwell/smoothing → Phase 2;
+> Brand screen → FutureScreen "Phase 2"; Onboarding model-download/test-render animations dropped
+> (real /doctor state); Project "Audio energy" → Phase 3. **Principle (in memory):** wire if a real
+> path exists, else an honest "Phase N" state — never a fake control. 609 engine · 12 studio unit ·
+> e2e green.
 >
 > **Glass-box / honesty notes (Phase-1 boundaries, documented deviations from the demo's mock):**
 > candidate cards show real named `signals` + a real transcript excerpt (no fabricated 0-100 score —
