@@ -69,7 +69,9 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
   9:16/16:9/1:1/4:5). 15 tests.
 - [ ] ◻️ **`moments`** — LLM moment-finding over `words.json` (local Ollama default,
   hosted opt-in per spec §10).
-- [ ] ◻️ **`exporter`** — final mux + platform/loudness preset + brand kit.
+- [x] **`exporter`** — platform presets (tiktok/reels/shorts/linkedin/x/youtube) →
+  codec/bitrate/fps + -14 LUFS loudnorm, hardware encoder (VideoToolbox/NVENC/x264),
+  fast-vs-quality. Brand kits deferred to P2. 9 tests.
 - [ ] ◻️ **`api_v1` clip endpoints + clip/render job types** (extend `JobManager`).
 - [ ] ◻️ **MCP clip tools** + elicitation + `spool://` resources.
 - [ ] ◻️ **Studio screens** (S0–S5, S7 basic, S8 presets, S10, S11) wired to `api_v1`;
@@ -80,7 +82,7 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
 - `pnpm install` → 6 workspace projects, 354 packages, clean.
 - `pnpm typecheck` → 9/9 tasks pass. `pnpm build` → Next.js 16 compiles, static pages generate.
 - `engine/` `.py` files diff byte-identical against the validated trove clone.
-- **engine: 495 tests pass** (exit 0) on Python 3.12 via uv venv — headless trove suite (467) + `clip.cutter` (7) + `clip.captioner` (6) + `clip.reframe` (15).
+- **engine: 504 tests pass** (exit 0) on Python 3.12 via uv venv — headless trove suite (467) + `clip.cutter` (7) + `clip.captioner` (6) + `clip.reframe` (15) + `clip.exporter` (9).
 - **`docker compose up`** builds the multi-stage image and serves `/api/v1/health` from the host — the packaged engine works end to end.
 - **headless serving** (venv): `/api/v1/doctor` reports real tooling — ffmpeg 7.1.1, whisper.cpp 1.5.0, yt-dlp 2026.3.17, VideoToolbox encoders.
 
