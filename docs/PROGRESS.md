@@ -4,7 +4,8 @@
 > `Spool_Engineering-Spec.md` (§5 roadmap, §6 front-end standards). Status legend:
 > ✅ done & verified · 🟡 in progress · ◻️ not started.
 >
-> **Last updated:** 2026-06-02 · **Phase 0 (foundation) — ✅ COMPLETE.** Next: Phase 1 (core clip loop + UI).
+> **Last updated:** 2026-06-02 · **Phase 0 — ✅ COMPLETE.** Phase 1: the full engine chain
+> (moments → cutter → reframe → captioner → exporter) is ✅ done & green. Next: `api_v1` clip endpoints.
 
 ## Roadmap at a glance
 
@@ -20,7 +21,7 @@ graph TD
       B6["Docker headless + root compose — verified (builds + serves)"]:::done
     end
     subgraph P1["Phase 1 — Core clip loop + own UI (MVP)"]
-      C1["Engine: moments · cutter · reframe(diar plus ROI) · captioner · exporter"]:::todo
+      C1["Engine: moments · cutter · reframe(diar plus ROI) · captioner · exporter"]:::done
       C2["MCP: clip tools + elicitation + spool:// resources"]:::todo
       C3["UI: S0-S5, S7 basic, S8 presets, S10, S11 + Agent panel + Cmd-K"]:::todo
       C4["Port demo design tokens into the Tailwind theme; component library"]:::todo
@@ -67,13 +68,15 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
   (per-ROI ffmpeg motion → vendored `roi_motion` → **diar⊕ROI fusion**, still/off-mic
   speakers resolved by audio turns) + `render` (pan via vendored `pan_expr`, split, center;
   9:16/16:9/1:1/4:5). 15 tests.
-- [ ] ◻️ **`moments`** — LLM moment-finding over `words.json`, reusing clipify's
-  `SKILL.md` Step-1 heuristics (punchlines / reversals / awkward pauses / quotable
-  one-liners / audio peaks → `[start, end, title, why]`). **LLM via a pluggable provider;
-  DEFAULT = "codex bridge"** — the user's ChatGPT/Codex subscription through the Codex CLI
-  (no API key, no local GPU). Agent mode uses the driving agent's own LLM; a Claude/local
-  provider can slot in later. Only transcript text leaves the machine; offline-mode disables
-  it. **(Supersedes spec §10 #2's local-Ollama default.)**
+- [x] **`moments`** — LLM moment-finding over `words.json` via a **pluggable provider
+  layer** (`clip/llm.py`): DEFAULT = **codex bridge** (`codex exec`, read-only sandbox,
+  prompt piped over stdin — the user's ChatGPT/Codex subscription, no key/GPU), plus a
+  `CallableProvider` for the injected **agent** LLM and room for Claude/local. Prompt reuses
+  **clipify's Step-1 heuristics** (punchlines/reversals/awkward pauses/quotable one-liners/
+  audio peaks), mode-tuned (funny/insightful/hot-take/story/how-to/q&a). Tolerant JSON parse
+  (bare/fenced/prose), range clamp-to-duration, `transcript_window`, glass-box-ready
+  `signals`. Only transcript text egresses; **`SPOOL_OFFLINE=1` disables the bridge**.
+  16 (`llm`) + 15 (`moments`) tests, provider mocked. **(Supersedes spec §10 #2's Ollama default.)**
 - [x] **`exporter`** — platform presets (tiktok/reels/shorts/linkedin/x/youtube) →
   codec/bitrate/fps + -14 LUFS loudnorm, hardware encoder (VideoToolbox/NVENC/x264),
   fast-vs-quality. Brand kits deferred to P2. 9 tests.
@@ -87,7 +90,7 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
 - `pnpm install` → 6 workspace projects, 354 packages, clean.
 - `pnpm typecheck` → 9/9 tasks pass. `pnpm build` → Next.js 16 compiles, static pages generate.
 - `engine/` `.py` files diff byte-identical against the validated trove clone.
-- **engine: 504 tests pass** (exit 0) on Python 3.12 via uv venv — headless trove suite (467) + `clip.cutter` (7) + `clip.captioner` (6) + `clip.reframe` (15) + `clip.exporter` (9).
+- **engine: 535 tests pass** (exit 0) on Python 3.12 via uv venv — headless trove suite (467) + `clip.cutter` (7) + `clip.captioner` (6) + `clip.reframe` (15) + `clip.exporter` (9) + `clip.llm` (16) + `clip.moments` (15).
 - **`docker compose up`** builds the multi-stage image and serves `/api/v1/health` from the host — the packaged engine works end to end.
 - **headless serving** (venv): `/api/v1/doctor` reports real tooling — ffmpeg 7.1.1, whisper.cpp 1.5.0, yt-dlp 2026.3.17, VideoToolbox encoders.
 
@@ -116,6 +119,9 @@ Spec: `docs/Spool_Engineering-Spec.md` (§5 phases, §6 front-end). Visual sourc
   spec's local-Ollama default (§10 #2). Local-first preserved: only transcript text is
   sent (media never leaves the machine), agent mode uses the agent's own LLM, and
   offline-mode disables the bridge. Pluggable so a Claude/local provider can be added.
+  Implemented in `clip/llm.py`. **New Spool config uses the `SPOOL_*` env namespace**
+  (not `TROVE_*`): `SPOOL_LLM_PROVIDER` (default `codex`), `SPOOL_CODEX_BIN/MODEL/TIMEOUT`,
+  and the engine-wide offline switch `SPOOL_OFFLINE=1`.
 - Engine = flat fold-in of trove (reuse, don't rebuild); htmx stripped in Phase 0, not at bootstrap.
 - **Dev/test loop = local uv venv (Python 3.12)**, not Docker. Docker is reserved for packaging (B6) and was reset after a full-disk corruption.
 - Internal TS packages export raw source; Next `transpilePackages` compiles them.

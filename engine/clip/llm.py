@@ -1,0 +1,150 @@
+"""Pluggable LLM provider layer for the clip engine.
+
+Moment-finding (and, later, title/description generation) needs a language model.
+Spool is local-first, so there is no hosted API key by default. The DEFAULT provider
+is the **codex bridge**: it shells out to the user's own Codex CLI, authed with their
+ChatGPT/Codex subscription — no API key, no local GPU. Other providers slot in behind
+the same tiny ``complete(prompt, *, system)`` interface:
+
+- ``codex``  (default) — bridge to the Codex CLI. Network egress: only the prompt text.
+- ``agent``  — the driving MCP agent's own LLM, injected as a :class:`CallableProvider`
+               by the MCP layer (the engine itself performs no egress).
+- future ``claude`` (hosted key) / ``local`` (Ollama/llama.cpp) — offline-safe.
+
+This **supersedes** the spec's local-Ollama default (Product Overview §10 #2): the
+default is the codex bridge instead.
+
+Privacy / offline. Only transcript *text* is ever sent — media never leaves the
+machine. The offline switch (``SPOOL_OFFLINE=1``) hard-disables every egress provider;
+a local provider would still run offline. Egress providers declare ``egress = True`` so
+:func:`complete` can refuse them when offline.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from typing import Callable, Protocol, runtime_checkable
+
+# Configurable knobs (env). New Spool functionality → ``SPOOL_*`` namespace.
+DEFAULT_PROVIDER = "codex"
+CODEX_BIN = os.environ.get("SPOOL_CODEX_BIN", "codex")
+CODEX_MODEL = os.environ.get("SPOOL_CODEX_MODEL") or None  # None → the CLI's own default
+CODEX_TIMEOUT = int(os.environ.get("SPOOL_CODEX_TIMEOUT", "180"))
+
+_TRUE = {"1", "true", "yes", "on"}
+
+
+class OfflineError(RuntimeError):
+    """Raised when an egress provider is requested while offline-mode is on."""
+
+
+class ProviderUnavailableError(RuntimeError):
+    """Raised when a provider can't run (unknown name, or the Codex CLI is missing)."""
+
+
+def is_offline(env: dict | None = None) -> bool:
+    """True when the engine-wide offline switch (``SPOOL_OFFLINE``) is set."""
+    e = env if env is not None else os.environ
+    return (e.get("SPOOL_OFFLINE") or "").strip().lower() in _TRUE
+
+
+@runtime_checkable
+class LLMProvider(Protocol):
+    name: str
+    egress: bool
+
+    def complete(self, prompt: str, *, system: str | None = None) -> str: ...
+
+
+class CodexProvider:
+    """Bridge to the user's Codex CLI (ChatGPT/Codex subscription).
+
+    Runs ``codex exec`` non-interactively in a **read-only sandbox** (so the agent
+    can never touch the filesystem) and feeds the prompt over stdin — transcripts can
+    be large. The final message on stdout is returned verbatim; the caller parses it.
+    """
+
+    name = "codex"
+    egress = True
+
+    def __init__(self, *, bin: str | None = None, model: str | None = None,
+                 timeout: int | None = None, cwd: str | None = None):
+        self.bin = bin or CODEX_BIN
+        self.model = model if model is not None else CODEX_MODEL
+        self.timeout = timeout if timeout is not None else CODEX_TIMEOUT
+        self.cwd = cwd
+
+    def complete(self, prompt: str, *, system: str | None = None) -> str:
+        if shutil.which(self.bin) is None:
+            raise ProviderUnavailableError(
+                f"the Codex CLI ({self.bin!r}) was not found on PATH. Install it "
+                "(`npm i -g @openai/codex`) and sign in with your ChatGPT/Codex "
+                "account, set SPOOL_CODEX_BIN to its path, or choose another LLM "
+                "provider via SPOOL_LLM_PROVIDER."
+            )
+        full = prompt if not system else f"{system}\n\n{prompt}"
+        argv = [self.bin, "exec", "--sandbox", "read-only", "--skip-git-repo-check"]
+        if self.model:
+            argv += ["-m", self.model]
+        try:
+            proc = subprocess.run(
+                argv, input=full, capture_output=True, text=True,
+                timeout=self.timeout, cwd=self.cwd,
+            )
+        except FileNotFoundError as e:  # race: vanished between which() and run()
+            raise ProviderUnavailableError(f"the Codex CLI ({self.bin!r}) could not be run: {e}") from e
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"codex exec failed (rc={proc.returncode}): {(proc.stderr or '').strip()[-500:]}"
+            )
+        return proc.stdout
+
+
+class CallableProvider:
+    """Wraps an arbitrary ``fn(prompt, *, system) -> str``.
+
+    Used for the ``agent`` provider (the MCP layer injects the driving agent's own
+    sampling) and for tests. Defaults to ``egress=False`` — the engine performs no
+    network I/O itself, so it is allowed in offline-mode.
+    """
+
+    def __init__(self, fn: Callable[..., str], *, name: str = "agent", egress: bool = False):
+        self._fn = fn
+        self.name = name
+        self.egress = egress
+
+    def complete(self, prompt: str, *, system: str | None = None) -> str:
+        return self._fn(prompt, system=system)
+
+
+def get_provider(provider: "str | LLMProvider | None" = None, *, env: dict | None = None) -> LLMProvider:
+    """Resolve a provider.
+
+    ``provider`` may be an :class:`LLMProvider` instance (returned as-is — this is how
+    the MCP layer injects the agent's own LLM), or a name string. ``None`` uses the
+    configured default (``SPOOL_LLM_PROVIDER`` env, else ``codex``).
+    """
+    if provider is not None and not isinstance(provider, str):
+        return provider
+    e = env if env is not None else os.environ
+    name = (provider or e.get("SPOOL_LLM_PROVIDER") or DEFAULT_PROVIDER).lower()
+    if name == "codex":
+        return CodexProvider()
+    raise ProviderUnavailableError(
+        f"unknown LLM provider {name!r}. Built-in providers: 'codex' (default). The "
+        "'agent' provider is injected by the MCP layer — pass it as an instance, not a name."
+    )
+
+
+def complete(prompt: str, *, system: str | None = None,
+             provider: "str | LLMProvider | None" = None, env: dict | None = None) -> str:
+    """Run a single completion through the resolved provider, enforcing offline-mode."""
+    p = get_provider(provider, env=env)
+    if getattr(p, "egress", False) and is_offline(env):
+        raise OfflineError(
+            f"LLM provider {p.name!r} needs network egress, but offline-mode "
+            "(SPOOL_OFFLINE=1) is on. Use a local provider or turn offline-mode off. "
+            "Only transcript text would have been sent — media never leaves the machine."
+        )
+    return p.complete(prompt, system=system)
