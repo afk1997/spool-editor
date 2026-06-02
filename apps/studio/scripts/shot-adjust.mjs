@@ -1,0 +1,12 @@
+import { chromium } from "playwright";
+const SRC="c030adbde9";
+const browser = await chromium.launch({ channel: "chrome" });
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+const errs=[]; page.on("pageerror",e=>errs.push(e.message));
+await page.goto("http://localhost:3000/sources/"+SRC+"/discovery", { waitUntil: "domcontentloaded" });
+await page.waitForTimeout(3500);
+await page.getByRole("button", { name: /Adjust in\/out/i }).first().click({ force: true });
+await page.waitForTimeout(700);
+await page.screenshot({ path: "/tmp/studio_adjust.png" });
+console.log(errs.length?"ERR: "+errs.join(" | "):"no client errors");
+await browser.close();

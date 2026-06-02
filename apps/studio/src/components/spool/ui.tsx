@@ -169,6 +169,13 @@ export function AspectBadge({ a = "9:16" }: { a?: string }) {
 
 export const fmtDur = (s: number) => { s = Math.round(s); const m = Math.floor(s / 60), ss = s % 60; return `${m}:${String(ss).padStart(2, "0")}`; };
 export const fmtTC = (s: number) => { const m = Math.floor(s / 60), ss = Math.floor(s % 60), f = Math.floor((s % 1) * 30); return `${String(m).padStart(2, "0")}:${String(ss).padStart(2, "0")}:${String(f).padStart(2, "0")}`; };
+/** Inverse of fmtTC — parse "MM:SS:FF" (or "MM:SS") back to seconds; NaN if malformed. */
+export const parseTC = (tc: string): number => {
+  const parts = tc.trim().split(":").map((p) => parseInt(p, 10));
+  if (!parts.length || parts.some((n) => Number.isNaN(n))) return NaN;
+  const [m = 0, s = 0, f = 0] = parts;
+  return m * 60 + s + f / 30;
+};
 
 /* deterministic hue from a string (video-frame placeholder thumbnail) */
 function seedHue(s: string) { let h = 0; for (let i = 0; i < (s || "").length; i++) h = (h * 31 + s.charCodeAt(i)) % 360; return h; }

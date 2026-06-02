@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useSpool, type Candidate, type TranscriptLine, type SpeakerInfo } from "./context";
-import { Btn, Chip, Empty, Icon, Thumb, fmtTC } from "./ui";
+import { Btn, Chip, Empty, Icon, Thumb, fmtTC, parseTC } from "./ui";
 
 /* Shared work-screen components ported 1:1 from the demo (04): CandidateCard, AdjustModal,
  * DiscoveryBody, TranscriptView. Used by both Project (S4) and Discovery (S5).
@@ -65,23 +65,33 @@ export function CandidateCard({ c, selected, onToggle, onAdjust }: { c: Candidat
   );
 }
 
-export function AdjustModal({ c, onClose }: { c: Candidate; onClose: () => void }) {
-  const [inP, setIn] = useState(c.start), [outP, setOut] = useState(c.end);
+export function AdjustModal({ c, onClose, onSave }: { c: Candidate; onClose: () => void; onSave: (start: number, end: number) => void }) {
+  const [inText, setInText] = useState(fmtTC(c.start));
+  const [outText, setOutText] = useState(fmtTC(c.end));
+  const inP = parseTC(inText), outP = parseTC(outText);
+  const valid = Number.isFinite(inP) && Number.isFinite(outP) && outP > inP;
+  // visual in/out band over the waveform strip, clamped to the modal width
+  const span = Math.max(c.end - c.start, outP - inP, 1);
+  const base = Math.min(c.start, valid ? inP : c.start);
+  const leftPct = valid ? ((inP - base) / span) * 100 : 12;
+  const rightPct = valid ? Math.max(0, 100 - ((outP - base) / span) * 100) : 15;
+  const save = () => { if (valid) onSave(inP, outP); onClose(); };
   return (
     <div className="overlay" onClick={onClose}>
       <div className="palette" style={{ width: "min(560px,92vw)", padding: 20 }} onClick={(e) => e.stopPropagation()}>
         <div className="row" style={{ marginBottom: 16 }}><h3 style={{ fontSize: 17 }}>Adjust “{c.title}”</h3><span className="spacer" /><button className="iconbtn" onClick={onClose}><Icon name="x" size={16} /></button></div>
         <div style={{ borderRadius: 10, overflow: "hidden", marginBottom: 16 }}><Thumb seed={c.id} kind={c.mode} label={false} /></div>
         <div style={{ position: "relative", height: 46, background: "var(--bg-3)", borderRadius: 8, marginBottom: 16, overflow: "hidden" }}>
-          <div style={{ position: "absolute", top: 0, bottom: 0, left: "15%", right: "18%", background: "var(--accent-soft)", borderLeft: "2px solid var(--accent)", borderRight: "2px solid var(--accent)" }} />
+          <div style={{ position: "absolute", top: 0, bottom: 0, left: leftPct + "%", right: rightPct + "%", background: "var(--accent-soft)", borderLeft: "2px solid var(--accent)", borderRight: "2px solid var(--accent)", transition: "left .1s, right .1s" }} />
           <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "space-around", fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-faint)" }}>{["waveform", "·", "·", "·", "·"].map((x, i) => <span key={i}>{x}</span>)}</div>
         </div>
-        <div className="row" style={{ gap: 16, marginBottom: 18 }}>
-          <div className="grow"><span className="field-label">In point</span><input className="input mono" value={fmtTC(inP)} onChange={() => setIn(inP)} /></div>
-          <div className="grow"><span className="field-label">Out point</span><input className="input mono" value={fmtTC(outP)} onChange={() => setOut(outP)} /></div>
-          <Btn variant="ghost" style={{ alignSelf: "flex-end" }}>Snap to sentence</Btn>
+        <div className="row" style={{ gap: 16, marginBottom: 8 }}>
+          <div className="grow"><span className="field-label">In point</span><input className="input mono" value={inText} onChange={(e) => setInText(e.target.value)} placeholder="MM:SS:FF" /></div>
+          <div className="grow"><span className="field-label">Out point</span><input className="input mono" value={outText} onChange={(e) => setOutText(e.target.value)} placeholder="MM:SS:FF" /></div>
+          <Btn variant="ghost" style={{ alignSelf: "flex-end" }} onClick={() => { setInText(fmtTC(c.start)); setOutText(fmtTC(c.end)); }}>Reset</Btn>
         </div>
-        <div className="row" style={{ gap: 10, justifyContent: "flex-end" }}><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn variant="primary" icon="check" onClick={onClose}>Save range</Btn></div>
+        <div className="mono" style={{ fontSize: 11, color: valid ? "var(--text-faint)" : "var(--err)", marginBottom: 14, minHeight: 14 }}>{valid ? `${Math.round(outP - inP)}s clip` : "Out must be after In (MM:SS:FF)"}</div>
+        <div className="row" style={{ gap: 10, justifyContent: "flex-end" }}><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn variant="primary" icon="check" onClick={save} disabled={!valid}>Save range</Btn></div>
       </div>
     </div>
   );
@@ -93,15 +103,18 @@ export function DiscoveryBody({ candidates, sourceId, finding }: { candidates: C
   const ctx = useSpool();
   const [mode, setMode] = useState("All");
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
+  const [ranges, setRanges] = useState<Record<string, { start: number; end: number }>>({});
   const [adjust, setAdjust] = useState<Candidate | null>(null);
 
+  // merge saved in/out adjustments so the cards, footage total, and the render all use them
+  const merged = candidates.map((c) => (ranges[c.id] ? { ...c, start: ranges[c.id].start, end: ranges[c.id].end } : c));
   const isSel = (c: Candidate) => overrides[c.id] ?? c.sel;
-  const sel = candidates.filter(isSel);
+  const sel = merged.filter(isSel);
   const toggle = (id: string) => setOverrides((o) => { const c = candidates.find((x) => x.id === id); return { ...o, [id]: !(o[id] ?? c?.sel ?? false) }; });
   const refind = (m: string) => { setMode(m); if (m !== "All") ctx.client.findMoments(sourceId, { mode: m.toLowerCase().replace("-", "") }).catch(() => {}); };
   const findMore = () => { ctx.client.findMoments(sourceId, { mode: mode === "All" ? "funny" : mode.toLowerCase().replace("-", "") }).catch(() => {}); ctx.pushToast({ icon: "sparkles", tone: "info", title: "Finding more moments", body: "Scanning the transcript…" }); };
 
-  const view = mode === "All" ? candidates : candidates.filter((c) => c.mode.toLowerCase() === mode.toLowerCase());
+  const view = mode === "All" ? merged : merged.filter((c) => c.mode.toLowerCase() === mode.toLowerCase());
 
   return (
     <div>
@@ -141,11 +154,11 @@ export function DiscoveryBody({ candidates, sourceId, finding }: { candidates: C
           <span style={{ fontSize: 13.5, fontWeight: 600 }}>candidates selected</span>
           <span className="mono" style={{ fontSize: 12, color: "var(--text-faint)" }}>≈ {Math.round(sel.reduce((a, c) => a + (c.end - c.start), 0))}s of footage</span>
           <span className="spacer" />
-          <Btn variant="ghost" onClick={() => setOverrides(Object.fromEntries(candidates.map((c) => [c.id, true])))}>Select all</Btn>
+          <Btn variant="ghost" onClick={() => setOverrides((o) => ({ ...o, ...Object.fromEntries(view.map((c) => [c.id, true])) }))}>Select all</Btn>
           <Btn variant="primary" icon="scissors" onClick={() => ctx.makeClipsFrom(sel)}>Make {sel.length} clips →</Btn>
         </div>
       )}
-      {adjust && <AdjustModal c={adjust} onClose={() => setAdjust(null)} />}
+      {adjust && <AdjustModal c={adjust} onClose={() => setAdjust(null)} onSave={(start, end) => setRanges((r) => ({ ...r, [adjust.id]: { start, end } }))} />}
     </div>
   );
 }

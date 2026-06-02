@@ -24,12 +24,26 @@ export default function ClipsScreen() {
     (!q || c.title.toLowerCase().includes(q.toLowerCase())));
   const toggle = (id: string) => setSel((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
 
+  /** Download the selected clips' rendered files (skips clips that aren't rendered yet). */
+  const exportSel = () => {
+    const ready = ctx.clips.filter((c) => sel.includes(c.id) && c.renderId);
+    if (!ready.length) { ctx.pushToast({ icon: "alert", tone: "warn", title: "Nothing to export", body: "None of the selected clips have a render yet." }); return; }
+    for (const c of ready) {
+      const a = document.createElement("a");
+      a.href = ctx.client.renderFileUrl(c.id, c.renderId!);
+      a.download = `${(c.title || c.id).replace(/[^\w.-]+/g, "_")}.mp4`;
+      a.target = "_blank"; a.rel = "noreferrer";
+      document.body.appendChild(a); a.click(); a.remove();
+    }
+    ctx.pushToast({ icon: "download", tone: "ok", title: `Exporting ${ready.length} clip${ready.length > 1 ? "s" : ""}`, body: "Saving to your downloads" });
+  };
+
   return (
     <div className="mainpad fadein">
       <div className="row" style={{ marginBottom: 18 }}>
         <div><div className="eyebrow" style={{ marginBottom: 6 }}>Clips</div><h1 style={{ fontSize: 30 }}>Finished clips</h1></div>
         <span className="spacer" />
-        {sel.length > 0 && <><span className="chip acc">{sel.length} selected</span><Btn variant="ghost" size="sm" icon="download">Export</Btn><Btn variant="primary" size="sm" icon="send" onClick={() => ctx.nav("publish")}>Publish</Btn></>}
+        {sel.length > 0 && <><span className="chip acc">{sel.length} selected</span><Btn variant="ghost" size="sm" icon="download" onClick={exportSel}>Export</Btn><Btn variant="primary" size="sm" icon="send" onClick={() => ctx.nav("publish")}>Publish</Btn></>}
       </div>
       <div className="row" style={{ gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
         <Seg value={coll} onChange={setColl} neutral options={[{ value: "all", label: "All clips" }, { value: "best", label: "Best (85+)" }, { value: "week", label: "This week" }]} />

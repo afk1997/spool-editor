@@ -25,7 +25,8 @@ export default function CaptionScreen() {
   const [hot, setHot] = useState(0);
   const [matching, setMatching] = useState(false);
   const set = <K extends keyof CapCfg>(k: K, v: CapCfg[K]) => setCfg((c) => ({ ...c, [k]: v }));
-  const applyPreset = (p: string) => { setPreset(p); setCfg(CAP_PRESETS[p]); };
+  // switching preset resets the style, but keeps the orthogonal keyword/emoji add-on toggles
+  const applyPreset = (p: string) => { setPreset(p); setCfg((c) => ({ ...CAP_PRESETS[p], keyword: c.keyword, emoji: c.emoji })); };
 
   useEffect(() => { const iv = setInterval(() => setHot((h) => (h + 1) % CAP_TEXT.length), 480); return () => clearInterval(iv); }, []);
 
