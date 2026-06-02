@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from collections import OrderedDict
 from pathlib import Path
 from threading import Lock, Thread
@@ -314,6 +315,46 @@ def _summarize_tj(tj, elapsed: float) -> str:
     return " · ".join(bits)
 
 
+def _clip_job_view(cj) -> dict:
+    elapsed = max(0.0, time.monotonic() - cj.started_at)
+    out = {
+        "id": cj.id,
+        "kind": cj.kind,
+        "source_id": cj.source_id,
+        "clip_id": cj.clip_id,
+        "status": cj.status.value,
+        "progress_pct": cj.progress_pct,
+        "stage": cj.stage or None,
+        "elapsed_seconds": round(elapsed, 1),
+        "params": cj.params,
+        "result": cj.result,
+        "error_category": cj.error_category,
+        "error_message": cj.error_message,
+    }
+    out["human"] = {
+        "progress": f"{cj.progress_pct}%",
+        "elapsed": _human_duration(elapsed),
+        "summary": _summarize_clip(cj, elapsed),
+    }
+    return out
+
+
+def _summarize_clip(cj, elapsed: float) -> str:
+    bits = [cj.kind, cj.status.value]
+    if cj.status.value == "running":
+        if cj.stage:
+            bits.append(cj.stage)
+        bits.append(f"{cj.progress_pct}%")
+        bits.append(f"elapsed {_human_duration(elapsed)}")
+    elif cj.status.value == "done":
+        bits.append(f"in {_human_duration(elapsed)}")
+        if cj.kind == "moments":
+            bits.append(f"{cj.result.get('count', 0)} candidates")
+    elif cj.status.value == "error" and cj.error_message:
+        bits.append(f"— {cj.error_message}")
+    return " · ".join(bits)
+
+
 def _jm():
     return current_app.extensions["trove.jobs"]
 
@@ -322,8 +363,25 @@ def _tm():
     return current_app.extensions["trove.transcribe"]
 
 
+def _cm():
+    return current_app.extensions["trove.clips"]
+
+
+def _cr():
+    return current_app.extensions["trove.clip_runner"]
+
+
 def _actions():
     return current_app.extensions["trove.actions"]
+
+
+# Mirrors clip.reframe._ASPECTS/_MODES, clip.exporter._PRESETS, clip.captioner._VALID_STYLES.
+# Duplicated here for fast request validation — the engine re-validates and would also
+# error, but a 400 up front beats a job that fails asynchronously.
+_CLIP_ASPECTS = ("9:16", "16:9", "1:1", "4:5")
+_CLIP_MODES = ("pan", "split", "center")
+_CLIP_PRESETS = ("tiktok", "reels", "shorts", "youtube", "linkedin", "x")
+_CAPTION_STYLES = ("opus", "karaoke", "minimal")
 
 
 def _download_dir() -> Path:
@@ -436,9 +494,14 @@ def capabilities():
             "signed_urls":       auth_required,
             "transcript_chunk":  True,
             "transcript_search": True,
+            "clips":             True,
         },
         "formats": {
             "transcript_export": ["txt", "srt", "vtt", "json"],
+            "clip_aspects":      list(_CLIP_ASPECTS),
+            "reframe_modes":     list(_CLIP_MODES),
+            "caption_styles":    list(_CAPTION_STYLES),
+            "render_presets":    list(_CLIP_PRESETS),
         },
         "scopes": {
             "media":             safety.SCOPE_MEDIA,
@@ -1255,7 +1318,7 @@ def storage_info():
             if not entry.is_file():
                 continue
             # Internal bookkeeping files we never want to surface.
-            if entry.name in ("jobs.json", "transcribe_jobs.json"):
+            if entry.name in ("jobs.json", "transcribe_jobs.json", "clip_jobs.json"):
                 continue
             size = _file_size(entry.path)
             total += size
@@ -1288,6 +1351,227 @@ def storage_info():
         "orphan_bytes": orphan_bytes,
         "orphan_files": orphan_files,
     })
+
+
+# ----- clips: the render queue + clip operations ----------------------
+#
+# trove's job machinery with clip kinds (spec §4). ``/sources/<id>/*`` create
+# clips/renders; ``/clips/<clip_id>/*`` operate on a produced clip; ``/clip-jobs/*``
+# is the render queue (list/get/cancel/dismiss). Each POST submits a ClipJob and
+# returns its view immediately — poll ``/clip-jobs/<id>`` (or the SSE stream) for
+# progress + result. Manual mode (UI) and agent mode (MCP) hit the same endpoints →
+# same engine → same queue (the golden rule).
+
+def _clamp_count(raw, default=5):
+    try:
+        return max(1, min(25, int(raw)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_range(data):
+    """``(start, end)`` floats from a body, or ``None`` if absent/invalid."""
+    try:
+        start, end = float(data["start"]), float(data["end"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if start < 0 or end <= start:
+        return None
+    return start, end
+
+
+def _source_or_error(source_id):
+    """``(source_job, words_path, None)`` when the source is downloaded, else
+    ``(None, None, (response, code))``."""
+    src = _jm().get(source_id)
+    if src is None or src.status != JobStatus.DONE or not src.file_path:
+        return None, None, (jsonify({"error": "source_not_ready"}), 404)
+    _, words_path = _cr().source_paths(source_id)
+    return src, words_path, None
+
+
+@api_v1_bp.post("/sources/<source_id>/moments")
+@token_required
+def find_clip_moments(source_id):
+    """Find clip-worthy moments over the source transcript (discover.find_moments)."""
+    _, words_path, err = _source_or_error(source_id)
+    if err:
+        return err
+    if not words_path or not os.path.exists(words_path):
+        return jsonify({"error": "no_transcript"}), 409
+    data = request.get_json(silent=True) or {}
+    params = {"mode": str(data.get("mode") or "funny"), "count": _clamp_count(data.get("count"))}
+    win = data.get("window")
+    if isinstance(win, (list, tuple)) and len(win) == 2:
+        try:
+            params["window"] = [float(win[0]), float(win[1])]
+        except (TypeError, ValueError):
+            return jsonify({"error": "bad_window"}), 400
+    jid = _cm().submit(kind="moments", source_id=source_id, params=params,
+                       target=_cr().find_moments_target(source_id=source_id, params=params))
+    return jsonify(_clip_job_view(_cm().get(jid))), 201
+
+
+@api_v1_bp.post("/sources/<source_id>/cut")
+@token_required
+def cut_clip(source_id):
+    """Cut a clip [start, end] from the source (clip.cut). The result carries the
+    new ``clip_id`` to drive subsequent reframe/caption/render calls."""
+    src, _, err = _source_or_error(source_id)
+    if err:
+        return err
+    rng = _parse_range(request.get_json(silent=True) or {})
+    if rng is None:
+        return jsonify({"error": "bad_range"}), 400
+    start, end = rng
+    clip_id = uuid.uuid4().hex[:10]
+    params = {"start": start, "end": end}
+    jid = _cm().submit(kind="cut", source_id=source_id, clip_id=clip_id, params=params,
+                       target=_cr().cut_target(source_id=source_id, clip_id=clip_id, params=params))
+    return jsonify(_clip_job_view(_cm().get(jid))), 201
+
+
+@api_v1_bp.post("/clips/<clip_id>/reframe")
+@token_required
+def reframe_clip(clip_id):
+    """Reframe a clip to a target aspect via the diar⊕ROI speaker pan (reframe.render)."""
+    if _cr().load_clip_meta(clip_id) is None:
+        return jsonify({"error": "clip_not_found"}), 404
+    data = request.get_json(silent=True) or {}
+    aspect = str(data.get("aspect") or "9:16")
+    mode = str(data.get("mode") or "pan")
+    if aspect not in _CLIP_ASPECTS or mode not in _CLIP_MODES:
+        return jsonify({"error": "bad_params"}), 400
+    params = {"aspect": aspect, "mode": mode}
+    if isinstance(data.get("rois"), dict):
+        params["rois"] = data["rois"]
+    jid = _cm().submit(kind="reframe", clip_id=clip_id, params=params,
+                       target=_cr().reframe_target(clip_id=clip_id, params=params))
+    return jsonify(_clip_job_view(_cm().get(jid))), 201
+
+
+@api_v1_bp.post("/clips/<clip_id>/captions")
+@token_required
+def caption_clip(clip_id):
+    """Generate + burn styled captions sliced to the clip window (caption.generate/burn)."""
+    meta = _cr().load_clip_meta(clip_id)
+    if meta is None:
+        return jsonify({"error": "clip_not_found"}), 404
+    _, words_path = _cr().source_paths(meta.get("source_id", ""))
+    if not words_path or not os.path.exists(words_path):
+        return jsonify({"error": "no_transcript"}), 409
+    style = str((request.get_json(silent=True) or {}).get("style") or "opus")
+    if style not in _CAPTION_STYLES:
+        return jsonify({"error": "bad_style"}), 400
+    params = {"style": style}
+    jid = _cm().submit(kind="caption", clip_id=clip_id, params=params,
+                       target=_cr().caption_target(clip_id=clip_id, params=params))
+    return jsonify(_clip_job_view(_cm().get(jid))), 201
+
+
+@api_v1_bp.post("/clips/<clip_id>/renders")
+@token_required
+def render_clip(clip_id):
+    """Export the clip to a platform preset (render.export). The result carries the
+    ``render_id`` + output path; download via /clips/<clip_id>/renders/<render_id>/file."""
+    if _cr().load_clip_meta(clip_id) is None:
+        return jsonify({"error": "clip_not_found"}), 404
+    data = request.get_json(silent=True) or {}
+    preset = str(data.get("preset") or "tiktok")
+    if preset not in _CLIP_PRESETS:
+        return jsonify({"error": "bad_preset"}), 400
+    render_id = uuid.uuid4().hex[:10]
+    params = {"preset": preset, "fast": bool(data.get("fast", True))}
+    jid = _cm().submit(kind="export", clip_id=clip_id, params=params,
+                       target=_cr().export_target(clip_id=clip_id, render_id=render_id, params=params))
+    return jsonify(_clip_job_view(_cm().get(jid))), 201
+
+
+@api_v1_bp.post("/sources/<source_id>/render")
+@token_required
+def render_pipeline(source_id):
+    """One-shot ingest→cut→reframe→caption→export (render.pipeline). The API caller
+    supplies every decision up front; the MCP layer adds elicitation pauses on top."""
+    _, words_path, err = _source_or_error(source_id)
+    if err:
+        return err
+    if not words_path or not os.path.exists(words_path):
+        return jsonify({"error": "no_transcript"}), 409
+    data = request.get_json(silent=True) or {}
+    rng = _parse_range(data)
+    if rng is None:
+        return jsonify({"error": "bad_range"}), 400
+    aspect = str(data.get("aspect") or "9:16")
+    mode = str(data.get("mode") or "pan")
+    preset = str(data.get("preset") or "tiktok")
+    style = str(data.get("style") or "opus")
+    if (aspect not in _CLIP_ASPECTS or mode not in _CLIP_MODES
+            or preset not in _CLIP_PRESETS or style not in _CAPTION_STYLES):
+        return jsonify({"error": "bad_params"}), 400
+    start, end = rng
+    clip_id, render_id = uuid.uuid4().hex[:10], uuid.uuid4().hex[:10]
+    params = {"start": start, "end": end, "aspect": aspect, "mode": mode,
+              "style": style, "preset": preset}
+    jid = _cm().submit(kind="pipeline", source_id=source_id, clip_id=clip_id, params=params,
+                       target=_cr().pipeline_target(source_id=source_id, clip_id=clip_id,
+                                                    render_id=render_id, params=params))
+    return jsonify(_clip_job_view(_cm().get(jid))), 201
+
+
+@api_v1_bp.get("/clip-jobs")
+@token_required
+def list_clip_jobs():
+    """List clip/render jobs (the render queue). ``?status=`` + ``?kind=`` filter,
+    ``?limit/offset/order`` paginate — same contract as /jobs."""
+    limit, offset, order, status = _parse_page_args()
+    items = _cm().snapshot_jobs()
+    kind = request.args.get("kind")
+    if kind:
+        wanted = {k.strip() for k in kind.split(",") if k.strip()}
+        items = [j for j in items if j.kind in wanted]
+    page, total = _paginate(items, status=status, status_attr="status",
+                            order=order, limit=limit, offset=offset)
+    return jsonify({
+        "clip_jobs": [_clip_job_view(j) for j in page],
+        "total": total, "returned": len(page),
+        "limit": _surface_limit(limit, len(page)), "offset": offset,
+    })
+
+
+@api_v1_bp.get("/clip-jobs/<job_id>")
+@token_required
+def get_clip_job(job_id):
+    cj = _cm().get(job_id)
+    if cj is None:
+        return jsonify({"error": "not_found"}), 404
+    return jsonify(_clip_job_view(cj))
+
+
+@api_v1_bp.post("/clip-jobs/<job_id>/cancel")
+@token_required
+def cancel_clip_job(job_id):
+    if not _cm().cancel(job_id):
+        return jsonify({"error": "not_found_or_terminal"}), 404
+    cj = _cm().get(job_id)
+    return jsonify(_clip_job_view(cj)) if cj else ("", 204)
+
+
+@api_v1_bp.post("/clip-jobs/<job_id>/dismiss")
+@token_required
+def dismiss_clip_job(job_id):
+    if not _cm().dismiss(job_id):
+        return jsonify({"error": "not_found_or_active"}), 404
+    return ("", 204)
+
+
+@api_v1_bp.get("/clips/<clip_id>/renders/<render_id>/file")
+@token_or_sig_required(SCOPE_MEDIA, kwarg="clip_id")
+def get_render_file(clip_id, render_id):
+    """Stream a produced render .mp4 (same auth as /jobs/<id>/file: token or media sig)."""
+    path = _cr().clip_dir(clip_id) / "renders" / f"{render_id}.mp4"
+    if not path.exists():
+        return jsonify({"error": "not_found"}), 404
+    return send_file(str(path), as_attachment=True, download_name=f"{clip_id}-{render_id}.mp4")
 
 
 # ----- OpenAPI schema -------------------------------------------------
@@ -1368,6 +1652,26 @@ _OPENAPI_DOC = {
                  "schema": {"type": "integer"},
                  "description": "Defaults: 4000 chars (txt/srt/vtt) or 50 segments (json). Capped at 64000 / 500."},
             ]}},
+        "/sources/{source_id}/moments": {"post": {"summary": "Find clip-worthy moments over the source transcript (LLM)"}},
+        "/sources/{source_id}/cut":     {"post": {"summary": "Cut a clip [start,end] from the source"}},
+        "/sources/{source_id}/render":  {"post": {"summary": "One-shot pipeline: cut→reframe→caption→export"}},
+        "/clips/{clip_id}/reframe":     {"post": {"summary": "Reframe a clip (diar⊕ROI speaker pan; aspect/mode)"}},
+        "/clips/{clip_id}/captions":    {"post": {"summary": "Generate + burn captions (opus/karaoke/minimal)"}},
+        "/clips/{clip_id}/renders":     {"post": {"summary": "Export the clip to a platform preset"}},
+        "/clips/{clip_id}/renders/{render_id}/file": {"get": {"summary": "Download a produced render .mp4"}},
+        "/clip-jobs":          {"get":  {"summary": "List clip/render jobs (the render queue)",
+                                          "parameters": [
+                                              {"name": "kind", "in": "query",
+                                               "schema": {"type": "string"},
+                                               "description": "Comma-separated kind filter: moments,cut,reframe,caption,export,pipeline"},
+                                              {"name": "status", "in": "query", "schema": {"type": "string"}},
+                                              {"name": "limit", "in": "query", "schema": {"type": "integer", "maximum": 500}},
+                                              {"name": "offset", "in": "query", "schema": {"type": "integer"}},
+                                              {"name": "order", "in": "query", "schema": {"type": "string", "enum": ["newest", "oldest"]}},
+                                          ]}},
+        "/clip-jobs/{job_id}":          {"get":  {"summary": "Get one clip job"}},
+        "/clip-jobs/{job_id}/cancel":   {"post": {"summary": "Cancel a clip job"}},
+        "/clip-jobs/{job_id}/dismiss":  {"post": {"summary": "Drop a finished clip job"}},
         "/storage":            {"get":  {"summary": "Disk-usage report"}},
         "/openapi.json":       {"get":  {"summary": "This document"}},
         "/events":             {"get":  {"summary": "Server-Sent Events stream of jobs+transcripts",
@@ -1408,6 +1712,7 @@ def _events_snapshot() -> dict:
         "ts": time.time(),
         "jobs":        [_job_view(j) for j in _jm().snapshot_jobs()],
         "transcripts": [_tj_view(t) for t in _tm().snapshot_jobs()],
+        "clips":       [_clip_job_view(c) for c in _cm().snapshot_jobs()],
     }
 
 

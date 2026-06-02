@@ -1,0 +1,276 @@
+"""Tests for the /api/v1 clip endpoints (the render queue + clip operations).
+
+These cover the wire contract: status codes, the clip-job view shape, validation, and
+that each endpoint submits a ClipJob that runs the right engine work. The clip engine
+functions are mocked (via clip_runner) so jobs complete without ffmpeg/codex — the same
+discipline the existing endpoint tests use for downloads/whisper.
+"""
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+import pytest
+
+from app import create_app
+from jobs import Job, JobStatus
+
+
+@pytest.fixture()
+def client(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TROVE_JOB_TTL_SECONDS", "60")
+    monkeypatch.setenv("TROVE_RATE_LIMIT", "0")
+    import app as _app_module
+    (tmp_path / "downloads").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(_app_module, "DOWNLOAD_DIR", tmp_path / "downloads")
+    app = create_app()
+    return app, app.test_client()
+
+
+@pytest.fixture(autouse=True)
+def mock_engine(monkeypatch):
+    """Replace the (separately-tested) clip engine functions with fast fakes that just
+    write their output files, so submitted ClipJobs complete deterministically."""
+    import clip_runner as cr
+
+    def w(p, b=b"V"):
+        Path(p).parent.mkdir(parents=True, exist_ok=True)
+        Path(p).write_bytes(b)
+        return p
+
+    monkeypatch.setattr(cr.cutter, "cut", lambda s, a, b, out, **k: w(out, b"C"))
+    monkeypatch.setattr(cr.reframe, "detect_faces", lambda c, **k: {
+        "width": 2, "height": 1, "frame_path": k.get("frame_path"),
+        "rois": {"left": {"x": 0, "y": 0, "w": 1, "h": 1}, "right": {"x": 1, "y": 0, "w": 1, "h": 1}}})
+    monkeypatch.setattr(cr.reframe, "speaker_track", lambda c, **k: {
+        "segments": [], "roiL": k["roi_left"], "roiR": k["roi_right"], "source": "fused"})
+    monkeypatch.setattr(cr.reframe, "render", lambda c, t, **k: w(k["out_path"], b"R"))
+    monkeypatch.setattr(cr.captioner, "generate", lambda words, **k: (Path(k["out_ass_path"]).write_text("a"), k["out_ass_path"])[-1])
+    monkeypatch.setattr(cr.captioner, "burn", lambda v, a, out, **k: w(out, b"X"))
+    monkeypatch.setattr(cr.exporter, "export", lambda c, **k: w(k["out_path"], b"O"))
+    monkeypatch.setattr(cr.moments, "find_moments", lambda words, **k: [
+        {"start": 1.0, "end": 9.0, "title": "M", "rationale": "r", "mode": k.get("mode", "funny"), "signals": []}])
+
+
+# ---- seeding helpers -------------------------------------------------
+
+def _seed_source(app, sid="src1", *, with_transcript=True):
+    dl = app.extensions["trove.download_dir"]
+    (dl / f"{sid}.mp4").write_bytes(b"MEDIA")
+    app.extensions["trove.jobs"]._jobs[sid] = Job(
+        id=sid, url="u", title="T", status=JobStatus.DONE, file_path=str(dl / f"{sid}.mp4"))
+    if with_transcript:
+        data = {"schema_version": 2, "language": "en", "duration": 60.0, "edited_at": None,
+                "words": [{"idx": 0, "w": "hi", "original_w": "hi", "start": 1.0, "end": 2.0,
+                           "edited": False, "deleted": False}],
+                "segments": [{"start": 0.0, "end": 10.0, "text": "hi", "word_idxs": [0], "speaker": "SPEAKER_00"}],
+                "bookmarks": []}
+        (dl / f"{sid}.words.json").write_text(json.dumps(data))
+
+
+def _seed_clip(app, clip_id="clipA", source_id="src1", *, files=("clip.mp4",), start=2.0, end=12.0):
+    cr = app.extensions["trove.clip_runner"]
+    cr.write_clip_meta(clip_id, source_id=source_id, start=start, end=end)
+    for f in files:
+        (cr.clip_dir(clip_id) / f).write_bytes(b"V")
+
+
+def _await(c, jid, status="done", tries=150):
+    for _ in range(tries):
+        r = c.get(f"/api/v1/clip-jobs/{jid}")
+        if r.status_code == 200 and r.get_json()["status"] == status:
+            return r.get_json()
+        time.sleep(0.02)
+    last = c.get(f"/api/v1/clip-jobs/{jid}").get_json()
+    raise AssertionError(f"job {jid} never reached {status}: {last}")
+
+
+# ---- moments ---------------------------------------------------------
+
+def test_find_moments_creates_job_and_returns_candidates(client):
+    app, c = client
+    _seed_source(app)
+    r = c.post("/api/v1/sources/src1/moments", json={"mode": "insightful", "count": 4})
+    assert r.status_code == 201
+    body = r.get_json()
+    assert body["kind"] == "moments" and body["source_id"] == "src1"
+    done = _await(c, body["id"])
+    assert done["result"]["count"] == 1
+    assert done["result"]["candidates"][0]["title"] == "M"
+    assert done["result"]["candidates"][0]["mode"] == "insightful"
+
+
+def test_find_moments_404_when_source_not_ready(client):
+    app, c = client
+    app.extensions["trove.jobs"]._jobs["p"] = Job(id="p", url="u", title="t", status=JobStatus.DOWNLOADING)
+    assert c.post("/api/v1/sources/p/moments", json={}).status_code == 404
+
+
+def test_find_moments_409_when_no_transcript(client):
+    app, c = client
+    _seed_source(app, with_transcript=False)
+    r = c.post("/api/v1/sources/src1/moments", json={})
+    assert r.status_code == 409 and r.get_json()["error"] == "no_transcript"
+
+
+# ---- cut -------------------------------------------------------------
+
+def test_cut_creates_clip(client):
+    app, c = client
+    _seed_source(app)
+    r = c.post("/api/v1/sources/src1/cut", json={"start": 2.0, "end": 12.0})
+    assert r.status_code == 201 and r.get_json()["kind"] == "cut"
+    done = _await(c, r.get_json()["id"])
+    assert done["clip_id"] and done["result"]["clip_path"].endswith("clip.mp4")
+    # the Clip record landed on disk
+    cr = app.extensions["trove.clip_runner"]
+    assert cr.load_clip_meta(done["clip_id"])["start"] == 2.0
+
+
+@pytest.mark.parametrize("body", [{"start": 5, "end": 5}, {"start": 9, "end": 3}, {"end": 3}, {"start": -1, "end": 4}])
+def test_cut_400_on_bad_range(client, body):
+    app, c = client
+    _seed_source(app)
+    assert c.post("/api/v1/sources/src1/cut", json=body).status_code == 400
+
+
+# ---- reframe ---------------------------------------------------------
+
+def test_reframe_creates_job(client):
+    app, c = client
+    _seed_source(app)
+    _seed_clip(app)
+    r = c.post("/api/v1/clips/clipA/reframe", json={"aspect": "9:16", "mode": "pan"})
+    assert r.status_code == 201 and r.get_json()["kind"] == "reframe"
+    done = _await(c, r.get_json()["id"])
+    assert done["result"]["reframed_path"].endswith("reframed.mp4")
+    assert done["result"]["aspect"] == "9:16"
+
+
+def test_reframe_404_unknown_clip(client):
+    _, c = client
+    assert c.post("/api/v1/clips/ghost/reframe", json={}).status_code == 404
+
+
+def test_reframe_400_bad_aspect(client):
+    app, c = client
+    _seed_clip(app)
+    assert c.post("/api/v1/clips/clipA/reframe", json={"aspect": "3:2"}).status_code == 400
+
+
+# ---- captions --------------------------------------------------------
+
+def test_caption_creates_job(client):
+    app, c = client
+    _seed_source(app)
+    _seed_clip(app, files=("clip.mp4", "reframed.mp4"))
+    r = c.post("/api/v1/clips/clipA/captions", json={"style": "karaoke"})
+    assert r.status_code == 201
+    done = _await(c, r.get_json()["id"])
+    assert done["result"]["captioned_path"].endswith("captioned.mp4")
+    assert done["result"]["style"] == "karaoke"
+
+
+def test_caption_400_bad_style(client):
+    app, c = client
+    _seed_source(app)
+    _seed_clip(app)
+    assert c.post("/api/v1/clips/clipA/captions", json={"style": "neon"}).status_code == 400
+
+
+# ---- renders (export) ------------------------------------------------
+
+def test_render_export_creates_job_and_file(client):
+    app, c = client
+    _seed_source(app)
+    _seed_clip(app, files=("clip.mp4", "reframed.mp4", "captioned.mp4"))
+    r = c.post("/api/v1/clips/clipA/renders", json={"preset": "reels", "fast": False})
+    assert r.status_code == 201
+    done = _await(c, r.get_json()["id"])
+    rid = done["result"]["render_id"]
+    assert done["result"]["output_path"].endswith(f"{rid}.mp4")
+    # the produced file is downloadable
+    fr = c.get(f"/api/v1/clips/clipA/renders/{rid}/file")
+    assert fr.status_code == 200 and fr.data == b"O"
+
+
+def test_render_export_400_bad_preset(client):
+    app, c = client
+    _seed_clip(app)
+    assert c.post("/api/v1/clips/clipA/renders", json={"preset": "myspace"}).status_code == 400
+
+
+def test_render_file_404_when_missing(client):
+    _, c = client
+    assert c.get("/api/v1/clips/clipA/renders/nope/file").status_code == 404
+
+
+# ---- pipeline (one-shot) --------------------------------------------
+
+def test_render_pipeline_runs_full_chain(client):
+    app, c = client
+    _seed_source(app)
+    r = c.post("/api/v1/sources/src1/render",
+               json={"start": 1.0, "end": 9.0, "aspect": "9:16", "style": "opus", "preset": "tiktok"})
+    assert r.status_code == 201 and r.get_json()["kind"] == "pipeline"
+    done = _await(c, r.get_json()["id"])
+    assert done["clip_id"] and done["result"]["render_id"]
+    assert done["result"]["output_path"].endswith(".mp4")
+    rid = done["result"]["render_id"]
+    assert c.get(f"/api/v1/clips/{done['clip_id']}/renders/{rid}/file").status_code == 200
+
+
+def test_render_pipeline_409_without_transcript(client):
+    app, c = client
+    _seed_source(app, with_transcript=False)
+    r = c.post("/api/v1/sources/src1/render", json={"start": 1.0, "end": 9.0})
+    assert r.status_code == 409
+
+
+# ---- queue: list / get / cancel / dismiss ---------------------------
+
+def test_list_clip_jobs_filter_by_kind(client):
+    app, c = client
+    _seed_source(app)
+    c.post("/api/v1/sources/src1/moments", json={})
+    cut = c.post("/api/v1/sources/src1/cut", json={"start": 1, "end": 5}).get_json()
+    _await(c, cut["id"])
+    r = c.get("/api/v1/clip-jobs?kind=cut")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["total"] == 1 and body["clip_jobs"][0]["kind"] == "cut"
+
+
+def test_get_clip_job_404(client):
+    _, c = client
+    assert c.get("/api/v1/clip-jobs/nope").status_code == 404
+
+
+def test_dismiss_clip_job(client):
+    app, c = client
+    _seed_source(app)
+    j = c.post("/api/v1/sources/src1/cut", json={"start": 1, "end": 5}).get_json()
+    _await(c, j["id"])
+    assert c.post(f"/api/v1/clip-jobs/{j['id']}/dismiss").status_code == 204
+    assert c.get(f"/api/v1/clip-jobs/{j['id']}").status_code == 404
+
+
+# ---- discovery surfaces ---------------------------------------------
+
+def test_capabilities_advertises_clips(client):
+    _, c = client
+    body = c.get("/api/v1/capabilities").get_json()
+    assert body["features"]["clips"] is True
+    assert set(body["formats"]["clip_aspects"]) == {"9:16", "16:9", "1:1", "4:5"}
+
+
+def test_events_snapshot_includes_clips(client):
+    app, c = client
+    _seed_source(app)
+    j = c.post("/api/v1/sources/src1/cut", json={"start": 1, "end": 5}).get_json()
+    _await(c, j["id"])
+    r = c.get("/api/v1/events?max_events=1&interval=0.05")
+    payload = r.get_data(as_text=True)
+    assert '"clips"' in payload and j["id"] in payload

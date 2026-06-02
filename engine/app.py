@@ -12,6 +12,8 @@ import machine
 import transcribe_jobs
 import transcriber
 import transcript_io
+import clip_jobs
+import clip_runner
 import time as _time
 from util import sanitize_filename
 
@@ -95,6 +97,19 @@ def create_app() -> Flask:
     )
     app.extensions["trove.transcribe"] = transcribe_manager
 
+    # Clip/render queue — trove's job machinery with new kinds (spec §1.1). The runner
+    # holds the orchestration; the manager runs it. Both reachable from the v1 blueprint
+    # and (later) the MCP server, so manual + agent mode drive the same engine + queue.
+    clip_manager = clip_jobs.ClipJobManager(
+        max_workers=int(os.environ.get("TROVE_CLIP_WORKERS", "2")),
+        store_path=download_dir / "clip_jobs.json",
+    )
+    app.extensions["trove.clips"] = clip_manager
+    app.extensions["trove.clip_runner"] = clip_runner.ClipRunner(
+        download_dir=download_dir,
+        job_manager=job_manager,
+        clip_manager=clip_manager,
+    )
 
     # Register the JSON v1 API blueprint — the headless surface for the studio + MCP.
     from routes.api_v1 import api_v1_bp
@@ -124,9 +139,15 @@ def create_app() -> Flask:
                 return True
         return False
 
+    def _keep_source(parent_job) -> bool:
+        # Also pin a source whose clips/renders still exist — sweeping its media out
+        # from under a clip would 404 re-cuts/reframes and orphan the clip tree.
+        return _has_active_or_done_transcribe(parent_job) or bool(
+            clip_manager.get_by_source(parent_job.id))
+
     job_manager.start_sweeper(
         interval_seconds=300,
-        keep_predicate=_has_active_or_done_transcribe,
+        keep_predicate=_keep_source,
     )
 
     # Idempotent HTMX/JS status polls — exempted from the per-IP rate
