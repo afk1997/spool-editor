@@ -4,16 +4,23 @@
 > `Spool_Engineering-Spec.md` (§5 roadmap, §6 front-end standards). Status legend:
 > ✅ done & verified · 🟡 in progress · ◻️ not started.
 >
-> **Last updated:** 2026-06-02 · **Phase 0 — ✅ COMPLETE. Phase 1 backend — ✅ done & proven on
-> real media** (engine chain → `api_v1` clip surface → MCP/CLI → codex bridge + NL agent loop,
-> verified live: URL → 1080×1920 mp4). **608 engine tests green.**
-> **Phase 1 UI — 🟡 RE-SKIN IN PROGRESS.** The first UI was an *invented* design and was rejected;
-> the studio is being rebuilt as a **pixel-1:1 port of `docs/Spool (standalone) (1).html`** (the
-> file is the source of truth, wired to live `api_v1`). Demo CSS/components/fonts extracted +
-> ported; **shell, Home, Import, Library** done & screenshot-verified. **Critical fix:** the API
-> client never reached the engine from a browser all session (native `fetch` "Illegal invocation");
-> fixed. **To port:** Onboarding, Project/Transcript, Discovery, Reframe, Caption, Queue, Clips,
-> Agent panel, ⌘K. Then Playwright e2e + diarization-on reframe pass.
+> **Last updated:** 2026-06-02 · **Phase 0 — ✅ COMPLETE. Phase 1 — ✅ COMPLETE** (backend + UI).
+> **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
+> **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
+> Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,
+> Library, Project/Transcript (S4), Discovery (S5), Reframe (S7), Caption (S8), Editor (S6),
+> Queue (S10), Clips (S11), Settings, Brand, Publish/Analytics, **Agent panel + ⌘K palette +
+> shortcuts + toasts**. Tailwind dropped; the old invented components deleted; `spool.css` (verbatim
+> demo CSS) is the single styling source of truth. **Playwright e2e green** (paste URL → 9:16
+> captioned clip through the real UI, ~49s). **Diarization-on reframe verified** on a real 2-speaker
+> clip (`source=fused`, 2 speakers, 1080×1920 render). typecheck 9/9 · lint clean · build 16 routes.
+>
+> **Glass-box / honesty notes (Phase-1 boundaries, documented deviations from the demo's mock):**
+> candidate cards show real named `signals` + a real transcript excerpt (no fabricated 0-100 score —
+> the `rank` opportunity-score + the Discovery reweight panel are Phase 3); Settings shows the real
+> codex-bridge provider (not the demo's Ollama endpoint/API-key); Editor's deeper timeline editing
+> (trim-render, A/B, word ripple-cut) is the Phase-2 surface; Publish/Analytics are the demo's
+> honest "coming in Phase 4" placeholders.
 
 ## Roadmap at a glance
 
@@ -31,9 +38,9 @@ graph TD
     subgraph P1["Phase 1 — Core clip loop + own UI (MVP)"]
       C1["Engine: moments · cutter · reframe(diar plus ROI) · captioner · exporter"]:::done
       C2["MCP: clip tools + elicitation + spool:// resources"]:::done
-      C3["UI: S0-S5, S7 basic, S8 presets, S10, S11 + Agent panel + Cmd-K"]:::done
-      C4["Port demo design tokens into the Tailwind theme; component library"]:::done
-      C5["e2e: URL to 9:16 clip (Playwright)"]:::todo
+      C3["UI: 1:1 demo port — every screen + Agent panel + ⌘K, live api_v1, zero mock"]:::done
+      C4["spool.css verbatim demo CSS = single source of truth; Tailwind dropped"]:::done
+      C5["e2e: URL → 9:16 clip (Playwright) — green ~49s · diar-on reframe verified"]:::done
     end
     P2["Phase 2 — Studios + editor (timeline, ROI editor, caption studio, brand kits, SQLite FTS5)"]:::todo
     P3["Phase 3 — Discovery + automation (glass-box ranking, watch-folder, recipes)"]:::todo
@@ -103,18 +110,33 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
   (graceful fallback). Resources `spool://clips` + `spool://clips/{job_id}`. CLI⇄MCP parity
   kept (`cli.py` clip subcommands + `MCP_TO_CLI`). 2 MCP tests (incl. a real elicitation
   round-trip) + parity test.
-- [x] **Studio screens — all Phase-1 screens done & verified, wired to `api_v1`, zero mock:**
-  foundation (demo tokens → Tailwind v4 `@theme` + data-accent/density + 4 fonts + AA fix;
-  `@spool/types` ↔ wire shapes; full `@spool/api-client` + `subscribeEvents` SSE; live-data
-  context; app shell; UI primitives) **+** **S0** Dependency-Doctor · **S1** Home · **S2**
-  Import · **S3** Library · **S4** Project/Transcript (read-only) · **S5** Clip Discovery
-  (candidate cards; glass-box = named signals, not an opaque score) · **S7** Reframe (basic
-  preset flow) · **S8** Caption Studio (presets) · **S10** Render Queue · **S11** Clips Library ·
-  **⌘K** palette · **Agent chat** (real NL chat → `/agent` → clip tools; clarify = inline
-  elicitation cards; spawned-job chips; source context auto-passed).
-  `pnpm typecheck` 9/9, studio build (8 routes) + lint green; agent loop proven live.
-  **Remaining (Phase-1 polish):** promote primitives to `@spool/ui`; **Playwright e2e**
-  (automate the URL→9:16 run that's been verified by hand); diarization-on reframe pass.
+- [x] **Studio UI — pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
+  The first UI was an *invented* design and was rejected; rebuilt by **extracting + porting the demo's
+  actual React/CSS** (not reinterpreting). Architecture: `components/spool/` — `context.tsx`
+  (`useSpool` maps the live SSE snapshot → the demo's source/clip/job/candidate/transcript shapes +
+  drives the real `/agent` loop + real render pipelines), `ui.tsx` (icon set + primitives), `shell.tsx`
+  (Rail · TopBar · bodywrap+AgentPanel · StatusBar + onboarding bypass + ⌘K/?/Esc keys), `agent.tsx`
+  (AgentPanel · ElicitationCard · ToolTrace), `overlays.tsx` (CommandPalette · ShortcutSheet · Toasts),
+  `cards.tsx` (MediaCard · ClipCard), `work.tsx` (CandidateCard · DiscoveryBody · TranscriptView),
+  `panels.tsx` (SettingCard · Row · FutureScreen). Screens (each screenshot-verified against the demo):
+  **S0** Onboarding (full-screen, no shell; Dependency Doctor on live `/doctor`) · **Home** · **Import**
+  (real downloads) · **Library** · **S4** Project/Transcript (words.json → speaker lines) · **S5**
+  Discovery (real candidates; glass-box = real named signals + transcript excerpt) · **S7** Reframe
+  (ROI editor → real reframe) · **S8** Caption Studio (presets → real caption+render) · **S6** Editor
+  (timeline hub; real renders) · **S10** Queue · **S11** Clips · **Settings** (live doctor/MCP/privacy) ·
+  **Brand** · **Publish/Analytics** (Phase-4 placeholders) · **⌘K palette** · **Agent panel**. Routes:
+  `/`, `/import`, `/library`, `/clips`, `/clips/[id]{,/reframe,/caption}`, `/sources/[id]{,/discovery}`,
+  `/queue`, `/settings`, `/brand`, `/publish`, `/analytics`, `/onboarding` (16 total).
+  **Tailwind dropped**, old invented components deleted; `spool.css` (verbatim demo CSS) is the single
+  styling source. `pnpm typecheck` 9/9 · lint clean · build 16 routes.
+- [x] **Playwright e2e (C5)** — `apps/studio/e2e/url-to-clip.spec.ts` drives the real UI: Import →
+  paste URL → Download → (download+transcribe) → Discovery find_moments → "Make N clips" → asserts a
+  **9:16** render artifact (fetchable, non-empty) + the clip in the library. Green in ~49s on the live
+  engine. Run: `pnpm --filter @spool/studio e2e`.
+- [x] **Diarization-on reframe (diar⊕ROI)** — with `TROVE_DIARIZATION=on`, a real 2-speaker source
+  ("TWO MEN TALKING") diarized to **2 speakers**; cut→reframe produced a **`source=fused`** speaker
+  track (11 segments, left/right alternating) and a **1080×1920** render. The signature fusion path is
+  proven on real media (previously only ROI-only had run).
 
 ## What's verified now
 

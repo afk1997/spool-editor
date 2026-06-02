@@ -12,7 +12,11 @@ import { test, expect } from "@playwright/test";
 const ENGINE = process.env.SPOOL_ENGINE_URL ?? "http://127.0.0.1:8899/api/v1";
 const VIDEO_URL = "https://www.youtube.com/watch?v=jNQXAC9IVRw"; // "Me at the zoo" — short, public
 
-async function engine<T = any>(path: string): Promise<T> {
+interface DownloadJob { id: string; status: string; progress_pct: number; title?: string }
+interface Transcript { id: string; parent_job_id: string; status: string }
+interface ClipJob { id: string; kind: string; status: string; source_id: string; clip_id: string; result?: { candidates?: unknown[]; render_id?: string; aspect?: string }; params?: { aspect?: string } }
+
+async function engine<T>(path: string): Promise<T> {
   const res = await fetch(ENGINE + path);
   if (!res.ok) throw new Error(`${path} → ${res.status}`);
   return res.json() as Promise<T>;
@@ -28,10 +32,10 @@ test("paste URL → 9:16 captioned clip, end to end through the UI", async ({ pa
   let sourceId = "";
   await expect
     .poll(async () => {
-      const { jobs } = await engine<{ jobs: any[] }>("/jobs");
+      const { jobs } = await engine<{ jobs: DownloadJob[] }>("/jobs");
       const done = jobs.find((j) => j.status === "done" && /zoo/i.test(j.title || ""));
       if (!done) return false;
-      const { transcripts } = await engine<{ transcripts: any[] }>("/transcripts");
+      const { transcripts } = await engine<{ transcripts: Transcript[] }>("/transcripts");
       if (transcripts.some((t) => t.parent_job_id === done.id && t.status === "done")) { sourceId = done.id; return true; }
       return false;
     }, { timeout: 150_000, intervals: [2000] })
@@ -42,7 +46,7 @@ test("paste URL → 9:16 captioned clip, end to end through the UI", async ({ pa
   await page.getByRole("button", { name: /Find (moments|more)/i }).first().click().catch(() => {});
   await expect
     .poll(async () => {
-      const { clip_jobs } = await engine<{ clip_jobs: any[] }>("/clip-jobs?kind=moments");
+      const { clip_jobs } = await engine<{ clip_jobs: ClipJob[] }>("/clip-jobs?kind=moments");
       return clip_jobs.some((j) => j.source_id === sourceId && j.status === "done" && (j.result?.candidates || []).length > 0);
     }, { timeout: 120_000, intervals: [2000] })
     .toBe(true);
@@ -57,9 +61,9 @@ test("paste URL → 9:16 captioned clip, end to end through the UI", async ({ pa
   let clipId = "", renderId = "", aspect = "";
   await expect
     .poll(async () => {
-      const { clip_jobs } = await engine<{ clip_jobs: any[] }>("/clip-jobs");
+      const { clip_jobs } = await engine<{ clip_jobs: ClipJob[] }>("/clip-jobs");
       const r = clip_jobs.find((j) => (j.kind === "pipeline" || j.kind === "export") && j.status === "done" && j.result?.render_id && j.source_id === sourceId);
-      if (r) { clipId = r.clip_id; renderId = r.result.render_id; aspect = r.result.aspect || r.params?.aspect || ""; return true; }
+      if (r && r.result?.render_id) { clipId = r.clip_id; renderId = r.result.render_id; aspect = r.result.aspect ?? r.params?.aspect ?? ""; return true; }
       return false;
     }, { timeout: 240_000, intervals: [3000] })
     .toBe(true);
