@@ -3,8 +3,8 @@
 import { useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { useSpool, type SpoolClip } from "@/components/spool/context";
-import { useLive } from "@/lib/engine-context";
-import { Btn, Chip, Empty, Icon, Seg, Switch, Thumb } from "@spool/ui";
+import { useEngineQuery, useLive } from "@/lib/engine-context";
+import { Btn, Chip, Empty, Icon, Seg, Switch, Thumb, fmtTC } from "@spool/ui";
 
 /* S6 Editor — connective hub, 1:1 port of the demo (06). Preview · transport · timeline ·
  * inspector (Format / Captions / Brand / Export). Render runs the real engine with the
@@ -32,6 +32,44 @@ export default function EditorScreen() {
   return <EditorBody key={clip.id} clip={clip} />;
 }
 
+/* Editor → Brand inspector: pick a persisted kit and apply it to this clip (caption with the
+ * kit's preset/overrides/watermark/lower-third, then render) — reuses the S9 brand-kit store. */
+function BrandInspector({ clipId, preset }: { clipId: string; preset: string }) {
+  const ctx = useSpool();
+  const kitsQ = useEngineQuery((c) => c.listBrandKits(), []);
+  const kits = kitsQ.data?.brand_kits ?? [];
+  const [sel, setSel] = useState("");
+  const apply = () => {
+    const k = kits.find((x) => x.id === sel);
+    if (!k) return;
+    ctx.client.caption(clipId, { style: k.caption_preset || "opus", overrides: k.caption_overrides, watermark: k.watermark || undefined, lower_third: k.lower_third || undefined })
+      .then(() => ctx.client.render(clipId, { preset }).catch(() => {})).catch(() => {});
+    ctx.pushToast({ icon: "palette", tone: "info", title: `Applying “${k.name}”`, body: "Caption + render queued — track it in the queue" });
+    ctx.nav("queue");
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <span className="field-label" style={{ margin: 0 }}>Brand kit</span>
+      {kits.length === 0 ? (
+        <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.6 }}>No kits yet — design one in the Brand screen, then apply it here.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {kits.map((k) => (
+            <button key={k.id} onClick={() => setSel(k.id)} className="card" style={{ padding: 10, display: "flex", alignItems: "center", gap: 8, cursor: "pointer", borderColor: sel === k.id ? "var(--accent)" : "var(--line)", background: sel === k.id ? "var(--accent-soft)" : "var(--bg-2)" }}>
+              <div className="row" style={{ gap: 4 }}>{(k.palette ?? []).slice(0, 4).map((c, j) => <span key={j} style={{ width: 14, height: 14, borderRadius: 4, background: c, border: "1px solid var(--line)" }} />)}</div>
+              <span style={{ fontSize: 12.5, fontWeight: 600 }}>{k.name}</span>
+              <span className="spacer" />
+              {k.watermark && <span className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)" }}>{k.watermark}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+      <Btn variant="primary" icon="palette" onClick={apply} disabled={!sel}>Apply kit + render</Btn>
+      <Btn variant="ghost" icon="plus" onClick={() => ctx.nav("brand")}>Design kits →</Btn>
+    </div>
+  );
+}
+
 function EditorBody({ clip }: { clip: SpoolClip }) {
   const ctx = useSpool();
   const { snapshot } = useLive();
@@ -47,8 +85,23 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   const render = () => ctx.makeClipsFrom([{ id }], { aspect, mode: reframe, preset });
   const capWords = (clip.title || "your caption here").split(" ").slice(0, 8);
   const renders = (snapshot?.clips ?? []).filter((c) => c.clip_id === id && (c.kind === "export" || c.kind === "pipeline") && c.status === "done" && c.result.render_id);
-  const latestRender = renders.at(-1);
-  const renderSrc = latestRender ? ctx.client.renderFileUrl(id, latestRender.result.render_id!) : null;
+  const [ver, setVer] = useState<number | null>(null);   // A/B: which render version is in the preview (null = latest)
+  const verIdx = ver == null ? renders.length - 1 : Math.min(ver, renders.length - 1);
+  const selRender = renders[verIdx];
+  const renderSrc = selRender ? ctx.client.renderFileUrl(id, selRender.result.render_id!) : null;
+
+  // The clip's transcript words (sliced to its window) drive the word-level timeline:
+  // click to scrub the rendered video, ✕ to delete → ripple-cut on re-cut (reuses slice 3).
+  const src = ctx.sources.find((s) => s.id === clip.src);
+  const doc = useEngineQuery((c) => (src?.transcriptId ? c.getTranscriptDoc(src.transcriptId) : Promise.resolve(undefined)), [src?.transcriptId]);
+  const lo = clip.start ?? 0, hi = clip.end ?? Infinity;
+  const allWords = doc.data?.words ?? [];
+  const inWin = (w: { start: number | null }) => w.start != null && w.start >= lo && w.start <= hi;
+  const tlWords = allWords.filter((w) => !w.deleted && inWin(w));
+  const deletedInWin = allWords.filter((w) => w.deleted && inWin(w)).length;
+  const seekTo = (t: number) => { const v = videoRef.current; if (v && isFinite(t)) v.currentTime = Math.max(0, t - lo); };
+  const delWord = (idx: number) => { if (src?.transcriptId) ctx.client.editWord(src.transcriptId, idx, { op: "delete" }).then(() => doc.reload()).catch(() => {}); };
+  const recut = () => { if (!src) return; ctx.client.cut(src.id, { start: lo, end: hi }).then(() => { ctx.pushToast({ icon: "scissors", tone: "info", title: "Re-cutting clip", body: `${deletedInWin} deleted word${deletedInWin === 1 ? "" : "s"} rippled out — a new version is in the queue` }); ctx.nav("queue"); }).catch(() => {}); };
   const togglePlay = () => { const v = videoRef.current; if (v) { if (v.paused) void v.play(); else v.pause(); setPlaying(!v.paused); } else setPlaying((p) => !p); };
   const others = ctx.clips.filter((c) => c.src === clip.src && c.id !== clip.id).slice(0, 4);
 
@@ -70,7 +123,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
             <div style={{ height: "100%", aspectRatio: aspect === "9:16" ? "9/16" : aspect === "1:1" ? "1/1" : aspect === "4:5" ? "4/5" : "16/9", maxHeight: "52vh", borderRadius: 10, overflow: "hidden", position: "relative", border: "1px solid var(--line-str)" }}>
               {renderSrc ? (
                 /* a rendered clip: play the REAL .mp4 (captions already burned in) */
-                <video ref={videoRef} src={renderSrc} controls playsInline onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)}
+                <video key={selRender?.result.render_id || "none"} ref={videoRef} src={renderSrc} controls playsInline onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)}
                   style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", background: "#000" }} />
               ) : (
                 /* not rendered yet: the framing placeholder + caption preview */
@@ -91,9 +144,32 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
             <span className="spacer" />
             <label className="row" style={{ gap: 7, fontSize: 12.5, cursor: "pointer" }}><Switch on={safe} onClick={() => setSafe(!safe)} /> Safe zones</label>
           </div>
-          <div style={{ flex: "none", borderTop: "1px solid var(--line)", background: "var(--bg-1)", padding: "14px 18px" }}>
-            <div className="row" style={{ marginBottom: 8 }}><span className="eyebrow">Timeline</span><span className="spacer" /><span className="chip warn">Phase 2</span></div>
-            <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.6 }}>Word-level scrub, trim-to-render, ripple-cut (delete a caption word → cut the video), A/B versions and the energy / scene / speaker lanes are the Phase-2 editor. Today: set the format &amp; preset on the right, then Render.</div>
+          <div style={{ flex: "none", borderTop: "1px solid var(--line)", background: "var(--bg-1)", padding: "12px 18px" }}>
+            <div className="row" style={{ marginBottom: 8 }}>
+              <span className="eyebrow">Timeline</span>
+              {tlWords.length > 0 && <span className="mono" style={{ fontSize: 11, color: "var(--text-faint)" }}>· {tlWords.length} words · click to scrub · ✕ to ripple-cut</span>}
+              <span className="spacer" />
+              {renders.length > 1 && (
+                <div className="row" style={{ gap: 5, marginRight: 8 }}>
+                  <span className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)" }}>A/B</span>
+                  {renders.map((r, i) => <button key={r.id} className={"chip" + (verIdx === i ? " solid" : "")} style={{ cursor: "pointer", height: 22, padding: "0 8px" }} onClick={() => setVer(i)}>v{i + 1}</button>)}
+                </div>
+              )}
+              {deletedInWin > 0 && <Btn variant="primary" size="sm" icon="scissors" onClick={recut}>Re-cut (drop {deletedInWin})</Btn>}
+            </div>
+            {tlWords.length > 0 ? (
+              <div className="row" style={{ gap: 4, flexWrap: "wrap", maxHeight: 66, overflowY: "auto" }}>
+                {tlWords.map((w) => (
+                  <span key={w.idx} onClick={() => seekTo(w.start as number)} title={`scrub to ${fmtTC((w.start as number) - lo)}`}
+                    style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 12, padding: "2px 5px 2px 7px", borderRadius: 6, background: "var(--bg-3)", cursor: "pointer" }}>
+                    {w.w}
+                    <button onClick={(e) => { e.stopPropagation(); delWord(w.idx); }} title="delete word (rippled out on Re-cut)" style={{ border: 0, background: "transparent", color: "var(--text-faint)", cursor: "pointer", padding: "0 1px", lineHeight: 1, fontSize: 13 }}>×</button>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.6 }}>{doc.loading ? "loading the clip's transcript…" : "This clip's source isn't transcribed — transcribe it for a word-level timeline. Set the format & preset on the right, then Render."}</div>
+            )}
           </div>
         </div>
 
@@ -124,13 +200,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
                 <Btn variant="ghost" icon="type" onClick={() => ctx.nav("caption", { id })}>Open Caption Studio →</Btn>
               </div>
             )}
-            {insp === "Brand" && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                <div className="row"><span className="field-label" style={{ margin: 0 }}>Brand kits</span><span className="spacer" /><span className="chip warn">Phase 2</span></div>
-                <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.6 }}>Persisted brand kits (fonts, palette, watermark, lower-third) that re-style a render are a Phase-2 feature.</div>
-                <Btn variant="ghost" icon="palette" onClick={() => ctx.nav("brand")}>Preview the Brand Kit designer →</Btn>
-              </div>
-            )}
+            {insp === "Brand" && <BrandInspector clipId={id} preset={preset} />}
             {insp === "Export" && (
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                 <div><span className="field-label">Export preset</span><Seg value={preset} onChange={setPreset} neutral options={[{ value: "tiktok", label: "TikTok" }, { value: "reels", label: "Reels" }, { value: "shorts", label: "Shorts" }]} /></div>
