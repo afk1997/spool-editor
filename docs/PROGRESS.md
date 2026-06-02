@@ -4,11 +4,13 @@
 > `Spool_Engineering-Spec.md` (§5 roadmap, §6 front-end standards). Status legend:
 > ✅ done & verified · 🟡 in progress · ◻️ not started.
 >
-> **Last updated:** 2026-06-02 · **Phase 0 — ✅ COMPLETE.** Phase 1 **backend done & green**
-> (engine chain → `api_v1` clip surface → MCP tools + elicitation + `spool://`, CLI parity)
-> **and all Studio screens done & verified** (S0–S5, S7, S8, S10, S11 + ⌘K + Agent panel,
-> typecheck/build/lint green, zero mock). Remaining P1: in-studio agent chat + elicitation
-> cards (server-side agent loop on the codex bridge — deferred), and the Playwright e2e.
+> **Last updated:** 2026-06-02 · **Phase 0 — ✅ COMPLETE. Phase 1 — ✅ functionally complete &
+> proven on real media.** Engine chain → `api_v1` clip surface → MCP/CLI → all Studio screens
+> (S0–S5, S7, S8, S10, S11 + ⌘K + Agent chat). The **codex bridge is verified live** and the
+> **NL agent loop** (`/agent`) drives the real clip tools end-to-end. **Real run:** a YouTube
+> URL → download → transcribe → codex find_moments → cut → reframe → caption → export → a
+> verified 1080×1920 mp4, both via the API and the agent. Remaining: Playwright e2e harness,
+> `@spool/ui` extraction, diarization-on reframe pass. **608 engine tests green.**
 
 ## Roadmap at a glance
 
@@ -105,11 +107,11 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
   Import · **S3** Library · **S4** Project/Transcript (read-only) · **S5** Clip Discovery
   (candidate cards; glass-box = named signals, not an opaque score) · **S7** Reframe (basic
   preset flow) · **S8** Caption Studio (presets) · **S10** Render Queue · **S11** Clips Library ·
-  **⌘K** palette · **Agent panel** (P1 form: shared-queue activity + copy-paste MCP connect).
-  `pnpm typecheck` 9/9, studio build (8 routes) + lint green.
-  **Remaining (Phase-1 polish, not screens):** in-studio agent **chat + inline elicitation
-  cards** (needs a server-side agent-loop endpoint on the codex bridge — deferred with codex);
-  promote primitives to `@spool/ui`; **Playwright e2e** (URL→9:16, needs a running engine).
+  **⌘K** palette · **Agent chat** (real NL chat → `/agent` → clip tools; clarify = inline
+  elicitation cards; spawned-job chips; source context auto-passed).
+  `pnpm typecheck` 9/9, studio build (8 routes) + lint green; agent loop proven live.
+  **Remaining (Phase-1 polish):** promote primitives to `@spool/ui`; **Playwright e2e**
+  (automate the URL→9:16 run that's been verified by hand); diarization-on reframe pass.
 
 ## What's verified now
 
@@ -117,7 +119,9 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
 - `pnpm typecheck` → 9/9 tasks pass. `pnpm build` → Next.js 16 compiles, static pages generate.
 - `engine/` `.py` files diff byte-identical against the validated trove clone.
 - **engine: 595 tests pass** (exit 0) on Python 3.12 via uv venv — headless trove suite + `clip.cutter` (7) + `clip.captioner` (6) + `clip.reframe` (15) + `clip.exporter` (9) + `clip.llm` (16) + `clip.moments` (15) + `clip_jobs` (13) + `clip_runner` (10) + `api_v1` clips (23) + `trove_client` clips (13) + MCP clip tools/elicitation (e2e). The whole agent + API + CLI clip surface is wired to one engine + one queue.
-- **studio:** `pnpm typecheck` 9/9, `pnpm --filter @spool/studio build` compiles 8 routes (/, /import, /library, /clips, /clips/[id], /sources/[id], /queue, /_not-found), ESLint clean. All Phase-1 screens (S0–S5, S7, S8, S10, S11) + ⌘K + Agent panel wired to `api_v1` (no mock data). Runtime end-to-end (live engine + media) not yet exercised — that's the Playwright e2e.
+- **studio:** `pnpm typecheck` 9/9, build compiles 8 routes, ESLint clean. All Phase-1 screens (S0–S5, S7, S8, S10, S11) + ⌘K + **Agent chat** wired to `api_v1` (no mock data).
+- **REAL end-to-end (manual, live engine):** ✅ downloaded + transcribed "Me at the zoo"; ✅ pipeline produced a verified **1080×1920 H.264+AAC 10s** render; ✅ **codex `find_moments`** returns real candidates (14s at low reasoning); ✅ **NL agent** ("find the funniest moment" → find_moments; "make a 9:16 clip … with karaoke captions for tiktok" → pipeline → render); ✅ studio↔engine over CORS (preflight + POST from localhost:3000). Codex = codex-cli 0.136.0, ChatGPT-subscription auth. Not yet automated — that's the Playwright e2e.
+- **bugs found+fixed by the live run:** stale-yt-dlp resolution (`_ytdlp_bin`), localhost CORS, hardened codex bridge (`--output-last-message`), low reasoning-effort default.
 - **`docker compose up`** builds the multi-stage image and serves `/api/v1/health` from the host — the packaged engine works end to end.
 - **headless serving** (venv): `/api/v1/doctor` reports real tooling — ffmpeg 7.1.1, whisper.cpp 1.5.0, yt-dlp 2026.3.17, VideoToolbox encoders.
 
