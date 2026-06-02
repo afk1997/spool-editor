@@ -77,6 +77,17 @@ export interface TrackSegment {
   end: number;
   speaker: "left" | "right";
 }
+/** A persisted brand kit (S9) — a reusable look applied across a project's clips on render. */
+export interface BrandKit {
+  id: string;
+  name: string;
+  palette?: string[];
+  caption_preset?: string;
+  caption_overrides?: CaptionOverrides;
+  watermark?: string;
+  lower_third?: string;
+  fonts?: string[];
+}
 /** S8 Caption Studio fine-styling — clamped/validated engine-side, mapped to the real ASS. */
 export interface CaptionOverrides {
   size?: number;
@@ -152,7 +163,11 @@ export class SpoolApiClient {
   }
 
   private post<T>(path: string, body?: unknown): Promise<T> {
-    const init: RequestInit = { method: "POST" };
+    return this.bodyMethod<T>("POST", path, body);
+  }
+
+  private bodyMethod<T>(method: "POST" | "PATCH" | "PUT", path: string, body?: unknown): Promise<T> {
+    const init: RequestInit = { method };
     if (body !== undefined) {
       init.body = JSON.stringify(body);
       init.headers = { "Content-Type": "application/json" };
@@ -236,7 +251,7 @@ export class SpoolApiClient {
   reframe(clipId: string, p: ReframeParams = {}): Promise<ClipJobView> {
     return this.post(`/clips/${encodeURIComponent(clipId)}/reframe`, p);
   }
-  caption(clipId: string, p: { style?: string; overrides?: CaptionOverrides } = {}): Promise<ClipJobView> {
+  caption(clipId: string, p: { style?: string; overrides?: CaptionOverrides; watermark?: string; lower_third?: string } = {}): Promise<ClipJobView> {
     return this.post(`/clips/${encodeURIComponent(clipId)}/captions`, p);
   }
   render(clipId: string, p: { preset?: string; fast?: boolean } = {}): Promise<ClipJobView> {
@@ -261,6 +276,20 @@ export class SpoolApiClient {
    *  clip-tool action. Blocks while the LLM plans, so show a thinking state. */
   agent(message: string, opts: { sourceId?: string } = {}): Promise<AgentResponse> {
     return this.post("/agent", { message, source_id: opts.sourceId });
+  }
+
+  // ── brand kits (S9) ──
+  listBrandKits(): Promise<{ brand_kits: BrandKit[] }> {
+    return this.get("/brand-kits");
+  }
+  createBrandKit(kit: Partial<BrandKit>): Promise<BrandKit> {
+    return this.post("/brand-kits", kit);
+  }
+  updateBrandKit(id: string, kit: Partial<BrandKit>): Promise<BrandKit> {
+    return this.bodyMethod("PATCH", `/brand-kits/${encodeURIComponent(id)}`, kit);
+  }
+  deleteBrandKit(id: string): Promise<void> {
+    return this.request(`/brand-kits/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
   /** Direct URL for a produced render's .mp4 — for `<video src>` / download links.

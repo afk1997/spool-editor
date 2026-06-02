@@ -4,7 +4,7 @@
 > `Spool_Engineering-Spec.md` (§5 roadmap, §6 front-end standards). Status legend:
 > ✅ done & verified · 🟡 in progress · ◻️ not started.
 >
-> **Last updated:** 2026-06-03 · **Phase 0 — ✅ · Phase 1 — ✅ · Phase 2 — 🟡 IN PROGRESS** (S7 reframe + S8 caption + transcript editing done & verified; done-when #1 + #3 met).
+> **Last updated:** 2026-06-03 · **Phase 0 — ✅ · Phase 1 — ✅ · Phase 2 — 🟡 IN PROGRESS** (S7 reframe + S8 caption + transcript editing + S9 brand kits done & verified; done-when #1 + #2 + #3 met).
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,
@@ -233,8 +233,22 @@ editing its transcript · full-text search transcripts across the library.
   **Verified:** 638 engine tests (+9), studio typecheck/lint/12-unit/build + e2e green; real
   media — delete 2 words in [1,8] of a live transcript, cut → a 6.46s clip (vs 7s window).
   **→ done-when #3 met** (cut a clip by editing its transcript). Commits: `c00d2d4` (engine) + UI commit.
-- [ ] **Brand Kits (S9)** · **Editor timeline (S6)** · **Settings writes** ·
-  **SQLite FTS5 + library search** · **perf (virtualize / lazy-load)** — next slices.
+- [x] **Brand Kits (S9)** — persisted reusable looks applied across a project's clips, zero
+  dummy. **Engine (additive):** new `brand_kits.BrandKitStore` (JSON under the download dir,
+  atomic) + `GET/POST/PATCH/DELETE /brand-kits` (validated; OpenAPI documented). The kit's
+  watermark + lower-third burn via the **same libass caption pass** — `captioner.generate`
+  gained `watermark`/`lower_third` that append static ASS lines (top-right `\an9` / top-center
+  `\an8`), no fragile drawtext; `clip_runner._do_caption` + `POST /clips/<id>/captions` thread
+  them. **Studio:** the FutureScreen is replaced by a real editor (live kit list + New;
+  name/palette/caption-preset/highlight/font/watermark/lower-third; Save/Delete) + an applied
+  preview + **Apply to a project** → re-captions every clip of a source with the kit, then
+  renders. api-client `listBrandKits`/`create`/`update`/`deleteBrandKit` + `BrandKit` type;
+  `caption()` gains watermark/lower_third. **Verified:** 648 engine tests (+10), studio
+  typecheck/lint/12-unit/build + e2e green; real media — created a kit, applied → ASS carries
+  `{\an9…}@acme` + `{\an8…}Local First`, captioned mp4 produced. **→ done-when #2 met** (apply
+  a brand kit across clips). Commits: `970671c` (engine) + UI commit.
+- [ ] **Editor timeline (S6)** · **Settings writes** · **SQLite FTS5 + library search** ·
+  **perf (virtualize / lazy-load)** — next slices.
 
 ## What's verified now
 
