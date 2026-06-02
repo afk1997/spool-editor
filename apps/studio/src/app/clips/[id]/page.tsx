@@ -47,16 +47,24 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   const [trimIn, setTrimIn] = useState(8), [trimOut, setTrimOut] = useState(86);
   const [cut, setCut] = useState<Record<number, boolean>>({});
   const trimRef = useRef<HTMLDivElement>(null);
+  const maskInRef = useRef<HTMLDivElement>(null), maskOutRef = useRef<HTMLDivElement>(null);
+  const edgeInRef = useRef<HTMLDivElement>(null), edgeOutRef = useRef<HTMLDivElement>(null);
 
   const render = () => ctx.makeClipsFrom([{ id }], { aspect, mode: reframe, preset });
   const capWords = (clip.title || "your caption here").split(" ").slice(0, 8);
   const renders = (snapshot?.clips ?? []).filter((c) => c.clip_id === id && (c.kind === "export" || c.kind === "pipeline") && c.status === "done" && c.result.render_id);
+  // §6.3: update the trim mask/edge elements imperatively during the drag; commit to state on release.
   const dragTrim = (e: React.PointerEvent, which: "in" | "out") => {
     e.preventDefault();
     const rect = trimRef.current!.getBoundingClientRect();
     const sIn = trimIn, sOut = trimOut;
-    const move = (ev: PointerEvent) => { let p = ((ev.clientX - rect.left) / rect.width) * 100; p = Math.max(0, Math.min(100, p)); if (which === "in") setTrimIn(Math.min(sOut - 5, Math.max(0, p))); else setTrimOut(Math.max(sIn + 5, Math.min(100, p))); };
-    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+    let latest = which === "in" ? sIn : sOut;
+    const move = (ev: PointerEvent) => {
+      let p = ((ev.clientX - rect.left) / rect.width) * 100; p = Math.max(0, Math.min(100, p));
+      if (which === "in") { p = Math.min(sOut - 5, Math.max(0, p)); latest = p; if (maskInRef.current) maskInRef.current.style.width = p + "%"; if (edgeInRef.current) edgeInRef.current.style.left = `calc(${p}% - 5px)`; }
+      else { p = Math.max(sIn + 5, Math.min(100, p)); latest = p; if (maskOutRef.current) maskOutRef.current.style.width = 100 - p + "%"; if (edgeOutRef.current) edgeOutRef.current.style.left = `calc(${p}% - 5px)`; }
+    };
+    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); if (which === "in") setTrimIn(latest); else setTrimOut(latest); };
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
   };
   const trimSecs = Math.round(clip.dur * (trimOut - trimIn) / 100);
@@ -109,10 +117,10 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
             <div style={{ position: "relative" }}>
               <div style={{ position: "absolute", left: `calc(92px + ${pos}%)`, top: 0, bottom: 0, width: 2, background: "var(--accent)", zIndex: 3, pointerEvents: "none" }}><div style={{ position: "absolute", top: -1, left: -4, width: 10, height: 10, borderRadius: "50%", background: "var(--accent)" }} /></div>
               <div ref={trimRef} style={{ position: "absolute", left: 92, right: 0, top: 0, bottom: 0, zIndex: 2 }}>
-                <div className="trim-mask" style={{ left: 0, width: trimIn + "%" }} />
-                <div className="trim-mask" style={{ right: 0, width: (100 - trimOut) + "%" }} />
-                <div className="trim-edge" style={{ left: `calc(${trimIn}% - 5px)` }} onPointerDown={(e) => dragTrim(e, "in")} title="Trim in" />
-                <div className="trim-edge" style={{ left: `calc(${trimOut}% - 5px)` }} onPointerDown={(e) => dragTrim(e, "out")} title="Trim out" />
+                <div ref={maskInRef} className="trim-mask" style={{ left: 0, width: trimIn + "%" }} />
+                <div ref={maskOutRef} className="trim-mask" style={{ right: 0, width: (100 - trimOut) + "%" }} />
+                <div ref={edgeInRef} className="trim-edge" style={{ left: `calc(${trimIn}% - 5px)` }} onPointerDown={(e) => dragTrim(e, "in")} title="Trim in" />
+                <div ref={edgeOutRef} className="trim-edge" style={{ left: `calc(${trimOut}% - 5px)` }} onPointerDown={(e) => dragTrim(e, "out")} title="Trim out" />
               </div>
               {lane("Video", "var(--text-dim)", <div className="row" style={{ gap: 3, flex: 1 }}>{Array.from({ length: 10 }).map((_, i) => <div key={i} style={{ flex: 1, height: 30, borderRadius: 3, overflow: "hidden" }}><Thumb seed={clip.id + i} kind="" label={false} /></div>)}</div>)}
               {lane("Captions", "var(--caption-hl)", <div className="kbar">{capWords.map((w, i) => <span key={i} className={"chip" + (cut[i] ? " cut-word" : "")} style={{ height: 22, fontSize: 10.5, cursor: "pointer" }} onClick={() => setCut((c) => ({ ...c, [i]: !c[i] }))} title="Click to delete this word (ripple-cuts the video)">{w}</span>)}</div>)}

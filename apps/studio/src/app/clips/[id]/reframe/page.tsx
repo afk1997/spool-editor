@@ -12,23 +12,29 @@ import { Btn, Icon, Seg, Switch, Thumb, fmtTC } from "@/components/spool/ui";
 interface Box { x: number; y: number; w: number; h: number }
 
 function ROIBox({ box, color, label, onChange, containerRef }: { box: Box; color: string; label: string; onChange: (b: Box) => void; containerRef: React.RefObject<HTMLDivElement | null> }) {
+  const ref = useRef<HTMLDivElement>(null);
+  // §6.3: drive the drag imperatively (no setState per pointermove → no re-render storm);
+  // commit the final box to state once, on pointerup.
   const drag = (e: React.PointerEvent, mode: "move" | "resize") => {
     e.preventDefault(); e.stopPropagation();
     const rect = containerRef.current!.getBoundingClientRect();
     const start = { px: e.clientX, py: e.clientY, ...box };
+    let latest: Box = { ...box };
     const move = (ev: PointerEvent) => {
       const dx = ((ev.clientX - start.px) / rect.width) * 100;
       const dy = ((ev.clientY - start.py) / rect.height) * 100;
-      const b: Box = { ...box };
+      const b: Box = { x: start.x, y: start.y, w: start.w, h: start.h };
       if (mode === "move") { b.x = Math.max(0, Math.min(100 - start.w, start.x + dx)); b.y = Math.max(0, Math.min(100 - start.h, start.y + dy)); }
       else { b.w = Math.max(12, Math.min(100 - start.x, start.w + dx)); b.h = Math.max(12, Math.min(100 - start.y, start.h + dy)); }
-      onChange(b);
+      latest = b;
+      const el = ref.current;
+      if (el) { el.style.left = b.x + "%"; el.style.top = b.y + "%"; el.style.width = b.w + "%"; el.style.height = b.h + "%"; }
     };
-    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); onChange(latest); };
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
   };
   return (
-    <div onPointerDown={(e) => drag(e, "move")}
+    <div ref={ref} onPointerDown={(e) => drag(e, "move")}
       style={{ position: "absolute", left: box.x + "%", top: box.y + "%", width: box.w + "%", height: box.h + "%", border: `2px solid ${color}`, borderRadius: 6, cursor: "grab", boxShadow: "0 0 0 9999px rgba(0,0,0,0.18)", touchAction: "none" }}>
       <div style={{ position: "absolute", top: -22, left: 0, fontFamily: "var(--font-mono)", fontSize: 10, fontWeight: 700, color, background: "rgba(0,0,0,0.7)", padding: "1px 6px", borderRadius: 5 }}>{label}</div>
       <div onPointerDown={(e) => drag(e, "resize")} style={{ position: "absolute", right: -7, bottom: -7, width: 14, height: 14, borderRadius: "50%", background: color, cursor: "nwse-resize", border: "2px solid #000" }} />

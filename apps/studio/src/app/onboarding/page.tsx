@@ -69,7 +69,7 @@ export default function OnboardingScreen() {
             <div>
               <div className="eyebrow" style={{ marginBottom: 14 }}>Welcome to Spool</div>
               <h1 style={{ fontSize: 34, lineHeight: 1.1, marginBottom: 16 }}>Turn long videos into platform-ready shorts — without the cloud.</h1>
-              <p style={{ color: "var(--text-dim)", fontSize: 15, lineHeight: 1.6, marginBottom: 28 }}>Spool runs an agent and a full editor over a local media pipeline: download, transcribe, find moments, reframe, caption, render. No uploads, no subscriptions, no waiting on a server.</p>
+              <p style={{ color: "var(--text-dim)", fontSize: 15, lineHeight: 1.6, marginBottom: 28 }}>Download → transcribe → find moments → reframe → caption → render — entirely on your machine. Let&rsquo;s check your setup.</p>
               <div className="row" style={{ gap: 12 }}><Btn variant="primary" size="lg" iconR="arrowR" onClick={() => setStep(1)}>Let&rsquo;s set up</Btn><Btn variant="ghost" size="lg" onClick={() => ctx.nav("home")}>Skip for now</Btn></div>
             </div>
           )}
