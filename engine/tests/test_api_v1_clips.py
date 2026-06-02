@@ -254,6 +254,48 @@ def test_caption_400_on_bad_overrides(client, body):
     assert c.post("/api/v1/clips/clipA/captions", json=body).status_code == 400
 
 
+def test_caption_accepts_watermark(client):
+    """Applying a brand kit caption-burns its watermark + lower-third (S9)."""
+    app, c = client
+    _seed_source(app)
+    _seed_clip(app, files=("clip.mp4",))
+    r = c.post("/api/v1/clips/clipA/captions", json={"style": "opus", "watermark": "@acme", "lower_third": "Ep. 42"})
+    assert r.status_code == 201
+    p = c.get(f"/api/v1/clip-jobs/{r.get_json()['id']}").get_json()["params"]
+    assert p["watermark"] == "@acme" and p["lower_third"] == "Ep. 42"
+    _await(c, r.get_json()["id"])
+
+
+# ---- brand kits (S9) -------------------------------------------------
+
+def test_brand_kits_crud(client):
+    app, c = client
+    assert c.get("/api/v1/brand-kits").get_json()["brand_kits"] == []
+    r = c.post("/api/v1/brand-kits", json={"name": "Acme", "caption_preset": "opus",
+                                           "caption_overrides": {"highlight": "#FFE94D", "size": 110},
+                                           "watermark": "@acme", "palette": ["#45556E", "#C98A3D"]})
+    assert r.status_code == 201
+    kid = r.get_json()["id"]
+    listed = c.get("/api/v1/brand-kits").get_json()["brand_kits"]
+    assert len(listed) == 1 and listed[0]["name"] == "Acme" and listed[0]["caption_overrides"]["size"] == 110
+    u = c.patch(f"/api/v1/brand-kits/{kid}", json={"name": "Acme Media"})
+    assert u.status_code == 200 and u.get_json()["name"] == "Acme Media" and u.get_json()["watermark"] == "@acme"
+    assert c.delete(f"/api/v1/brand-kits/{kid}").status_code == 204
+    assert c.get("/api/v1/brand-kits").get_json()["brand_kits"] == []
+
+
+@pytest.mark.parametrize("body", [{"caption_preset": "opus"}, {"name": "X", "caption_preset": "neon"},
+                                  {"name": "X", "caption_overrides": {"size": "huge"}}])
+def test_brand_kit_create_400(client, body):
+    _, c = client
+    assert c.post("/api/v1/brand-kits", json=body).status_code == 400
+
+
+def test_brand_kit_update_404(client):
+    _, c = client
+    assert c.patch("/api/v1/brand-kits/ghost", json={"name": "x"}).status_code == 404
+
+
 # ---- renders (export) ------------------------------------------------
 
 def test_render_export_creates_job_and_file(client):

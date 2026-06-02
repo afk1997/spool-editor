@@ -107,6 +107,17 @@ def test_generate_overrides_can_disable_highlight(tmp_path):
     assert "&H0000FFFF&" not in out.read_text()    # opus default yellow highlight removed
 
 
+def test_generate_appends_watermark_and_lower_third(tmp_path):
+    """A brand kit's watermark + lower-third burn in via the same libass path (S9)."""
+    words = _write_words(tmp_path)
+    out = tmp_path / "wm.ass"
+    captioner.generate(words, clip_start=10.0, clip_end=12.0, style="opus", out_ass_path=str(out),
+                       watermark="@acme", lower_third="Local First")
+    content = out.read_text()
+    assert "@acme" in content and "Local First" in content   # both static lines present
+    assert "\\an9" in content                                # watermark pinned top-right
+
+
 # ---- burn ----------------------------------------------------------------
 
 class _FakePopen:

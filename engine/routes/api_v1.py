@@ -371,6 +371,10 @@ def _cr():
     return current_app.extensions["trove.clip_runner"]
 
 
+def _bk():
+    return current_app.extensions["trove.brand_kits"]
+
+
 def _actions():
     return current_app.extensions["trove.actions"]
 
@@ -418,6 +422,28 @@ def _validate_caption_overrides(ov):
     if ov.get("font"):
         clean["font"] = str(ov["font"])[:60]
     return clean
+
+
+def _validate_brand_kit(data, *, require_name: bool):
+    """Validate a brand-kit body; return an error response tuple, or None if OK."""
+    bad = (jsonify({"error": "bad_kit"}), 400)
+    if not isinstance(data, dict):
+        return bad
+    if require_name and not (isinstance(data.get("name"), str) and data["name"].strip()):
+        return bad
+    if "name" in data and not isinstance(data["name"], str):
+        return bad
+    if data.get("caption_preset") is not None and data["caption_preset"] not in _CAPTION_STYLES:
+        return bad
+    if data.get("caption_overrides") is not None and _validate_caption_overrides(data["caption_overrides"]) is None:
+        return bad
+    pal = data.get("palette")
+    if pal is not None and (not isinstance(pal, list) or not all(_is_hex_color(x) for x in pal)):
+        return bad
+    for key in ("watermark", "lower_third"):
+        if data.get(key) is not None and not isinstance(data[key], str):
+            return bad
+    return None
 
 
 def _download_dir() -> Path:
@@ -1562,6 +1588,13 @@ def caption_clip(clip_id):
         if clean is None:
             return jsonify({"error": "bad_overrides"}), 400
         params["overrides"] = clean
+    # Brand-kit overlays (S9): a watermark + lower-third burned with the captions.
+    for key in ("watermark", "lower_third"):
+        v = data.get(key)
+        if v is not None:
+            if not isinstance(v, str):
+                return jsonify({"error": "bad_overrides"}), 400
+            params[key] = v[:60]
     jid = _cm().submit(kind="caption", clip_id=clip_id, params=params,
                        target=_cr().caption_target(clip_id=clip_id, params=params))
     return jsonify(_clip_job_view(_cm().get(jid))), 201
@@ -1684,6 +1717,45 @@ def get_clip_artifact(clip_id, name):
     if not path.exists():
         return jsonify({"error": "not_found"}), 404
     return send_file(str(path), as_attachment=False, download_name=f"{clip_id}-{name}.mp4")
+
+
+# ---- brand kits (S9): persisted reusable looks applied across a project's clips ----
+
+@api_v1_bp.get("/brand-kits")
+@token_required
+def list_brand_kits():
+    return jsonify({"brand_kits": _bk().list()})
+
+
+@api_v1_bp.post("/brand-kits")
+@token_required
+def create_brand_kit():
+    data = request.get_json(silent=True) or {}
+    err = _validate_brand_kit(data, require_name=True)
+    if err:
+        return err
+    return jsonify(_bk().create(data)), 201
+
+
+@api_v1_bp.patch("/brand-kits/<kit_id>")
+@token_required
+def update_brand_kit(kit_id):
+    data = request.get_json(silent=True) or {}
+    err = _validate_brand_kit(data, require_name=False)
+    if err:
+        return err
+    kit = _bk().update(kit_id, data)
+    if kit is None:
+        return jsonify({"error": "not_found"}), 404
+    return jsonify(kit)
+
+
+@api_v1_bp.delete("/brand-kits/<kit_id>")
+@token_required
+def delete_brand_kit(kit_id):
+    if not _bk().delete(kit_id):
+        return jsonify({"error": "not_found"}), 404
+    return ("", 204)
 
 
 @api_v1_bp.post("/agent")
@@ -1841,6 +1913,8 @@ _OPENAPI_DOC = {
         "/clips/{clip_id}/renders":     {"post": {"summary": "Export the clip to a platform preset"}},
         "/clips/{clip_id}/renders/{render_id}/file": {"get": {"summary": "Download a produced render .mp4"}},
         "/clips/{clip_id}/artifacts/{name}": {"get": {"summary": "Stream a clip's intermediate artifact (cut/reframed/captioned mp4)"}},
+        "/brand-kits":          {"get": {"summary": "List brand kits"}, "post": {"summary": "Create a brand kit"}},
+        "/brand-kits/{kit_id}": {"patch": {"summary": "Update a brand kit"}, "delete": {"summary": "Delete a brand kit"}},
         "/clip-jobs":          {"get":  {"summary": "List clip/render jobs (the render queue)",
                                           "parameters": [
                                               {"name": "kind", "in": "query",

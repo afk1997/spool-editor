@@ -60,6 +60,16 @@ def _ass_overrides(overrides: dict) -> dict:
     return ov
 
 
+def _ass_time(t: float) -> str:
+    h = int(t // 3600); m = int((t % 3600) // 60); s = t - h * 3600 - m * 60
+    return f"{h}:{m:02d}:{s:05.2f}"
+
+
+def _ass_escape(text: str) -> str:
+    """Neutralize chars that would break an ASS override block / Dialogue line."""
+    return text.replace("{", "(").replace("}", ")").replace("\n", " ").strip()
+
+
 def generate(
     words_json_path: str,
     *,
@@ -67,6 +77,8 @@ def generate(
     clip_end: float,
     style: str = "opus",
     overrides: dict | None = None,
+    watermark: str | None = None,
+    lower_third: str | None = None,
     out_ass_path: str,
 ) -> str:
     """Slice ``words.json`` to ``[clip_start, clip_end]`` (re-based to 0) and write a
@@ -124,6 +136,18 @@ def generate(
             os.unlink(tmp_path)
         except OSError:
             pass
+
+    # Brand-kit overlays: pin a watermark (top-right) + lower-third (top-center) as static
+    # ASS lines spanning the whole clip — burned by the same libass pass as the captions.
+    extras = []
+    end_tc = _ass_time(max(0.0, clip_end - clip_start))
+    if watermark:
+        extras.append(f"Dialogue: 0,0:00:00.00,{end_tc},Default,,0,0,0,,{{\\an9\\fs44\\alpha&H50&}}{_ass_escape(watermark)}")
+    if lower_third:
+        extras.append(f"Dialogue: 0,0:00:00.00,{end_tc},Default,,0,0,0,,{{\\an8\\fs54}}{_ass_escape(lower_third)}")
+    if extras:
+        with open(out_ass_path, "a", encoding="utf-8") as f:
+            f.write("\n".join(extras) + "\n")
     return out_ass_path
 
 

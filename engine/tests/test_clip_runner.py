@@ -272,6 +272,18 @@ def test_caption_forwards_style_overrides(runner, monkeypatch):
     assert seen["gen"]["overrides"] == ov
 
 
+def test_caption_forwards_brandkit_watermark(runner, monkeypatch):
+    """Applying a brand kit caption-burns its watermark + lower-third (S9)."""
+    _words_file(runner)
+    _seed_clip(runner, files=("clip.mp4",))
+    seen = {}
+    _patch(monkeypatch, "captioner", "generate",
+           lambda w, **kw: (seen.update(kw), Path(kw["out_ass_path"]).write_text("[ass]"))[-1] or kw["out_ass_path"])
+    _patch(monkeypatch, "captioner", "burn", lambda v, a, out, **kw: (Path(out).write_bytes(b"C"), out)[-1])
+    runner.caption_target(clip_id="clipA", params={"style": "opus", "watermark": "@acme", "lower_third": "Ep. 42"})(_job("caption", clip_id="clipA"))
+    assert seen["watermark"] == "@acme" and seen["lower_third"] == "Ep. 42"
+
+
 # ---- export ----------------------------------------------------------
 
 def test_export_target_prefers_captioned_and_writes_render(runner, monkeypatch):
