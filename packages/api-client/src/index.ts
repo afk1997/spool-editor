@@ -7,6 +7,7 @@
  * the engine emits. The progress stream is `subscribeEvents` (SSE).
  */
 import type {
+  AgentResponse,
   Capabilities,
   ClipJobList,
   ClipJobView,
@@ -221,6 +222,12 @@ export class SpoolApiClient {
   dismissClipJob(id: string): Promise<void> {
     return this.post(`/clip-jobs/${encodeURIComponent(id)}/dismiss`);
   }
+  /** One agent turn: a natural-language message (+ optional source context) → an executed
+   *  clip-tool action. Blocks while the LLM plans, so show a thinking state. */
+  agent(message: string, opts: { sourceId?: string } = {}): Promise<AgentResponse> {
+    return this.post("/agent", { message, source_id: opts.sourceId });
+  }
+
   /** Direct URL for a produced render's .mp4 — for `<video src>` / download links.
    *  (Token-auth deployments need a signed URL; the local-first default is unauthenticated.) */
   renderFileUrl(clipId: string, renderId: string): string {

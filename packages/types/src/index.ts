@@ -423,3 +423,13 @@ export interface TranscriptDoc {
   words: TranscriptWord[];
   segments: TranscriptDocSegment[];
 }
+
+/** One turn of the NL agent (`POST /agent`). `clarify` is the spec's elicitation —
+ *  the studio renders `question` + `options` as an inline card. */
+export interface AgentResponse {
+  reply: string;
+  action: "find_moments" | "make_clip" | "clarify" | "reply";
+  jobs: ClipJobView[];
+  question?: string;
+  options?: string[];
+}
