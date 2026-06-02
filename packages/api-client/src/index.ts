@@ -57,13 +57,25 @@ export interface MomentsParams {
 export interface ReframeParams {
   aspect?: string;
   mode?: string;
+  /** Fractional ROIs (0–1, resolution-independent); the engine scales to source pixels. */
   rois?: { left: Roi; right: Roi };
+  /** S7 tuning knobs — clamped engine-side (min_dwell 0–10s, smoothing 1–121, crop_margin 0–0.5). */
+  min_dwell?: number;
+  smoothing?: number;
+  crop_margin?: number;
+  /** A hand-edited speaker track (drag/flip in S7) — rendered verbatim, skipping diar⊕ROI. */
+  segments?: TrackSegment[];
 }
 export interface Roi {
   x: number;
   y: number;
   w: number;
   h: number;
+}
+export interface TrackSegment {
+  start: number;
+  end: number;
+  speaker: "left" | "right";
 }
 export interface PipelineParams {
   start: number;
@@ -243,6 +255,12 @@ export class SpoolApiClient {
   /** Stream URL for a source's downloaded file (`/jobs/<id>/file`) — feed an inline <video>. */
   jobFileUrl(jobId: string): string {
     return `${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}/file`;
+  }
+
+  /** Stream URL for a clip's intermediate artifact (cut/reframed/captioned mp4) — for the
+   *  editor previews (S6/S7/S8). Final platform renders use `renderFileUrl`. */
+  clipArtifactUrl(clipId: string, name: "clip" | "reframed" | "captioned"): string {
+    return `${this.baseUrl}/api/v1/clips/${encodeURIComponent(clipId)}/artifacts/${name}`;
   }
 
   /**

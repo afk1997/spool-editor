@@ -382,6 +382,7 @@ _CLIP_ASPECTS = ("9:16", "16:9", "1:1", "4:5")
 _CLIP_MODES = ("pan", "split", "center")
 _CLIP_PRESETS = ("tiktok", "reels", "shorts", "youtube", "linkedin", "x")
 _CAPTION_STYLES = ("opus", "karaoke", "minimal")
+_CLIP_ARTIFACTS = {"clip": "clip.mp4", "reframed": "reframed.mp4", "captioned": "captioned.mp4"}
 
 
 def _download_dir() -> Path:
@@ -1598,6 +1599,20 @@ def get_render_file(clip_id, render_id):
     if not path.exists():
         return jsonify({"error": "not_found"}), 404
     return send_file(str(path), as_attachment=True, download_name=f"{clip_id}-{render_id}.mp4")
+
+
+@api_v1_bp.get("/clips/<clip_id>/artifacts/<name>")
+@token_or_sig_required(SCOPE_MEDIA, kwarg="clip_id")
+def get_clip_artifact(clip_id, name):
+    """Stream a clip's intermediate artifact (cut/reframed/captioned mp4) inline for the
+    editor previews (S6/S7/S8). Final platform renders use /clips/<id>/renders/<rid>/file."""
+    fname = _CLIP_ARTIFACTS.get(name)
+    if not fname:
+        return jsonify({"error": "bad_artifact"}), 400
+    path = _cr().clip_dir(clip_id) / fname
+    if not path.exists():
+        return jsonify({"error": "not_found"}), 404
+    return send_file(str(path), as_attachment=False, download_name=f"{clip_id}-{name}.mp4")
 
 
 @api_v1_bp.post("/agent")

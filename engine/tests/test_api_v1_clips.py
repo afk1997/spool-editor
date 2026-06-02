@@ -192,6 +192,21 @@ def test_reframe_400_on_bad_tuning(client, body):
     assert c.post("/api/v1/clips/clipA/reframe", json=body).status_code == 400
 
 
+def test_clip_artifact_serves_intermediate_files(client):
+    """The editor previews (S6/S7/S8) stream the clip's intermediate mp4s by name."""
+    app, c = client
+    _seed_clip(app, files=("clip.mp4", "reframed.mp4"))
+    assert c.get("/api/v1/clips/clipA/artifacts/clip").status_code == 200
+    assert c.get("/api/v1/clips/clipA/artifacts/reframed").status_code == 200
+
+
+def test_clip_artifact_404_missing_and_400_invalid(client):
+    app, c = client
+    _seed_clip(app, files=("clip.mp4",))
+    assert c.get("/api/v1/clips/clipA/artifacts/captioned").status_code == 404  # not produced yet
+    assert c.get("/api/v1/clips/clipA/artifacts/bogus").status_code == 400       # not a known artifact
+
+
 # ---- captions --------------------------------------------------------
 
 def test_caption_creates_job(client):

@@ -4,7 +4,7 @@
 > `Spool_Engineering-Spec.md` (§5 roadmap, §6 front-end standards). Status legend:
 > ✅ done & verified · 🟡 in progress · ◻️ not started.
 >
-> **Last updated:** 2026-06-02 · **Phase 0 — ✅ COMPLETE. Phase 1 — ✅ COMPLETE** (backend + UI).
+> **Last updated:** 2026-06-03 · **Phase 0 — ✅ · Phase 1 — ✅ · Phase 2 — 🟡 IN PROGRESS** (S7 reframe/ROI editor done & verified).
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,
@@ -81,7 +81,7 @@ graph TD
       C4["spool.css verbatim demo CSS = single source of truth; Tailwind dropped"]:::done
       C5["e2e: URL → 9:16 clip (Playwright) — green ~49s · diar-on reframe verified"]:::done
     end
-    P2["Phase 2 — Studios + editor (timeline, ROI editor, caption studio, brand kits, SQLite FTS5)"]:::todo
+    P2["Phase 2 — Studios + editor (timeline, ROI editor, caption studio, brand kits, SQLite FTS5)"]:::wip
     P3["Phase 3 — Discovery + automation (glass-box ranking, watch-folder, recipes)"]:::todo
     P4["Phase 4 — Publish + analyze"]:::todo
 
@@ -176,6 +176,36 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
   ("TWO MEN TALKING") diarized to **2 speakers**; cut→reframe produced a **`source=fused`** speaker
   track (11 segments, left/right alternating) and a **1080×1920** render. The signature fusion path is
   proven on real media (previously only ROI-only had run).
+
+## Phase 2 — Studios + editor (in progress)
+
+Mapped to spec §5 Phase 2 + §6.7. Each slice = engine (TDD) + studio (screenshot-verified
+vs the demo) + green suites, committed independently. **Done-when (spec §5):** fix an ROI box
+AND a caption style by hand and re-render · apply a brand kit across clips · cut a clip by
+editing its transcript · full-text search transcripts across the library.
+
+- [x] **Reframe / ROI + speaker-track editor (S7)** — the full editable reframe surface
+  (`/clips/[id]/reframe`), demo-matched (05) + zero-dummy. **Engine (additive):** the ROI
+  contract is now **fractional (0–1) at the API**, scaled to source pixels in `clip_runner`
+  — fixes a latent bug where the studio's hand-drawn ROIs (always fractional) were cropped
+  as pixels → ~0px. `reframe.speaker_track` gained `smoothing`; `reframe.render`/`_pan_vf`
+  gained `crop_margin` (0–0.5 zoom-in; crop_margin=0 byte-identical); `roi_motion.py`
+  (vendored) takes optional WIN/MARGIN trailing args (defaults = today's 15/1.15). `_do_reframe`
+  threads min_dwell/smoothing/crop_margin + an **edited `segments` override** (renders
+  verbatim, `source="manual"`, skips diar⊕ROI). `POST /clips/<id>/reframe` validates +
+  forwards them. New `GET /clips/<id>/artifacts/<clip|reframed|captioned>` streams the
+  intermediate mp4s for the editor previews (reused by S6/S8). **Studio:** real cut-clip
+  `<video>` + draggable ROI boxes + real scrub (no more fake `<Thumb>` / `setTimeout`
+  "detecting"); **editable speaker track** (click a segment to flip L↔R → re-render); real
+  **Min-dwell / Smoothing / Crop-margin** sliders (was the honest "Phase 2" card); live 9:16
+  preview plays the **actual reframed render**. api-client `ReframeParams` extended +
+  `clipArtifactUrl`. **Verified:** 620 engine tests (+11), studio typecheck/lint/12-unit/build
+  green, **e2e green** (18.7s); real media — a 320×240 clip reframed with fractional ROIs +
+  crop_margin=0.2 + smoothing=21 → valid **1080×1920**; S7 screenshot matches the demo.
+  Commits: `d762889` (engine knobs) + UI/artifact commit.
+- [ ] **Caption Studio (S8)** · **Brand Kits (S9)** · **transcript-based editing** · **Editor
+  timeline (S6)** · **Settings writes** · **SQLite FTS5 + library search** · **perf
+  (virtualize long lists / lazy-load editor)** — next slices.
 
 ## What's verified now
 
