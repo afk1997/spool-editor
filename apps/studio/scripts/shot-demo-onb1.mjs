@@ -1,0 +1,12 @@
+import { chromium } from "playwright";
+import { fileURLToPath } from "url"; import { dirname, resolve } from "path";
+const here = dirname(fileURLToPath(import.meta.url));
+const demo = resolve(here, "../../../docs/Spool (standalone) (1).html");
+const browser = await chromium.launch({ channel: "chrome" });
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+await page.goto("file://" + demo, { waitUntil: "load" });
+await page.waitForTimeout(800);
+await page.getByText("set up", { exact: false }).click({ force: true });
+await page.waitForTimeout(1000);
+await page.screenshot({ path: "/tmp/demo_onb1.png" });
+await browser.close(); console.log("demo onb1 done");

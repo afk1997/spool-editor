@@ -1,0 +1,12 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch({ channel: "chrome" });
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+const errs = []; page.on("pageerror", e => errs.push("pageerror: " + e.message));
+await page.goto("http://localhost:3000/onboarding", { waitUntil: "domcontentloaded" });
+await page.waitForTimeout(2500);
+await page.screenshot({ path: "/tmp/studio_onb0.png" });
+await page.getByText("set up", { exact: false }).click({ force: true });
+await page.waitForTimeout(1500);
+await page.screenshot({ path: "/tmp/studio_onb1.png" });
+console.log(errs.length ? "ERRORS:\n"+errs.join("\n") : "no client errors");
+await browser.close();
