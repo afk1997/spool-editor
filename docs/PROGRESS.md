@@ -15,6 +15,16 @@
 > captioned clip through the real UI, ~49s). **Diarization-on reframe verified** on a real 2-speaker
 > clip (`source=fused`, 2 speakers, 1080×1920 render). typecheck 9/9 · lint clean · build 16 routes.
 >
+> **Phase-1 §6 standards debt — ✅ closed:** §6.6 a11y (`--text-faint` darkened to clear WCAG AA;
+> onboarding copy trimmed to one line); §6.5 per-route error boundaries (`error.tsx` +
+> `global-error.tsx`); §6.3 continuous drag (ROI boxes + timeline trim) now ref-driven, no
+> setState-per-pointermove; §6.3 design-system promoted to **`@spool/ui`**; §6.5 **vitest + RTL**
+> unit/component tests (12 green: fmt/parse helpers, `mapCandidates`/`buildTranscript`, `CandidateCard`).
+> Deliberate spec-over-1:1 calls per Kaivan: dropped Tailwind/shadcn for verbatim `spool.css`; applied
+> the §6.6 a11y deviations. **Deferred to Phase 2 (per §6.7):** list virtualization + lazy-loading the
+> heavy editor. **Decided, not debt:** offline moment-finding (Codex bridge needs network — the locked
+> default; a local LLM provider can be wired later).
+>
 > **Glass-box / honesty notes (Phase-1 boundaries, documented deviations from the demo's mock):**
 > candidate cards show real named `signals` + a real transcript excerpt (no fabricated 0-100 score —
 > the `rank` opportunity-score + the Discovery reweight panel are Phase 3); Settings shows the real
