@@ -67,8 +67,13 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
   (per-ROI ffmpeg motion → vendored `roi_motion` → **diar⊕ROI fusion**, still/off-mic
   speakers resolved by audio turns) + `render` (pan via vendored `pan_expr`, split, center;
   9:16/16:9/1:1/4:5). 15 tests.
-- [ ] ◻️ **`moments`** — LLM moment-finding over `words.json` (local Ollama default,
-  hosted opt-in per spec §10).
+- [ ] ◻️ **`moments`** — LLM moment-finding over `words.json`, reusing clipify's
+  `SKILL.md` Step-1 heuristics (punchlines / reversals / awkward pauses / quotable
+  one-liners / audio peaks → `[start, end, title, why]`). **LLM via a pluggable provider;
+  DEFAULT = "codex bridge"** — the user's ChatGPT/Codex subscription through the Codex CLI
+  (no API key, no local GPU). Agent mode uses the driving agent's own LLM; a Claude/local
+  provider can slot in later. Only transcript text leaves the machine; offline-mode disables
+  it. **(Supersedes spec §10 #2's local-Ollama default.)**
 - [x] **`exporter`** — platform presets (tiktok/reels/shorts/linkedin/x/youtube) →
   codec/bitrate/fps + -14 LUFS loudnorm, hardware encoder (VideoToolbox/NVENC/x264),
   fast-vs-quality. Brand kits deferred to P2. 9 tests.
@@ -106,6 +111,11 @@ Spec: `docs/Spool_Engineering-Spec.md` (§5 phases, §6 front-end). Visual sourc
 ## Locked decisions
 
 - License **Apache-2.0**; diarization kept in **core install** (heavier base, no missing-dep step).
+- **Moment-finding LLM = pluggable provider, default "codex bridge"** — the user's
+  ChatGPT/Codex subscription via the Codex CLI (no API key, no local GPU). Ditches the
+  spec's local-Ollama default (§10 #2). Local-first preserved: only transcript text is
+  sent (media never leaves the machine), agent mode uses the agent's own LLM, and
+  offline-mode disables the bridge. Pluggable so a Claude/local provider can be added.
 - Engine = flat fold-in of trove (reuse, don't rebuild); htmx stripped in Phase 0, not at bootstrap.
 - **Dev/test loop = local uv venv (Python 3.12)**, not Docker. Docker is reserved for packaging (B6) and was reset after a full-disk corruption.
 - Internal TS packages export raw source; Next `transpilePackages` compiles them.
