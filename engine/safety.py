@@ -293,7 +293,7 @@ def _apply_cors(resp, origin):
     resp.headers["Access-Control-Allow-Origin"] = origin
     resp.headers["Vary"] = "Origin"
     resp.headers["Access-Control-Allow-Credentials"] = "true"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS"
     resp.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, Idempotency-Key"
     resp.headers["Access-Control-Expose-Headers"] = (
         "X-Idempotent-Replay, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Window, Retry-After"

@@ -121,6 +121,17 @@ def test_cors_preflight_options():
     assert "POST" in r.headers.get("Access-Control-Allow-Methods", "")
 
 
+def test_cors_preflight_allows_patch_and_delete():
+    """PATCH (/settings, /brand-kits) + DELETE (/brand-kits) must ride through CORS — a browser
+    preflight blocks any method absent from Access-Control-Allow-Methods (the studio is a
+    first-class client of the API)."""
+    c = _cors_app().test_client()
+    r = c.open("/api/v1/ping", method="OPTIONS", headers={"Origin": "http://localhost:3000"})
+    methods = r.headers.get("Access-Control-Allow-Methods", "")
+    assert "PATCH" in methods
+    assert "DELETE" in methods
+
+
 import time
 from safety import RateLimiter
 
