@@ -91,7 +91,9 @@ export class SpoolApiClient {
   constructor(opts: SpoolApiOptions = {}) {
     this.baseUrl = (opts.baseUrl ?? "http://127.0.0.1:8899").replace(/\/+$/, "");
     this.token = opts.token;
-    this.fetchImpl = opts.fetch ?? globalThis.fetch;
+    // Bind to globalThis: native `fetch` throws "Illegal invocation" in browsers when
+    // called as a method of another object (i.e. `this.fetchImpl(...)`). Node tolerates it.
+    this.fetchImpl = opts.fetch ?? globalThis.fetch.bind(globalThis);
   }
 
   private headers(extra?: HeadersInit): Headers {
