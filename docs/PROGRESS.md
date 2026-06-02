@@ -5,9 +5,10 @@
 > ✅ done & verified · 🟡 in progress · ◻️ not started.
 >
 > **Last updated:** 2026-06-02 · **Phase 0 — ✅ COMPLETE.** Phase 1 **backend done & green**
-> (engine chain → `api_v1` clip surface → MCP tools + elicitation + `spool://`, CLI parity).
-> **Studio UI in progress:** design tokens + typed client/SSE + app shell + S0/S1/S2/S3/S10
-> wired & verified. Next: the editor screens (S4/S5/S7/S8/S11) + Agent panel + ⌘K + e2e.
+> (engine chain → `api_v1` clip surface → MCP tools + elicitation + `spool://`, CLI parity)
+> **and all Studio screens done & verified** (S0–S5, S7, S8, S10, S11 + ⌘K + Agent panel,
+> typecheck/build/lint green, zero mock). Remaining P1: in-studio agent chat + elicitation
+> cards (server-side agent loop on the codex bridge — deferred), and the Playwright e2e.
 
 ## Roadmap at a glance
 
@@ -25,7 +26,7 @@ graph TD
     subgraph P1["Phase 1 — Core clip loop + own UI (MVP)"]
       C1["Engine: moments · cutter · reframe(diar plus ROI) · captioner · exporter"]:::done
       C2["MCP: clip tools + elicitation + spool:// resources"]:::done
-      C3["UI: S0-S5, S7 basic, S8 presets, S10, S11 + Agent panel + Cmd-K"]:::wip
+      C3["UI: S0-S5, S7 basic, S8 presets, S10, S11 + Agent panel + Cmd-K"]:::done
       C4["Port demo design tokens into the Tailwind theme; component library"]:::done
       C5["e2e: URL to 9:16 clip (Playwright)"]:::todo
     end
@@ -97,17 +98,18 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
   (graceful fallback). Resources `spool://clips` + `spool://clips/{job_id}`. CLI⇄MCP parity
   kept (`cli.py` clip subcommands + `MCP_TO_CLI`). 2 MCP tests (incl. a real elicitation
   round-trip) + parity test.
-- [~] 🟡 **Studio screens** — **foundation + core loop done & verified:** demo design
-  tokens → one Tailwind v4 `@theme` layer (+ data-accent/density, 4 display fonts, AA
-  fix); `@spool/types` reconciled to the real api_v1 wire shapes; `@spool/api-client`
-  fleshed out to the full surface + `subscribeEvents` SSE; a live-data layer (one SSE
-  subscription → context, `useEngine`/`useLive`/`useEngineQuery`); the app shell (rail +
-  top bar + live status/queue bar); UI primitives; and **S0** Dependency-Doctor + **S1**
-  Home + **S2** Import + **S3** Library + **S10** Render Queue — all wired to `api_v1`,
-  zero mock. `pnpm typecheck` 9/9, studio build (5 routes) + lint green.
-  **Remaining:** S4 Transcript, S5 Clip Discovery (candidate cards + glass-box score),
-  S7 Reframe (basic), S8 Caption Studio (presets), S11 Clips Library; the **Agent panel**
-  (`@spool/mcp-client`) + **⌘K**; promote primitives to `@spool/ui`; Playwright e2e (URL→9:16).
+- [x] **Studio screens — all Phase-1 screens done & verified, wired to `api_v1`, zero mock:**
+  foundation (demo tokens → Tailwind v4 `@theme` + data-accent/density + 4 fonts + AA fix;
+  `@spool/types` ↔ wire shapes; full `@spool/api-client` + `subscribeEvents` SSE; live-data
+  context; app shell; UI primitives) **+** **S0** Dependency-Doctor · **S1** Home · **S2**
+  Import · **S3** Library · **S4** Project/Transcript (read-only) · **S5** Clip Discovery
+  (candidate cards; glass-box = named signals, not an opaque score) · **S7** Reframe (basic
+  preset flow) · **S8** Caption Studio (presets) · **S10** Render Queue · **S11** Clips Library ·
+  **⌘K** palette · **Agent panel** (P1 form: shared-queue activity + copy-paste MCP connect).
+  `pnpm typecheck` 9/9, studio build (8 routes) + lint green.
+  **Remaining (Phase-1 polish, not screens):** in-studio agent **chat + inline elicitation
+  cards** (needs a server-side agent-loop endpoint on the codex bridge — deferred with codex);
+  promote primitives to `@spool/ui`; **Playwright e2e** (URL→9:16, needs a running engine).
 
 ## What's verified now
 
@@ -115,7 +117,7 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
 - `pnpm typecheck` → 9/9 tasks pass. `pnpm build` → Next.js 16 compiles, static pages generate.
 - `engine/` `.py` files diff byte-identical against the validated trove clone.
 - **engine: 595 tests pass** (exit 0) on Python 3.12 via uv venv — headless trove suite + `clip.cutter` (7) + `clip.captioner` (6) + `clip.reframe` (15) + `clip.exporter` (9) + `clip.llm` (16) + `clip.moments` (15) + `clip_jobs` (13) + `clip_runner` (10) + `api_v1` clips (23) + `trove_client` clips (13) + MCP clip tools/elicitation (e2e). The whole agent + API + CLI clip surface is wired to one engine + one queue.
-- **studio:** `pnpm typecheck` 9/9, `pnpm --filter @spool/studio build` compiles 5 routes (/, /import, /library, /queue, /_not-found) and prerenders, ESLint clean. Tokens/types/client/shell + S0/S1/S2/S3/S10 wired to `api_v1` (no mock data).
+- **studio:** `pnpm typecheck` 9/9, `pnpm --filter @spool/studio build` compiles 8 routes (/, /import, /library, /clips, /clips/[id], /sources/[id], /queue, /_not-found), ESLint clean. All Phase-1 screens (S0–S5, S7, S8, S10, S11) + ⌘K + Agent panel wired to `api_v1` (no mock data). Runtime end-to-end (live engine + media) not yet exercised — that's the Playwright e2e.
 - **`docker compose up`** builds the multi-stage image and serves `/api/v1/health` from the host — the packaged engine works end to end.
 - **headless serving** (venv): `/api/v1/doctor` reports real tooling — ffmpeg 7.1.1, whisper.cpp 1.5.0, yt-dlp 2026.3.17, VideoToolbox encoders.
 
