@@ -43,25 +43,32 @@ def test_get_provider_unknown_name_raises():
 
 # --- codex bridge --------------------------------------------------------
 
+def _write_o(argv, text):
+    """Mimic codex writing its final message to the --output-last-message file."""
+    with open(argv[argv.index("-o") + 1], "w") as f:
+        f.write(text)
+
+
 def test_codex_builds_read_only_exec_argv(monkeypatch):
     captured = {}
 
     def fake_run(argv, **kw):
         captured["argv"] = argv
         captured["kw"] = kw
-        return _FakeProc(stdout="RESULT")
+        _write_o(argv, "RESULT")
+        return _FakeProc(returncode=0)
 
     monkeypatch.setattr(llm.shutil, "which", lambda b: "/usr/local/bin/codex")
     monkeypatch.setattr(llm.subprocess, "run", fake_run)
 
     out = llm.CodexProvider().complete("find clips", system="you are a producer")
 
-    assert out == "RESULT"
+    assert out == "RESULT"  # read from the -o file, not the noisy stdout log
     argv = captured["argv"]
     assert argv[0] == "codex" and argv[1] == "exec"
     # read-only sandbox so the agent can never touch the filesystem
     assert "--sandbox" in argv and argv[argv.index("--sandbox") + 1] == "read-only"
-    assert "--skip-git-repo-check" in argv
+    assert "--skip-git-repo-check" in argv and "--ephemeral" in argv and "-o" in argv
     # prompt goes over stdin (transcripts can be large); system is prepended
     assert "find clips" in captured["kw"]["input"]
     assert "you are a producer" in captured["kw"]["input"]
@@ -70,7 +77,13 @@ def test_codex_builds_read_only_exec_argv(monkeypatch):
 def test_codex_includes_model_flag_when_configured(monkeypatch):
     captured = {}
     monkeypatch.setattr(llm.shutil, "which", lambda b: "/usr/local/bin/codex")
-    monkeypatch.setattr(llm.subprocess, "run", lambda argv, **kw: captured.update(argv=argv) or _FakeProc(stdout="x"))
+
+    def fake_run(argv, **kw):
+        captured["argv"] = argv
+        _write_o(argv, "x")
+        return _FakeProc(returncode=0)
+
+    monkeypatch.setattr(llm.subprocess, "run", fake_run)
     llm.CodexProvider(model="gpt-5-codex").complete("hi")
     argv = captured["argv"]
     assert "-m" in argv and argv[argv.index("-m") + 1] == "gpt-5-codex"

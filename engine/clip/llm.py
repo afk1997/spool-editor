@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 from typing import Callable, Protocol, runtime_checkable
 
 # Configurable knobs (env). New Spool functionality → ``SPOOL_*`` namespace.
@@ -79,26 +80,56 @@ class CodexProvider:
         if shutil.which(self.bin) is None:
             raise ProviderUnavailableError(
                 f"the Codex CLI ({self.bin!r}) was not found on PATH. Install it "
-                "(`npm i -g @openai/codex`) and sign in with your ChatGPT/Codex "
-                "account, set SPOOL_CODEX_BIN to its path, or choose another LLM "
-                "provider via SPOOL_LLM_PROVIDER."
+                "(`npm i -g @openai/codex` / `brew install codex`) and sign in with your "
+                "ChatGPT/Codex account (`codex login`), set SPOOL_CODEX_BIN to its path, "
+                "or choose another LLM provider via SPOOL_LLM_PROVIDER."
             )
         full = prompt if not system else f"{system}\n\n{prompt}"
-        argv = [self.bin, "exec", "--sandbox", "read-only", "--skip-git-repo-check"]
+        # Run in an empty scratch dir so the agent has nothing to read; --ephemeral keeps
+        # no session files; read-only sandbox blocks any FS write; -o captures *just* the
+        # final message (vs the noisy event log on stdout). Prompt goes over stdin (`-`).
+        scratch = self.cwd or tempfile.mkdtemp(prefix="spool-codex-")
+        out_fd, out_path = tempfile.mkstemp(prefix="spool-codex-out-", suffix=".txt")
+        os.close(out_fd)
+        argv = [
+            self.bin, "exec", "--sandbox", "read-only", "--skip-git-repo-check",
+            "--ephemeral", "--color", "never", "-C", scratch, "-o", out_path,
+        ]
         if self.model:
             argv += ["-m", self.model]
+        argv += ["-"]
         try:
             proc = subprocess.run(
                 argv, input=full, capture_output=True, text=True,
-                timeout=self.timeout, cwd=self.cwd,
+                timeout=self.timeout, cwd=scratch,
             )
         except FileNotFoundError as e:  # race: vanished between which() and run()
             raise ProviderUnavailableError(f"the Codex CLI ({self.bin!r}) could not be run: {e}") from e
+        finally:
+            try:
+                if not self.cwd:
+                    shutil.rmtree(scratch, ignore_errors=True)
+            except OSError:
+                pass
         if proc.returncode != 0:
+            self._cleanup(out_path)
             raise RuntimeError(
                 f"codex exec failed (rc={proc.returncode}): {(proc.stderr or '').strip()[-500:]}"
             )
-        return proc.stdout
+        try:
+            with open(out_path) as f:
+                answer = f.read()
+        except OSError:
+            answer = ""
+        self._cleanup(out_path)
+        return answer or proc.stdout
+
+    @staticmethod
+    def _cleanup(path: str) -> None:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 class CallableProvider:
