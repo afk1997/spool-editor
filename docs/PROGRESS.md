@@ -4,13 +4,16 @@
 > `Spool_Engineering-Spec.md` (§5 roadmap, §6 front-end standards). Status legend:
 > ✅ done & verified · 🟡 in progress · ◻️ not started.
 >
-> **Last updated:** 2026-06-02 · **Phase 0 — ✅ COMPLETE. Phase 1 — ✅ functionally complete &
-> proven on real media.** Engine chain → `api_v1` clip surface → MCP/CLI → all Studio screens
-> (S0–S5, S7, S8, S10, S11 + ⌘K + Agent chat). The **codex bridge is verified live** and the
-> **NL agent loop** (`/agent`) drives the real clip tools end-to-end. **Real run:** a YouTube
-> URL → download → transcribe → codex find_moments → cut → reframe → caption → export → a
-> verified 1080×1920 mp4, both via the API and the agent. Remaining: Playwright e2e harness,
-> `@spool/ui` extraction, diarization-on reframe pass. **608 engine tests green.**
+> **Last updated:** 2026-06-02 · **Phase 0 — ✅ COMPLETE. Phase 1 backend — ✅ done & proven on
+> real media** (engine chain → `api_v1` clip surface → MCP/CLI → codex bridge + NL agent loop,
+> verified live: URL → 1080×1920 mp4). **608 engine tests green.**
+> **Phase 1 UI — 🟡 RE-SKIN IN PROGRESS.** The first UI was an *invented* design and was rejected;
+> the studio is being rebuilt as a **pixel-1:1 port of `docs/Spool (standalone) (1).html`** (the
+> file is the source of truth, wired to live `api_v1`). Demo CSS/components/fonts extracted +
+> ported; **shell, Home, Import, Library** done & screenshot-verified. **Critical fix:** the API
+> client never reached the engine from a browser all session (native `fetch` "Illegal invocation");
+> fixed. **To port:** Onboarding, Project/Transcript, Discovery, Reframe, Caption, Queue, Clips,
+> Agent panel, ⌘K. Then Playwright e2e + diarization-on reframe pass.
 
 ## Roadmap at a glance
 
