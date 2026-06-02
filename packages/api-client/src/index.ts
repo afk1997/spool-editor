@@ -113,6 +113,38 @@ export interface CaptionOverrides {
   allcaps?: boolean;
   font?: string;
 }
+/** Writable engine config (demo 07 Settings) — GET/PATCH /settings. fast/preset apply hot;
+ *  concurrency + MCP transport apply on the next engine restart. */
+export interface EngineSettings {
+  fast_default: boolean;
+  default_preset: string;
+  clip_workers: number;
+  max_workers: number;
+  mcp_transport: string;
+}
+/** One whisper model row from GET /models (the Settings → Models management list). */
+export interface ModelInfo {
+  name: string;
+  label: string;
+  size_bytes: number;
+  stars: number;
+  multilingual: boolean;
+  is_active: boolean;
+  is_installed: boolean;
+}
+export interface ModelInstallProgress {
+  downloading: boolean;
+  name?: string;
+  received: number;
+  total: number;
+  error: string | null;
+  done: boolean;
+}
+export interface ModelsList {
+  active: string | null;
+  models: ModelInfo[];
+  install_progress: ModelInstallProgress;
+}
 export interface PipelineParams {
   start: number;
   end: number;
@@ -308,6 +340,25 @@ export class SpoolApiClient {
   }
   deleteBrandKit(id: string): Promise<void> {
     return this.request(`/brand-kits/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  // ── settings + models (demo 07) ──
+  getSettings(): Promise<EngineSettings> {
+    return this.get("/settings");
+  }
+  updateSettings(patch: Partial<EngineSettings>): Promise<EngineSettings> {
+    return this.bodyMethod("PATCH", "/settings", patch);
+  }
+  listModels(): Promise<ModelsList> {
+    return this.get("/models");
+  }
+  /** Mark an installed model active — the next transcribe uses it (hot). */
+  useModel(name: string): Promise<{ active: string }> {
+    return this.post(`/models/${encodeURIComponent(name)}/use`);
+  }
+  /** Begin downloading + installing a known model; poll listModels() for install_progress. */
+  installModel(name: string): Promise<{ name: string; downloading: boolean }> {
+    return this.post(`/models/${encodeURIComponent(name)}/install`);
   }
 
   /** Direct URL for a produced render's .mp4 — for `<video src>` / download links.
