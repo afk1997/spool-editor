@@ -3,12 +3,13 @@
 import { useState } from "react";
 import { useSpool } from "@/components/spool/context";
 import { useEngineQuery } from "@/lib/engine-context";
-import { Btn, Chip, Icon, Progress, Seg, SpoolMark } from "@spool/ui";
+import { Btn, Chip, Icon, SpoolMark } from "@spool/ui";
 
 /* S0 Onboarding / Dependency Doctor — 1:1 port of the demo (07). Full-screen, no shell.
- * The Dependency Doctor step reads the LIVE /doctor report (real tools, versions, disk,
- * encoder); "Fix" re-probes + points at the install command (the engine can't self-install).
- * Model/test-render steps keep the demo's wizard UI (no live model-download endpoint yet). */
+ * Every step reflects the LIVE /doctor report (real tools, versions, disk, encoder); "Fix"
+ * re-probes + points at the install command (the engine can't self-install). The Models +
+ * "all set" steps show the real detected state — model download/switching is the Phase-2
+ * settings surface, so the demo's fake download/test-render animations are gone (no dummy). */
 
 const TOOL_META: Record<string, { name: string; note: string; hint: string }> = {
   ffmpeg: { name: "ffmpeg", note: "encode / decode · VideoToolbox + libx264", hint: "brew install ffmpeg" },
@@ -22,10 +23,6 @@ export default function OnboardingScreen() {
   const ctx = useSpool();
   const doctor = useEngineQuery((c) => c.doctor());
   const [step, setStep] = useState(0);
-  const [model, setModel] = useState("base.en");
-  const [llm, setLlm] = useState("local");
-  const [dl, setDl] = useState(0);
-  const [testing, setTesting] = useState<"idle" | "run" | "ok">("idle");
 
   const tools = doctor.data?.tools ?? {};
   const deps = Object.entries(tools).map(([id, t]) => ({
@@ -39,8 +36,6 @@ export default function OnboardingScreen() {
   const freeDisk = machine.free_disk_gb != null ? `${machine.free_disk_gb} GB free on disk` : "checking disk…";
 
   const fix = (id: string, hint: string) => { ctx.pushToast({ icon: "terminal", tone: "info", title: `Install ${id}`, body: hint ? `Run: ${hint}` : "See the docs, then re-check." }); doctor.reload(); };
-  const downloadModel = () => { let p = 0; const iv = setInterval(() => { p += 12; setDl(Math.min(100, p)); if (p >= 100) clearInterval(iv); }, 200); };
-  const testRender = () => { setTesting("run"); setTimeout(() => setTesting("ok"), 2200); };
 
   const steps = ["Welcome", "Dependencies", "Models", "Test render"];
   const StatusDot = ({ s }: { s: string }) => <span style={{ width: 10, height: 10, borderRadius: "50%", background: s === "ok" ? "var(--ok)" : s === "warn" ? "var(--warn)" : "var(--err)", boxShadow: `0 0 8px ${s === "ok" ? "var(--ok)" : s === "warn" ? "var(--warn)" : "var(--err)"}` }} />;
@@ -93,34 +88,23 @@ export default function OnboardingScreen() {
           {step === 2 && (
             <div>
               <h1 style={{ fontSize: 26, marginBottom: 6 }}>Models & storage</h1>
-              <p style={{ color: "var(--text-faint)", marginTop: 0, marginBottom: 22 }}>Pick a transcription model and where Spool keeps your library.</p>
-              <span className="field-label">Whisper model</span>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 8 }}>
-                {([["tiny.en", "fastest · ~75MB"], ["base.en", "balanced · ~145MB"], ["small.en", "most accurate · ~480MB"]] as const).map(([m, note]) => (
-                  <button key={m} onClick={() => setModel(m)} className="card" style={{ padding: "13px 12px", textAlign: "left", cursor: "pointer", borderColor: model === m ? "var(--accent)" : "var(--line)", background: model === m ? "var(--accent-soft)" : "var(--bg-2)" }}>
-                    <div className="mono" style={{ fontWeight: 600, marginBottom: 4 }}>{m}</div><div style={{ fontSize: 11, color: "var(--text-faint)" }}>{note}</div>
-                  </button>
-                ))}
+              <p style={{ color: "var(--text-faint)", marginTop: 0, marginBottom: 22 }}>What Spool found on your machine. Model download/switching gets a full settings UI in Phase 2.</p>
+              <div className="panel" style={{ overflow: "hidden", marginBottom: 20 }}>
+                <div className="row" style={{ padding: "13px 16px", gap: 12, borderBottom: "1px solid var(--line-2)" }}><Icon name="type" size={16} style={{ color: "var(--accent)" }} /><div className="grow"><b>Transcription</b><div style={{ fontSize: 12, color: "var(--text-faint)" }}>whisper.cpp {trimVer(tools.whisper_cpp?.version ?? null)} · on-device</div></div><Chip tone={tools.whisper_cpp?.present ? "ok" : "warn"}>{tools.whisper_cpp?.present ? "ready" : "missing"}</Chip></div>
+                <div className="row" style={{ padding: "13px 16px", gap: 12 }}><Icon name="sparkles" size={16} style={{ color: "var(--accent)" }} /><div className="grow"><b>Moment-finding</b><div style={{ fontSize: 12, color: "var(--text-faint)" }}>Codex CLI bridge · only transcript text leaves the machine</div></div><Chip tone="ok">default</Chip></div>
               </div>
-              {dl < 100 ? <div className="row" style={{ gap: 12, marginBottom: 18 }}><Btn variant="ghost" size="sm" icon="download" onClick={downloadModel}>Download {model}</Btn>{dl > 0 && <div style={{ flex: 1 }}><Progress value={dl} striped /></div>}</div>
-                : <div className="row" style={{ gap: 8, marginBottom: 18, color: "var(--ok)", fontSize: 13 }}><Icon name="check" size={15} /> {model} ready</div>}
-              <span className="field-label">Moment-finding model</span>
-              <Seg value={llm} onChange={setLlm} neutral options={[{ value: "local", label: "Local (Ollama)" }, { value: "hosted", label: "Hosted + my key" }, { value: "later", label: "Decide later" }]} />
-              <div style={{ marginTop: 20 }}><span className="field-label">Storage location</span>
-                <div className="row" style={{ gap: 10 }}><input className="input mono" defaultValue="~/Spool" /><Btn variant="ghost" icon="folder">Browse</Btn></div>
-                <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 7 }}>{freeDisk} · encoder auto-detected: {encoder}</div>
-              </div>
+              <span className="field-label">Storage location</span>
+              <input className="input mono" defaultValue="~/Spool" readOnly />
+              <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 7 }}>{freeDisk} · encoder auto-detected: {encoder}</div>
               <div className="row" style={{ gap: 12, marginTop: 26 }}><Btn variant="primary" size="lg" iconR="arrowR" onClick={() => setStep(3)}>Continue</Btn></div>
             </div>
           )}
           {step === 3 && (
             <div style={{ textAlign: "center" }}>
-              <div className="ill" style={{ width: 90, height: 90, margin: "0 auto 22px", borderRadius: 24, color: testing === "ok" ? "var(--ok)" : "var(--accent)" }}><Icon name={testing === "ok" ? "check" : "zap"} size={38} /></div>
-              <h1 style={{ fontSize: 26, marginBottom: 8 }}>{testing === "ok" ? "You're all set" : "One quick test render"}</h1>
-              <p style={{ color: "var(--text-dim)", fontSize: 14.5, marginBottom: 26, maxWidth: 400, margin: "0 auto 26px" }}>{testing === "ok" ? "The full pipeline works on your machine. Time to make your first clip." : "Spool will cut a 3-second test clip to prove ffmpeg, the encoder and captions all work together."}</p>
-              {testing === "run" && <div style={{ maxWidth: 320, margin: "0 auto 22px" }}><Progress value={66} striped /><div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 8 }}>ffmpeg · encoding test clip…</div></div>}
-              {testing === "idle" && <Btn variant="primary" size="lg" icon="play" onClick={testRender}>Run test render</Btn>}
-              {testing === "ok" && <Btn variant="primary" size="lg" icon="import" onClick={() => ctx.nav("import")}>Make my first clip →</Btn>}
+              <div className="ill" style={{ width: 90, height: 90, margin: "0 auto 22px", borderRadius: 24, color: doctor.data?.ok ? "var(--ok)" : "var(--warn)" }}><Icon name={doctor.data?.ok ? "check" : "alert"} size={38} /></div>
+              <h1 style={{ fontSize: 26, marginBottom: 8 }}>{doctor.data?.ok ? "You're all set" : "Almost there"}</h1>
+              <p style={{ color: "var(--text-dim)", fontSize: 14.5, marginBottom: 26, maxWidth: 420, margin: "0 auto 26px" }}>{doctor.data?.ok ? `Your machine has the full pipeline — ffmpeg, whisper.cpp, yt-dlp and the ${encoder} encoder. Time to make your first clip.` : "Fix the missing tools back in the Dependencies step, then come back."}</p>
+              <Btn variant="primary" size="lg" icon="import" onClick={() => ctx.nav("import")}>Make my first clip →</Btn>
             </div>
           )}
         </div>

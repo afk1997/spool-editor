@@ -38,17 +38,10 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   const id = clip.id;
   const [insp, setInsp] = useState("Format");
   const [playing, setPlaying] = useState(false);
-  const [pos, setPos] = useState(34);
   const [aspect, setAspect] = useState(clip.aspect || "9:16");
   const [reframe, setReframe] = useState("pan");
   const [preset, setPreset] = useState(clip.platform || "tiktok");
   const [safe, setSafe] = useState(true);
-  const [ab, setAb] = useState("A");
-  const [trimIn, setTrimIn] = useState(8), [trimOut, setTrimOut] = useState(86);
-  const [cut, setCut] = useState<Record<number, boolean>>({});
-  const trimRef = useRef<HTMLDivElement>(null);
-  const maskInRef = useRef<HTMLDivElement>(null), maskOutRef = useRef<HTMLDivElement>(null);
-  const edgeInRef = useRef<HTMLDivElement>(null), edgeOutRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const render = () => ctx.makeClipsFrom([{ id }], { aspect, mode: reframe, preset });
@@ -57,27 +50,6 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   const latestRender = renders.at(-1);
   const renderSrc = latestRender ? ctx.client.renderFileUrl(id, latestRender.result.render_id!) : null;
   const togglePlay = () => { const v = videoRef.current; if (v) { if (v.paused) void v.play(); else v.pause(); setPlaying(!v.paused); } else setPlaying((p) => !p); };
-  // §6.3: update the trim mask/edge elements imperatively during the drag; commit to state on release.
-  const dragTrim = (e: React.PointerEvent, which: "in" | "out") => {
-    e.preventDefault();
-    const rect = trimRef.current!.getBoundingClientRect();
-    const sIn = trimIn, sOut = trimOut;
-    let latest = which === "in" ? sIn : sOut;
-    const move = (ev: PointerEvent) => {
-      let p = ((ev.clientX - rect.left) / rect.width) * 100; p = Math.max(0, Math.min(100, p));
-      if (which === "in") { p = Math.min(sOut - 5, Math.max(0, p)); latest = p; if (maskInRef.current) maskInRef.current.style.width = p + "%"; if (edgeInRef.current) edgeInRef.current.style.left = `calc(${p}% - 5px)`; }
-      else { p = Math.max(sIn + 5, Math.min(100, p)); latest = p; if (maskOutRef.current) maskOutRef.current.style.width = 100 - p + "%"; if (edgeOutRef.current) edgeOutRef.current.style.left = `calc(${p}% - 5px)`; }
-    };
-    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); if (which === "in") setTrimIn(latest); else setTrimOut(latest); };
-    window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
-  };
-  const trimSecs = Math.round(clip.dur * (trimOut - trimIn) / 100);
-  const lane = (label: string, color: string, children: React.ReactNode) => (
-    <div className="row" style={{ gap: 0, alignItems: "stretch", borderBottom: "1px solid var(--line-2)" }}>
-      <div style={{ width: 92, flex: "none", padding: "8px 12px", fontSize: 11, color: "var(--text-faint)", borderRight: "1px solid var(--line)", display: "flex", alignItems: "center", gap: 7 }}><span style={{ width: 7, height: 7, borderRadius: 2, background: color }} />{label}</div>
-      <div style={{ flex: 1, position: "relative", minHeight: 38, display: "flex", alignItems: "center", padding: "0 6px" }}>{children}</div>
-    </div>
-  );
   const others = ctx.clips.filter((c) => c.src === clip.src && c.id !== clip.id).slice(0, 4);
 
   return (
@@ -105,8 +77,8 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
                 <>
                   <Thumb seed={clip.id} vertical={aspect === "9:16"} kind="" label={false} />
                   {safe && <div style={{ position: "absolute", inset: "8% 6%", border: "1px dashed rgba(255,255,255,0.3)", borderRadius: 6 }} />}
-                  <div style={{ position: "absolute", left: 0, right: 0, bottom: ab === "B" ? "23%" : "16%", textAlign: "center", fontFamily: "var(--font-caption)", fontSize: 18, color: "#fff", textShadow: "0 2px 6px #000", padding: "0 8%", lineHeight: 1.15 }}>
-                    {capWords.filter((_, i) => !cut[i]).map((w, i) => <span key={i} style={{ color: i === 1 ? (ab === "B" ? "#37E2A0" : "var(--caption-hl)") : "#fff" }}>{w} </span>)}
+                  <div style={{ position: "absolute", left: 0, right: 0, bottom: "16%", textAlign: "center", fontFamily: "var(--font-caption)", fontSize: 18, color: "#fff", textShadow: "0 2px 6px #000", padding: "0 8%", lineHeight: 1.15 }}>
+                    {capWords.map((w, i) => <span key={i} style={{ color: i === 1 ? "var(--caption-hl)" : "#fff" }}>{w} </span>)}
                   </div>
                 </>
               )}
@@ -115,33 +87,13 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
           </div>
           <div className="row" style={{ gap: 14, padding: "10px 18px", borderTop: "1px solid var(--line)", flex: "none" }}>
             <button className="iconbtn" onClick={togglePlay} style={{ background: "var(--accent)", color: "var(--accent-ink)" }}><Icon name={playing ? "pause" : "play"} size={16} /></button>
-            <span className="mono" style={{ fontSize: 12 }}>00:{String(Math.floor(pos * 0.52)).padStart(2, "0")} / 00:{Math.round(clip.dur)}</span>
+            <span className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)" }}>{renderSrc ? "playing the rendered clip" : "render to preview"}</span>
             <span className="spacer" />
-            <span className="mono" style={{ fontSize: 11, color: "var(--text-faint)" }}>trim {trimSecs}s</span>
             <label className="row" style={{ gap: 7, fontSize: 12.5, cursor: "pointer" }}><Switch on={safe} onClick={() => setSafe(!safe)} /> Safe zones</label>
-            <div className="row" style={{ gap: 6, fontSize: 11.5, color: "var(--text-faint)" }}>A/B<Seg value={ab} onChange={setAb} neutral options={[{ value: "A", label: "A" }, { value: "B", label: "B" }]} /></div>
-            <button className="iconbtn"><Icon name="expand" size={16} /></button>
           </div>
-          <div style={{ flex: "none", borderTop: "1px solid var(--line)", background: "var(--bg-1)", maxHeight: "34vh", overflow: "auto" }}>
-            <div className="row" style={{ padding: "7px 12px", gap: 10, borderBottom: "1px solid var(--line)", position: "sticky", top: 0, background: "var(--bg-1)", zIndex: 2 }}>
-              <span className="eyebrow">Timeline</span><span className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)" }}>snap: word</span><span className="spacer" />
-              <button className="iconbtn" style={{ width: 26, height: 26 }}><Icon name="minus" size={14} /></button><button className="iconbtn" style={{ width: 26, height: 26 }}><Icon name="plus" size={14} /></button>
-            </div>
-            <div style={{ position: "relative" }}>
-              <div style={{ position: "absolute", left: `calc(92px + ${pos}%)`, top: 0, bottom: 0, width: 2, background: "var(--accent)", zIndex: 3, pointerEvents: "none" }}><div style={{ position: "absolute", top: -1, left: -4, width: 10, height: 10, borderRadius: "50%", background: "var(--accent)" }} /></div>
-              <div ref={trimRef} style={{ position: "absolute", left: 92, right: 0, top: 0, bottom: 0, zIndex: 2 }}>
-                <div ref={maskInRef} className="trim-mask" style={{ left: 0, width: trimIn + "%" }} />
-                <div ref={maskOutRef} className="trim-mask" style={{ right: 0, width: (100 - trimOut) + "%" }} />
-                <div ref={edgeInRef} className="trim-edge" style={{ left: `calc(${trimIn}% - 5px)` }} onPointerDown={(e) => dragTrim(e, "in")} title="Trim in" />
-                <div ref={edgeOutRef} className="trim-edge" style={{ left: `calc(${trimOut}% - 5px)` }} onPointerDown={(e) => dragTrim(e, "out")} title="Trim out" />
-              </div>
-              {lane("Video", "var(--text-dim)", <div className="row" style={{ gap: 3, flex: 1 }}>{Array.from({ length: 10 }).map((_, i) => <div key={i} style={{ flex: 1, height: 30, borderRadius: 3, overflow: "hidden" }}><Thumb seed={clip.id + i} kind="" label={false} /></div>)}</div>)}
-              {lane("Captions", "var(--caption-hl)", <div className="kbar">{capWords.map((w, i) => <span key={i} className={"chip" + (cut[i] ? " cut-word" : "")} style={{ height: 22, fontSize: 10.5, cursor: "pointer" }} onClick={() => setCut((c) => ({ ...c, [i]: !c[i] }))} title="Click to delete this word (ripple-cuts the video)">{w}</span>)}</div>)}
-              {lane("Speaker", "var(--roi-l)", <div className="row" style={{ gap: 2, flex: 1, height: 22 }}>{([["L", 30], ["R", 18], ["L", 34], ["R", 18]] as const).map(([sp, w], i) => <div key={i} style={{ flex: w, borderRadius: 3, background: sp === "L" ? "color-mix(in srgb,var(--roi-l) 30%,var(--bg-3))" : "color-mix(in srgb,var(--roi-r) 30%,var(--bg-3))", display: "grid", placeItems: "center", fontFamily: "var(--font-mono)", fontSize: 9 }}>{sp}</div>)}</div>)}
-              {lane("Energy", "var(--ok)", <svg width="100%" height="26" preserveAspectRatio="none" viewBox="0 0 300 26">{Array.from({ length: 60 }).map((_, i) => { const h = Math.round(4 + Math.abs(Math.sin(i * 0.7)) * 20); return <rect key={i} x={i * 5} y={Math.round((26 - h) / 2)} width="3" height={h} fill="var(--ok)" opacity="0.5" />; })}</svg>)}
-              {lane("Scenes", "var(--warn)", <div className="row" style={{ flex: 1, position: "relative", height: 22 }}>{[20, 68].map((p, i) => <div key={i} style={{ position: "absolute", left: p + "%", top: 0, bottom: 0, width: 2, background: "var(--warn)" }} />)}</div>)}
-            </div>
-            <input type="range" min="0" max="100" value={pos} onChange={(e) => setPos(+e.target.value)} style={{ width: "calc(100% - 100px)", margin: "8px 0 8px 96px", accentColor: "var(--accent)" }} />
+          <div style={{ flex: "none", borderTop: "1px solid var(--line)", background: "var(--bg-1)", padding: "14px 18px" }}>
+            <div className="row" style={{ marginBottom: 8 }}><span className="eyebrow">Timeline</span><span className="spacer" /><span className="chip warn">Phase 2</span></div>
+            <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.6 }}>Word-level scrub, trim-to-render, ripple-cut (delete a caption word → cut the video), A/B versions and the energy / scene / speaker lanes are the Phase-2 editor. Today: set the format &amp; preset on the right, then Render.</div>
           </div>
         </div>
 
@@ -174,9 +126,9 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
             )}
             {insp === "Brand" && (
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                <span className="field-label">Apply brand kit</span>
-                {["No kit", "Acme Media", "Lena Builds"].map((k, i) => <div key={k} className="card" style={{ padding: "11px 13px", cursor: "pointer", borderColor: i === 1 ? "var(--accent)" : "var(--line)" }}><div className="row" style={{ gap: 9 }}><Icon name="palette" size={15} style={{ color: "var(--accent)" }} />{k}{i === 1 && <span className="spacer" />}{i === 1 && <Icon name="check" size={15} style={{ color: "var(--accent)" }} />}</div></div>)}
-                <Btn variant="ghost" icon="palette" onClick={() => ctx.nav("brand")}>Manage brand kits →</Btn>
+                <div className="row"><span className="field-label" style={{ margin: 0 }}>Brand kits</span><span className="spacer" /><span className="chip warn">Phase 2</span></div>
+                <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.6 }}>Persisted brand kits (fonts, palette, watermark, lower-third) that re-style a render are a Phase-2 feature.</div>
+                <Btn variant="ghost" icon="palette" onClick={() => ctx.nav("brand")}>Preview the Brand Kit designer →</Btn>
               </div>
             )}
             {insp === "Export" && (
