@@ -4,7 +4,7 @@
 > `Spool_Engineering-Spec.md` (§5 roadmap, §6 front-end standards). Status legend:
 > ✅ done & verified · 🟡 in progress · ◻️ not started.
 >
-> **Last updated:** 2026-06-03 · **Phase 0 — ✅ · Phase 1 — ✅ · Phase 2 — 🟡 IN PROGRESS** (S7 reframe/ROI editor done & verified).
+> **Last updated:** 2026-06-03 · **Phase 0 — ✅ · Phase 1 — ✅ · Phase 2 — 🟡 IN PROGRESS** (S7 reframe + S8 caption studio done & verified; done-when #1 met).
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,
@@ -203,9 +203,24 @@ editing its transcript · full-text search transcripts across the library.
   green, **e2e green** (18.7s); real media — a 320×240 clip reframed with fractional ROIs +
   crop_margin=0.2 + smoothing=21 → valid **1080×1920**; S7 screenshot matches the demo.
   Commits: `d762889` (engine knobs) + UI/artifact commit.
-- [ ] **Caption Studio (S8)** · **Brand Kits (S9)** · **transcript-based editing** · **Editor
-  timeline (S6)** · **Settings writes** · **SQLite FTS5 + library search** · **perf
-  (virtualize long lists / lazy-load editor)** — next slices.
+- [x] **Caption Studio (S8)** — fine styling maps to the real ASS (`/clips/[id]/caption`),
+  demo-matched (05) + zero-dummy. **Engine (additive):** `captioner.generate` gains
+  `overrides` (size/outline/words/fill/highlight/position/all-caps/weight/font), converting
+  UI units → ASS (hex→`&H00BBGGRR&`, position%→MarginV, weight→Bold). `ass_captions.py`
+  (vendored) takes an optional JSON overrides arg that updates the preset; the header honors
+  fill/MarginV/Bold, the per-word reset uses the fill color, all-caps uppercases the text
+  (output unchanged when no overrides). `POST /clips/<id>/captions` validates overrides
+  (clamped numerics, hex colors). **Studio:** the honest "Phase 2" card is replaced by real
+  controls — **Match-from-image** (canvas color extraction → accent), Font / Size / Weight /
+  Outline / Fill / Active-word color / All-caps / Position / Words-per-line; the preview
+  overlays the live style on the clip's real reframed video + real transcript words.
+  api-client `caption` gains `CaptionOverrides`. **Verified:** 629 engine tests (+8), studio
+  typecheck/lint/12-unit/build + e2e green; real media — cut + caption with overrides → the
+  ASS shows size 124 / fill `&H004DE9FF&` / MarginV 422 (22%) / green per-word highlight /
+  all-caps, and a captioned mp4 is produced. **→ done-when #1 fully met** (fix an ROI box
+  AND a caption style by hand → re-render). Commits: `195096d` (engine) + UI commit.
+- [ ] **Brand Kits (S9)** · **transcript-based editing** · **Editor timeline (S6)** ·
+  **Settings writes** · **SQLite FTS5 + library search** · **perf (virtualize / lazy-load)** — next slices.
 
 ## What's verified now
 

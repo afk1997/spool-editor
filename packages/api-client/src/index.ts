@@ -77,6 +77,18 @@ export interface TrackSegment {
   end: number;
   speaker: "left" | "right";
 }
+/** S8 Caption Studio fine-styling — clamped/validated engine-side, mapped to the real ASS. */
+export interface CaptionOverrides {
+  size?: number;
+  outline?: number;
+  words?: number;
+  weight?: number;
+  fill?: string;
+  highlight?: string | null;
+  position?: number;
+  allcaps?: boolean;
+  font?: string;
+}
 export interface PipelineParams {
   start: number;
   end: number;
@@ -219,7 +231,7 @@ export class SpoolApiClient {
   reframe(clipId: string, p: ReframeParams = {}): Promise<ClipJobView> {
     return this.post(`/clips/${encodeURIComponent(clipId)}/reframe`, p);
   }
-  caption(clipId: string, p: { style?: string } = {}): Promise<ClipJobView> {
+  caption(clipId: string, p: { style?: string; overrides?: CaptionOverrides } = {}): Promise<ClipJobView> {
     return this.post(`/clips/${encodeURIComponent(clipId)}/captions`, p);
   }
   render(clipId: string, p: { preset?: string; fast?: boolean } = {}): Promise<ClipJobView> {
