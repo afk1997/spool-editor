@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
-import "./globals.css";
-import "./spool.css"; // the demo's verbatim design (tokens + components + bundled @font-face)
+import "./spool.css"; // the demo's verbatim design — the single source of truth (tokens + components + resets + bundled @font-face)
 import { Providers } from "./providers";
 
 export const metadata: Metadata = {
