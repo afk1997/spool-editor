@@ -21,6 +21,7 @@ export interface SpoolSource {
 export interface SpoolClip {
   id: string; title: string; src: string; dur: number; aspect: string; style: string;
   platform: string; status: string; prog?: number; tags?: string[]; renderId?: string; score?: number;
+  start?: number; end?: number; // the cut window in source time, for slicing the transcript
 }
 export interface SpoolJob {
   id: string; type: string; label: string; src: string; status: string; prog: number; stage: string; eta: string; elapsed: string; err?: boolean;
@@ -145,6 +146,7 @@ function mapClips(snap: EventsSnapshot | null): SpoolClip[] {
       platform: PLAT_OF[(render?.result.preset as string) || ""] || "tiktok",
       status, prog: active?.progress_pct ?? 0, renderId: render?.result.render_id,
       tags: mode ? [cap(mode)] : [],
+      start: win?.start, end: win?.end,
     });
   }
   return out.reverse();

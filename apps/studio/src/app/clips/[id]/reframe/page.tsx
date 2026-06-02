@@ -3,7 +3,7 @@
 import { useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { useSpool } from "@/components/spool/context";
-import { Btn, Icon, Seg, Switch, Thumb, fmtTC } from "@spool/ui";
+import { Btn, Icon, Seg, Thumb, fmtTC } from "@spool/ui";
 
 /* S7 Reframe / ROI editor — 1:1 port of the demo (05). Draggable ROI boxes; pan/split/center;
  * speaker-track lane; live 9:16 preview. "Apply & re-render" sends the ROIs to the real
@@ -50,11 +50,13 @@ export default function ReframeScreen() {
   const [active, setActive] = useState<"L" | "R">("L");
   const [frame, setFrame] = useState(28);
   const [detecting, setDetecting] = useState(false);
-  const [segments, setSegments] = useState([{ sp: "L", w: 22 }, { sp: "R", w: 14 }, { sp: "L", w: 30 }, { sp: "R", w: 18 }, { sp: "L", w: 16 }]);
-  const [minDwell, setMinDwell] = useState(1.0);
   const frameRef = useRef<HTMLDivElement>(null);
+  // the REAL diar⊕ROI track from the clip's latest reframe job (read-only in P1; editable in P2)
+  const reframeJob = (ctx.snapshot?.clips ?? []).filter((c) => c.clip_id === id && c.kind === "reframe" && c.status === "done" && (c.result.segments?.length ?? 0) > 0).at(-1);
+  const segs = reframeJob?.result.segments ?? [];
+  const trackSource = (reframeJob?.result.source as string) || "";
 
-  const autoDetect = () => { setDetecting(true); setTimeout(() => { setDetecting(false); setBoxes({ L: { x: 7, y: 20, w: 38, h: 62 }, R: { x: 55, y: 17, w: 39, h: 65 } }); ctx.pushToast({ icon: "scan", tone: "ok", title: "Faces detected", body: "2 speakers · cyan = left, magenta = right" }); }, 1300); };
+  const autoDetect = () => { setDetecting(true); setTimeout(() => { setDetecting(false); setBoxes({ L: { x: 7, y: 20, w: 38, h: 62 }, R: { x: 55, y: 17, w: 39, h: 65 } }); ctx.pushToast({ icon: "scan", tone: "info", title: "Boxes reset", body: "Adjust the L/R boxes, then Apply — the engine refines detection on render." }); }, 600); };
   const applyReframe = () => {
     const pct = (b: Box) => ({ x: b.x / 100, y: b.y / 100, w: b.w / 100, h: b.h / 100 });
     ctx.client.reframe(id, { aspect: "9:16", mode, ...(mode !== "center" ? { rois: { left: pct(boxes.L), right: pct(boxes.R) } } : {}) }).catch(() => {});
@@ -86,20 +88,23 @@ export default function ReframeScreen() {
             <span className="mono" style={{ fontSize: 11.5, color: "var(--text-dim)" }}>{fmtTC(20.7 + frame * 0.4)}</span>
           </div>
           <div className="row" style={{ gap: 10, marginTop: 14 }}>
-            <Btn variant="primary" icon="scan" onClick={autoDetect}>Auto-detect</Btn>
-            <Btn variant="ghost" icon="eye" onClick={() => ctx.pushToast({ icon: "eye", tone: "info", title: "Motion-diff preview", body: "Rendering who-is-talking overlay…" })}>Verify (motion diff)</Btn>
+            <Btn variant="primary" icon="scan" onClick={autoDetect}>Reset boxes</Btn>
             <span className="spacer" />
             <Btn variant="ghost" icon="refresh" onClick={applyReframe}>Apply &amp; re-render</Btn>
           </div>
 
           <div className="card" style={{ padding: 16, marginTop: 18 }}>
-            <div className="row" style={{ marginBottom: 12 }}><div className="eyebrow">Speaker track · segments.json</div><span className="spacer" /><span className="mono" style={{ fontSize: 11, color: "var(--text-faint)" }}>click a segment to flip speaker</span></div>
-            <div className="row" style={{ height: 34, borderRadius: 8, overflow: "hidden", gap: 2 }}>
-              {segments.map((seg, i) => (
-                <div key={i} onClick={() => setSegments((s) => s.map((x, j) => (j === i ? { ...x, sp: x.sp === "L" ? "R" : "L" } : x)))}
-                  style={{ flex: seg.w, background: seg.sp === "L" ? "color-mix(in srgb, var(--roi-l) 30%, var(--bg-3))" : "color-mix(in srgb, var(--roi-r) 30%, var(--bg-3))", borderTop: `2px solid ${seg.sp === "L" ? "var(--roi-l)" : "var(--roi-r)"}`, display: "grid", placeItems: "center", cursor: "pointer", fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text)" }}>{seg.sp}</div>
-              ))}
-            </div>
+            <div className="row" style={{ marginBottom: 12 }}><div className="eyebrow">Speaker track · diar⊕ROI</div><span className="spacer" />{trackSource && <span className="chip acc">{trackSource === "fused" ? "fused · diar⊕ROI" : "ROI-only"}</span>}</div>
+            {segs.length ? (
+              <div className="row" style={{ height: 34, borderRadius: 8, overflow: "hidden", gap: 2 }}>
+                {segs.map((seg, i) => { const L = seg.speaker === "left"; return (
+                  <div key={i} title={`${seg.speaker} · ${fmtTC(seg.start)}–${fmtTC(seg.end)}`}
+                    style={{ flex: Math.max(0.5, seg.end - seg.start), background: L ? "color-mix(in srgb, var(--roi-l) 30%, var(--bg-3))" : "color-mix(in srgb, var(--roi-r) 30%, var(--bg-3))", borderTop: `2px solid ${L ? "var(--roi-l)" : "var(--roi-r)"}`, display: "grid", placeItems: "center", fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text)" }}>{L ? "L" : "R"}</div>
+                ); })}
+              </div>
+            ) : (
+              <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.6 }}>No track yet — hit <b>Apply &amp; re-render</b> and the engine fuses audio diarization with ROI motion. (Editing the track by hand is Phase 2.)</div>
+            )}
           </div>
         </div>
 
@@ -117,15 +122,9 @@ export default function ReframeScreen() {
             </div>
           </div>
 
-          <div className="card" style={{ padding: 16, display: "flex", flexDirection: "column", gap: 14 }}>
-            <div className="eyebrow">Speaker switching</div>
-            <div>
-              <div className="row" style={{ marginBottom: 6 }}><span className="field-label" style={{ margin: 0 }}>Min dwell</span><span className="spacer" /><span className="mono" style={{ fontSize: 12 }}>{minDwell.toFixed(1)}s</span></div>
-              <input type="range" min="0.4" max="3" step="0.1" value={minDwell} onChange={(e) => setMinDwell(+e.target.value)} style={{ width: "100%", accentColor: "var(--accent)" }} />
-              <div className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5 }}>hold on a speaker ≥ {minDwell.toFixed(1)}s before cutting</div>
-            </div>
-            <div className="row"><span style={{ fontSize: 13 }}>Smoothing</span><span className="spacer" /><Switch on onClick={() => {}} /></div>
-            <div className="row"><span style={{ fontSize: 13 }}>Crop margin</span><span className="spacer" /><span className="mono" style={{ fontSize: 12, color: "var(--text-dim)" }}>8%</span></div>
+          <div className="card" style={{ padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+            <div className="row"><div className="eyebrow">Speaker switching</div><span className="spacer" /><span className="chip warn">Phase 2</span></div>
+            <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.6 }}>Min-dwell, smoothing and crop-margin are tuned automatically today. Manual control + an editable speaker track land in Phase 2 (the full ROI / speaker-track editor).</div>
           </div>
 
           {mode === "pan" && (
