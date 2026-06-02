@@ -53,6 +53,20 @@ export const ICONS: Record<string, string> = {
   scan: "M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2M4 12h16",
   spinner: "M12 3a9 9 0 1 0 9 9",
   message: "M21 11.5a8.5 8.5 0 0 1-12.6 7.4L3 21l2.1-5.4A8.5 8.5 0 1 1 21 11.5Z",
+  wand: "M15 4V2M15 10V8M11 6H9M21 6h-2M18 9l-1.5-1.5M18 3l-1.5 1.5M4 20l9-9M13 7l1.5 1.5",
+  undo: "M9 14 4 9l5-5M4 9h11a5 5 0 0 1 0 10h-3",
+  volume: "M11 5 6 9H2v6h4l5 4V5ZM15.5 8.5a5 5 0 0 1 0 7M19 5a9 9 0 0 1 0 14",
+  chevL: "M15 6l-6 6 6 6",
+  minus: "M5 12h14",
+  bolt: "M13 2 4 14h7l-1 8 9-12h-7l1-8Z",
+  pin: "M12 21s-6-5.7-6-10a6 6 0 1 1 12 0c0 4.3-6 10-6 10ZM12 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z",
+  filter: "M3 5h18l-7 8v6l-4 2v-8L3 5Z",
+  flip: "M3 8h12l-3-3M21 16H9l3 3M3 8v0M3 8a9 9 0 0 1 9-5M21 16a9 9 0 0 1-9 5",
+  music: "M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z",
+  globe: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM3 12h18M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18Z",
+  layout: "M3 4h18v16H3zM3 10h18M9 10v10",
+  slash: "M7 17 17 7",
+  copy: "M9 9h11a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V10a1 1 0 0 1 1-1ZM5 15H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h11a1 1 0 0 1 1 1v1",
 };
 
 type IconProps = { name: string; size?: number; stroke?: number; fill?: string; style?: CSSProperties } & Record<string, unknown>;
@@ -154,6 +168,7 @@ export function AspectBadge({ a = "9:16" }: { a?: string }) {
 }
 
 export const fmtDur = (s: number) => { s = Math.round(s); const m = Math.floor(s / 60), ss = s % 60; return `${m}:${String(ss).padStart(2, "0")}`; };
+export const fmtTC = (s: number) => { const m = Math.floor(s / 60), ss = Math.floor(s % 60), f = Math.floor((s % 1) * 30); return `${String(m).padStart(2, "0")}:${String(ss).padStart(2, "0")}:${String(f).padStart(2, "0")}`; };
 
 /* deterministic hue from a string (video-frame placeholder thumbnail) */
 function seedHue(s: string) { let h = 0; for (let i = 0; i < (s || "").length; i++) h = (h * 31 + s.charCodeAt(i)) % 360; return h; }

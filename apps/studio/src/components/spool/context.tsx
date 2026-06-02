@@ -3,29 +3,55 @@
 import { createContext, useContext, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { SpoolApiClient } from "@spool/api-client";
-import type { ClipJobView, EventsSnapshot } from "@spool/types";
+import type { ClipJobView, EventsSnapshot, TranscriptWord } from "@spool/types";
 import { useEngine, useEngineQuery, useLive } from "@/lib/engine-context";
 
 /* The demo's `useSpool()` context, backed by the LIVE engine instead of mock data.
- * Maps the SSE snapshot into the demo's source/clip/job/dep shapes so the ported demo
- * components render unchanged. `nav` drives Next routes; agent/palette/toast state is local. */
+ * Maps the SSE snapshot into the demo's source/clip/job shapes so the ported demo
+ * components render unchanged. `nav` drives Next routes; the agent loop calls the real
+ * `/agent` endpoint and elicitation = the agent's `clarify` turn; "make clips" runs real
+ * render pipelines. Per-source data (candidates, transcript) is mapped on demand by the
+ * detail pages. Zero mock data (spec §6.2). */
 
 export interface SpoolSource {
   id: string; title: string; src: string; dur: number; status: string;
-  prog?: number; clips: number; kind: string;
+  prog?: number; clips: number; kind: string; channel: string; res: string; fps: number;
+  size: string; lang: string; added: string; scenes: number; transcriptId?: string; speakerCount: number;
 }
 export interface SpoolClip {
   id: string; title: string; src: string; dur: number; aspect: string; style: string;
-  platform: string; status: string; prog?: number; tags?: string[]; renderId?: string;
+  platform: string; status: string; prog?: number; tags?: string[]; renderId?: string; score?: number;
 }
 export interface SpoolJob {
-  id: string; type: string; label: string; src: string; status: string; prog: number; stage: string; eta: string;
+  id: string; type: string; label: string; src: string; status: string; prog: number; stage: string; eta: string; elapsed: string; err?: boolean;
 }
 export interface SpoolDep { id: string; name: string; note: string; status: string; ver: string }
 export interface SpoolDownload { id: string; title: string; src: string; prog: number; status: string; size: string; speed: string; eta: string; err?: string | null }
 export interface Toast { id: number; icon?: string; tone?: string; title: string; body?: string }
 
+/** A discovery candidate, mapped from a `find_moments` job result. Glass-box = real named
+ *  `signals` + a real transcript `excerpt` (no fabricated score; `rank`'s score is Phase 3). */
+export interface Candidate {
+  id: string; title: string; start: number; end: number; mode: string;
+  why: string; excerpt: string; signals: string[]; sel: boolean; source_id: string;
+}
+
+export interface AgentMessage {
+  role: "agent" | "user" | "trace" | "working" | "elicit";
+  id?: string; text?: string;
+  tools?: { name: string; arg?: string; ms?: number }[];
+  label?: string; icon?: string; prog?: number;
+  kind?: "enum" | "multiselect" | "roi" | "confirm";
+  tag?: string; q?: string; options?: { id: string; title: string; sub?: string; score?: number; def?: boolean }[] | string[]; yes?: string;
+  answered?: boolean; answer?: unknown;
+  jobChips?: { id: string; kind: string }[];
+}
+
 const RECIPES = ["3 funny shorts", "Insightful carousel", "Hot-take TikToks", "Best moment → 9:16"];
+
+const INITIAL_AGENT: AgentMessage[] = [
+  { role: "agent", text: "Hi — I'm your clip agent. Paste a video URL or tell me what to make and I'll handle download, transcription, finding moments, reframing and captions. You decide at each step." },
+];
 
 function originOf(url: string | null | undefined): string {
   const u = (url || "").toLowerCase();
@@ -35,6 +61,21 @@ function originOf(url: string | null | undefined): string {
   if (u.includes("x.com") || u.includes("twitter")) return "x";
   return "file";
 }
+const cap = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+const ago = (sec: number) => {
+  if (!sec || sec < 0) return "just now";
+  const m = sec / 60, h = m / 60, d = h / 24;
+  if (d >= 1) return `${Math.round(d)}d ago`;
+  if (h >= 1) return `${Math.round(h)}h ago`;
+  if (m >= 1) return `${Math.round(m)}m ago`;
+  return "just now";
+};
+const human = (bytes: number) => {
+  if (!bytes) return "—";
+  const u = ["B", "KB", "MB", "GB"]; let i = 0, n = bytes;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
+};
 
 function mapSources(snap: EventsSnapshot | null): SpoolSource[] {
   if (!snap) return [];
@@ -53,8 +94,23 @@ function mapSources(snap: EventsSnapshot | null): SpoolSource[] {
         dur: tj?.duration_seconds || 0, status, prog: tj?.progress_pct ?? 0,
         clips: clipCount(j.id),
         kind: speakers > 1 ? `podcast · ${speakers} speakers` : "talking-head",
+        channel: originOf(j.url) === "file" ? "local file" : originOf(j.url),
+        res: "—", fps: 30, size: human(j.total_bytes || j.downloaded_bytes),
+        lang: tj?.language_detected || "—", added: ago(j.elapsed_seconds), scenes: 1,
+        transcriptId: tj?.status === "done" ? tj.id : undefined, speakerCount: speakers,
       };
-    });
+    })
+    .reverse();
+}
+
+const PLAT_OF: Record<string, string> = { tiktok: "tiktok", reels: "reels", shorts: "shorts", linkedin: "linkedin", youtube: "youtube", x: "x" };
+
+function clipTitle(jobs: ClipJobView[], cid: string): string {
+  for (const j of jobs) {
+    const t = (j.params?.title as string) || (j.result as { title?: string }).title;
+    if (t) return t;
+  }
+  return "Clip " + cid.slice(0, 6);
 }
 
 function mapClips(snap: EventsSnapshot | null): SpoolClip[] {
@@ -71,18 +127,20 @@ function mapClips(snap: EventsSnapshot | null): SpoolClip[] {
     const cut = jobs.find((j) => j.kind === "cut") ?? jobs.find((j) => j.kind === "pipeline");
     const render = jobs.filter((j) => (j.kind === "export" || j.kind === "pipeline") && j.status === "done" && j.result.render_id).at(-1);
     const active = jobs.find((j) => j.status === "running" || j.status === "queued");
-    const cap = jobs.filter((j) => j.kind === "caption" || j.kind === "pipeline").at(-1);
+    const cap2 = jobs.filter((j) => j.kind === "caption" || j.kind === "pipeline").at(-1);
     const win = cut?.result;
-    const status = render ? "ready" : active ? (active.kind === "export" || active.kind === "pipeline" ? "rendering" : "rendering") : "queued";
+    const mode = (cut?.params?.mode as string) || (jobs.find((j) => j.kind === "moments")?.result.mode as string) || "";
+    const status = render ? "ready" : active ? "rendering" : "queued";
     out.push({
       id: cid,
-      title: "Clip " + cid.slice(0, 6),
-      src: cut?.source_id || "",
+      title: clipTitle(jobs, cid),
+      src: cut?.source_id || jobs[0]?.source_id || "",
       dur: win?.start != null && win?.end != null ? win.end - win.start : 0,
-      aspect: (render?.result.aspect as string) || "9:16",
-      style: (cap?.result.style as string) || "opus",
-      platform: (render?.result.preset as string) || "tiktok",
+      aspect: (render?.result.aspect as string) || (cut?.params?.aspect as string) || "9:16",
+      style: (cap2?.result.style as string) || (cap2?.params?.style as string) || "opus",
+      platform: PLAT_OF[(render?.result.preset as string) || ""] || "tiktok",
       status, prog: active?.progress_pct ?? 0, renderId: render?.result.render_id,
+      tags: mode ? [cap(mode)] : [],
     });
   }
   return out.reverse();
@@ -92,15 +150,24 @@ function mapJobs(snap: EventsSnapshot | null): SpoolJob[] {
   if (!snap) return [];
   const jobs: SpoolJob[] = [];
   for (const j of snap.jobs) {
-    if (j.status === "downloading" || j.status === "queued")
-      jobs.push({ id: j.id, type: "download", label: j.title || j.url, src: j.id, status: j.status === "downloading" ? "running" : "queued", prog: j.progress_pct, stage: j.human?.summary || "downloading", eta: j.human?.eta || "—" });
+    if (j.status === "done" || j.status === "error" || j.status === "cancelled") {
+      if (j.status === "done")
+        jobs.push({ id: j.id, type: "download", label: j.title || j.url, src: j.id, status: "done", prog: 100, stage: "complete", eta: "—", elapsed: j.human?.elapsed || "—" });
+      else
+        jobs.push({ id: j.id, type: "download", label: j.title || j.url, src: j.id, status: "failed", prog: j.progress_pct, stage: j.error_message || "error", eta: "—", elapsed: j.human?.elapsed || "—", err: true });
+    } else
+      jobs.push({ id: j.id, type: "download", label: j.title || j.url, src: j.id, status: j.status === "downloading" ? "running" : "queued", prog: j.progress_pct, stage: j.human?.summary || "downloading", eta: j.human?.eta || "—", elapsed: j.human?.elapsed || "—" });
   }
   for (const t of snap.transcripts)
     if (t.status === "running" || t.status === "queued")
-      jobs.push({ id: t.id, type: "transcribe", label: t.human?.summary || "transcribe", src: t.parent_job_id, status: t.status, prog: t.progress_pct, stage: "whisper", eta: "—" });
-  for (const c of snap.clips)
-    if (c.status === "running" || c.status === "queued")
-      jobs.push({ id: c.id, type: c.kind === "moments" ? "transcribe" : "render", label: `${c.kind} · ${c.clip_id || c.source_id || ""}`, src: c.source_id || "", status: c.status, prog: c.progress_pct, stage: c.stage || c.kind, eta: "—" });
+      jobs.push({ id: t.id, type: "transcribe", label: t.human?.summary || "transcribe", src: t.parent_job_id, status: t.status === "running" ? "running" : "queued", prog: t.progress_pct, stage: "whisper", eta: "—", elapsed: t.human?.elapsed || "—" });
+  for (const c of snap.clips) {
+    if (c.status === "done" && c.kind === "moments") continue;
+    const type = c.kind === "moments" ? "transcribe" : c.kind === "export" || c.kind === "pipeline" ? "render" : "render";
+    const st = c.status === "running" ? "running" : c.status === "queued" ? "queued" : c.status === "done" ? "done" : c.status === "error" ? "failed" : c.status;
+    if (st === "done" || st === "failed" || st === "running" || st === "queued")
+      jobs.push({ id: c.id, type, label: `${cap(c.kind)} · ${(c.clip_id || c.source_id || "").slice(0, 8)}`, src: c.source_id || "", status: st, prog: c.progress_pct, stage: c.stage || c.error_message || c.kind, eta: "—", elapsed: c.human?.elapsed || "—", err: c.status === "error" });
+  }
   return jobs;
 }
 
@@ -110,7 +177,56 @@ function mapDownloads(snap: EventsSnapshot | null): SpoolDownload[] {
     id: j.id, title: j.title || j.url, src: originOf(j.url), prog: j.progress_pct,
     status: j.status === "done" ? "done" : j.status === "error" ? "error" : j.status === "cancelled" ? "error" : "downloading",
     size: j.human?.size || "", speed: j.human?.speed || "", eta: j.human?.eta || "—", err: j.error_message,
+  })).reverse();
+}
+
+/** Build the demo's Candidate shape from a source's latest `find_moments` result.
+ *  `signals` are the real glass-box reasons; `excerpt` is the real transcript text in range. */
+export function mapCandidates(snap: EventsSnapshot | null, sourceId: string | undefined, words?: TranscriptWord[]): Candidate[] {
+  if (!snap || !sourceId) return [];
+  const job = snap.clips
+    .filter((c) => c.kind === "moments" && c.source_id === sourceId && c.status === "done" && c.result.candidates?.length)
+    .at(-1);
+  if (!job?.result.candidates) return [];
+  return job.result.candidates.map((m, i) => ({
+    id: `${job.id}-${i}`, title: m.title, start: m.start, end: m.end, mode: cap(m.mode),
+    why: m.rationale, excerpt: words ? excerptFor(words, m.start, m.end) : "", signals: m.signals ?? [],
+    sel: i < 3, source_id: sourceId,
   }));
+}
+
+function excerptFor(words: TranscriptWord[], start: number, end: number): string {
+  const span = words.filter((w) => w.start != null && w.start >= start && w.start <= end && !w.deleted).map((w) => w.w);
+  let text = span.join(" ").replace(/\s+([.,!?])/g, "$1").trim();
+  if (text.length > 180) text = text.slice(0, 177).trimEnd() + "…";
+  return text;
+}
+
+export interface TranscriptLine { id: number; sp: string; t: number; words: string; tokens: { w: string; ti: number }[] }
+export interface SpeakerInfo { name: string; color: string }
+const ROI_COLORS = ["var(--roi-l)", "var(--roi-r)", "var(--accent)", "var(--warn)", "var(--ok)"];
+
+/** Group a transcript's words.json into speaker-attributed lines for the TranscriptView. */
+export function buildTranscript(words: TranscriptWord[] | undefined): { lines: TranscriptLine[]; speakers: Record<string, SpeakerInfo> } {
+  if (!words?.length) return { lines: [], speakers: {} };
+  const live = words.filter((w) => !w.deleted && w.w.trim());
+  const speakerKeys = [...new Set(live.map((w) => w.speaker || "A"))];
+  const speakers: Record<string, SpeakerInfo> = {};
+  speakerKeys.forEach((k, i) => (speakers[k] = { name: k.length <= 2 ? `Speaker ${k}` : k, color: ROI_COLORS[i % ROI_COLORS.length] }));
+  const lines: TranscriptLine[] = [];
+  let cur: TranscriptLine | null = null;
+  let id = 0;
+  for (const w of live) {
+    const sp = w.speaker || "A";
+    const ti: number = w.start ?? cur?.t ?? 0;
+    if (!cur || cur.sp !== sp || ti - (cur.tokens.at(-1)?.ti ?? ti) > 2.5) {
+      cur = { id: id++, sp, t: ti, words: "", tokens: [] };
+      lines.push(cur);
+    }
+    cur.tokens.push({ w: w.w, ti });
+    cur.words += (cur.words ? " " : "") + w.w;
+  }
+  return { lines, speakers };
 }
 
 interface SpoolCtx {
@@ -121,19 +237,24 @@ interface SpoolCtx {
   downloads: SpoolDownload[];
   recipes: string[];
   deps: SpoolDep[];
+  snapshot: EventsSnapshot | null;
   nav: (screen: string, params?: { id?: string }) => void;
   agentOpen: boolean; openAgent: () => void; toggleAgent: () => void; closeAgent: () => void;
   paletteOpen: boolean; openPalette: () => void; closePalette: () => void;
   shortcutsOpen: boolean; openShortcuts: () => void; closeShortcuts: () => void;
-  askAgent: (text: string) => void;
+  agentMessages: AgentMessage[]; working: boolean;
+  askAgent: (text: string, sourceId?: string) => void;
+  answerElicit: (msg: AgentMessage, answer: unknown) => void;
+  makeClipsFrom: (sel: { source_id?: string; start?: number; end?: number; id?: string; title?: string }[]) => void;
   toasts: Toast[]; pushToast: (t: Omit<Toast, "id">) => void;
+  offline: boolean; toggleOffline: () => void;
 }
 
 const Ctx = createContext<SpoolCtx | null>(null);
 
 const ROUTE: Record<string, string> = {
   home: "/", import: "/import", library: "/library", clips: "/clips", queue: "/queue",
-  settings: "/settings", publish: "/publish", analytics: "/analytics",
+  settings: "/settings", publish: "/publish", analytics: "/analytics", brand: "/brand", onboarding: "/onboarding",
 };
 
 export function SpoolProvider({ children }: { children: React.ReactNode }) {
@@ -146,6 +267,9 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [agentMessages, setAgentMessages] = useState<AgentMessage[]>(INITIAL_AGENT);
+  const [working, setWorking] = useState(false);
+  const [offline, setOffline] = useState(true);
 
   const pushToast = (t: Omit<Toast, "id">) => {
     const id = Date.now() + Math.random();
@@ -154,14 +278,58 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   };
 
   const nav = (screen: string, params: { id?: string } = {}) => {
-    if ((screen === "project" || screen === "discovery") && params.id) router.push(`/sources/${params.id}`);
-    else if (["editor", "reframe", "caption"].includes(screen) && params.id) router.push(`/clips/${params.id}`);
-    else router.push(ROUTE[screen] ?? "/");
+    const id = params.id;
+    switch (screen) {
+      case "project": return router.push(id ? `/sources/${id}` : "/library");
+      case "discovery": return router.push(id ? `/sources/${id}/discovery` : "/library");
+      case "editor": return router.push(id ? `/clips/${id}` : "/clips");
+      case "reframe": return router.push(id ? `/clips/${id}/reframe` : "/clips");
+      case "caption": return router.push(id ? `/clips/${id}/caption` : "/clips");
+      default: return router.push(ROUTE[screen] ?? "/");
+    }
   };
 
-  const askAgent = (text: string) => {
+  const push = (m: AgentMessage) => setAgentMessages((a) => [...a, m]);
+
+  const askAgent = (text: string, sourceId?: string) => {
+    if (!text.trim()) return;
     setAgentOpen(true);
-    client.agent(text).then((r) => pushToast({ icon: "sparkles", tone: "info", title: "Agent", body: r.reply })).catch(() => {});
+    push({ role: "user", text });
+    setWorking(true);
+    client
+      .agent(text, sourceId ? { sourceId } : {})
+      .then((r) => {
+        setWorking(false);
+        push({ role: "agent", text: r.reply });
+        if (r.jobs?.length) {
+          push({ role: "trace", tools: r.jobs.map((j) => ({ name: j.kind, arg: j.clip_id ? "· " + j.clip_id.slice(0, 6) : "", ms: Math.round(j.elapsed_seconds * 1000) })) });
+          pushToast({ icon: "sparkles", tone: "info", title: `Agent started ${r.jobs.length} job${r.jobs.length > 1 ? "s" : ""}`, body: "Track them in the Render Queue" });
+        }
+        if (r.action === "clarify" && r.question)
+          push({ role: "elicit", id: "e" + Math.round(r.reply.length + (r.options?.length ?? 0)) + agentMessages.length, kind: "enum", tag: "agent needs you", q: r.question, options: r.options ?? [] });
+      })
+      .catch(() => {
+        setWorking(false);
+        push({ role: "agent", text: "I couldn't reach the engine just now. Make sure it's running, then try again." });
+      });
+  };
+
+  const answerElicit = (msg: AgentMessage, answer: unknown) => {
+    setAgentMessages((a) => a.map((m) => (m === msg || (msg.id && m.id === msg.id) ? { ...m, answered: true, answer } : m)));
+    const text = Array.isArray(answer) ? answer.join(", ") : String(answer ?? "");
+    if (text) askAgent(text);
+  };
+
+  const makeClipsFrom = (sel: { source_id?: string; start?: number; end?: number; id?: string; title?: string }[]) => {
+    const n = sel.length || 1;
+    for (const c of sel) {
+      if (c.source_id && c.start != null && c.end != null)
+        client.renderPipeline(c.source_id, { start: c.start, end: c.end, aspect: "9:16", mode: "pan", style: "opus", preset: "tiktok" }).catch(() => {});
+      else if (c.id) client.render(c.id).catch(() => {});
+    }
+    pushToast({ icon: "film", tone: "info", title: `Rendering ${n} clip${n > 1 ? "s" : ""}`, body: "Track progress in the Render Queue" });
+    setAgentOpen(true);
+    nav("queue");
   };
 
   const deps: SpoolDep[] = doctor.data
@@ -173,11 +341,12 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   const value: SpoolCtx = {
     client,
     sources: mapSources(snapshot), clips: mapClips(snapshot), jobs: mapJobs(snapshot),
-    downloads: mapDownloads(snapshot), recipes: RECIPES, deps,
+    downloads: mapDownloads(snapshot), recipes: RECIPES, deps, snapshot,
     nav, agentOpen, openAgent: () => setAgentOpen(true), toggleAgent: () => setAgentOpen((o) => !o), closeAgent: () => setAgentOpen(false),
     paletteOpen, openPalette: () => setPaletteOpen(true), closePalette: () => setPaletteOpen(false),
     shortcutsOpen, openShortcuts: () => setShortcutsOpen(true), closeShortcuts: () => setShortcutsOpen(false),
-    askAgent, toasts, pushToast,
+    agentMessages, working, askAgent, answerElicit, makeClipsFrom,
+    toasts, pushToast, offline, toggleOffline: () => setOffline((o) => !o),
   };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

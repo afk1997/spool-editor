@@ -1,0 +1,15 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch({ channel: "chrome" });
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+const errs = [];
+page.on("pageerror", (e) => errs.push("pageerror: " + e.message));
+await page.goto("http://localhost:3000/", { waitUntil: "domcontentloaded" });
+await page.waitForTimeout(3500);
+await page.click('button[aria-label="Toggle agent panel"]', { force: true });
+await page.waitForTimeout(600);
+await page.screenshot({ path: "/tmp/studio_agent.png" });
+await page.keyboard.press(process.platform === "darwin" ? "Meta+k" : "Control+k");
+await page.waitForTimeout(500);
+await page.screenshot({ path: "/tmp/studio_palette.png" });
+console.log(errs.length ? "ERRORS:\n" + errs.join("\n") : "no client errors");
+await browser.close();
