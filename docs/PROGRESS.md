@@ -4,7 +4,7 @@
 > `Spool_Engineering-Spec.md` (§5 roadmap, §6 front-end standards). Status legend:
 > ✅ done & verified · 🟡 in progress · ◻️ not started.
 >
-> **Last updated:** 2026-06-03 · **Phase 0 — ✅ · Phase 1 — ✅ · Phase 2 — 🟡 IN PROGRESS** (S7 reframe + S8 caption studio done & verified; done-when #1 met).
+> **Last updated:** 2026-06-03 · **Phase 0 — ✅ · Phase 1 — ✅ · Phase 2 — 🟡 IN PROGRESS** (S7 reframe + S8 caption + transcript editing done & verified; done-when #1 + #3 met).
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,
@@ -219,8 +219,22 @@ editing its transcript · full-text search transcripts across the library.
   ASS shows size 124 / fill `&H004DE9FF&` / MarginV 422 (22%) / green per-word highlight /
   all-caps, and a captioned mp4 is produced. **→ done-when #1 fully met** (fix an ROI box
   AND a caption style by hand → re-render). Commits: `195096d` (engine) + UI commit.
-- [ ] **Brand Kits (S9)** · **transcript-based editing** · **Editor timeline (S6)** ·
-  **Settings writes** · **SQLite FTS5 + library search** · **perf (virtualize / lazy-load)** — next slices.
+- [x] **Transcript-based editing (S4)** — edit/delete transcript words → cut the video,
+  zero-dummy. **Engine (additive):** `POST /transcripts/<tid>/words/<idx>` exposes trove's
+  transcript-editor ops (`set_text`/`delete`/`insert_after`/`merge_next` via
+  `transcript_io.apply_word_op`), persisting words.json + regenerating .srt/.vtt/.txt (so
+  caption re-burns pick up the fix). `cutter.cut_spans` trim+concats kept ranges (the ripple
+  cut); `clip_runner._kept_spans` removes deleted words' time spans within [start,end] and
+  `_do_cut` ripple-cuts when words were deleted, else the lossless single-range stream-copy
+  (unchanged for the common case). OpenAPI documents the new route. **Studio:** the
+  read-only TranscriptView (S4) is now editable — click words to select a range → **Cut clip
+  from selection** (the engine ripples out any deleted words), double-click to fix a word's
+  text, ✕ to delete; edits persist + reload. api-client `editWord`; tokens carry idx/end.
+  **Verified:** 638 engine tests (+9), studio typecheck/lint/12-unit/build + e2e green; real
+  media — delete 2 words in [1,8] of a live transcript, cut → a 6.46s clip (vs 7s window).
+  **→ done-when #3 met** (cut a clip by editing its transcript). Commits: `c00d2d4` (engine) + UI commit.
+- [ ] **Brand Kits (S9)** · **Editor timeline (S6)** · **Settings writes** ·
+  **SQLite FTS5 + library search** · **perf (virtualize / lazy-load)** — next slices.
 
 ## What's verified now
 

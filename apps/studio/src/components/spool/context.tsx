@@ -209,7 +209,7 @@ function excerptFor(words: TranscriptWord[], start: number, end: number): string
   return text;
 }
 
-export interface TranscriptLine { id: number; sp: string; t: number; words: string; tokens: { w: string; ti: number }[] }
+export interface TranscriptLine { id: number; sp: string; t: number; words: string; tokens: { w: string; ti: number; te: number; idx: number }[] }
 export interface SpeakerInfo { name: string; color: string }
 const ROI_COLORS = ["var(--roi-l)", "var(--roi-r)", "var(--accent)", "var(--warn)", "var(--ok)"];
 
@@ -230,7 +230,7 @@ export function buildTranscript(words: TranscriptWord[] | undefined): { lines: T
       cur = { id: id++, sp, t: ti, words: "", tokens: [] };
       lines.push(cur);
     }
-    cur.tokens.push({ w: w.w, ti });
+    cur.tokens.push({ w: w.w, ti, te: w.end ?? ti, idx: w.idx });
     cur.words += (cur.words ? " " : "") + w.w;
   }
   return { lines, speakers };

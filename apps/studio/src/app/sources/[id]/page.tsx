@@ -67,7 +67,7 @@ export default function ProjectScreen() {
               <Progress value={s.prog ?? 0} tone="info" striped />
               <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", marginTop: 10 }}>whisper · on-device · partial transcript streams below</div>
             </div>
-            <TranscriptView lines={lines} speakers={speakers} />
+            <TranscriptView lines={lines} speakers={speakers} tid={s.transcriptId} sourceId={s.id} onEdited={doc.reload} />
           </div>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 24 }}>
@@ -97,7 +97,7 @@ export default function ProjectScreen() {
           </div>
         )
       )}
-      {tab === "Transcript" && <TranscriptView lines={lines} speakers={speakers} />}
+      {tab === "Transcript" && <TranscriptView lines={lines} speakers={speakers} tid={s.transcriptId} sourceId={s.id} onEdited={doc.reload} />}
       {tab === "Candidates" && (candidates.length === 0 && !finding
         ? <Empty icon="scan" title="No candidates yet" action={<Btn variant="primary" icon="scissors" onClick={() => ctx.nav("discovery", { id: s.id })}>Find clips</Btn>}>Run discovery to scan the transcript for clip-worthy moments.</Empty>
         : <DiscoveryBody key={candidates[0]?.id.split("-")[0] ?? "none"} candidates={candidates} sourceId={s.id} finding={finding} />)}

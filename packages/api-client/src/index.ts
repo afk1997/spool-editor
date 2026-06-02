@@ -220,6 +220,11 @@ export class SpoolApiClient {
   startTranscribe(parentJobId: string): Promise<TranscribeJobView> {
     return this.post(`/jobs/${encodeURIComponent(parentJobId)}/transcribe`);
   }
+  /** Edit one transcript word in place (set_text / delete / insert_after / merge_next) —
+   *  trove's transcript-editor behavior; drives caption re-burns + the transcript ripple cut. */
+  editWord(tid: string, idx: number, p: { op: string; w?: string }): Promise<{ tid: string; word: Record<string, unknown> }> {
+    return this.post(`/transcripts/${encodeURIComponent(tid)}/words/${idx}`, p);
+  }
 
   // ── clips (the render queue) ──
   findMoments(sourceId: string, p: MomentsParams = {}): Promise<ClipJobView> {

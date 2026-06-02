@@ -163,10 +163,35 @@ export function DiscoveryBody({ candidates, sourceId, finding }: { candidates: C
   );
 }
 
-export function TranscriptView({ lines, speakers }: { lines: TranscriptLine[]; speakers: Record<string, SpeakerInfo> }) {
+/* S4 transcript — editable (Phase 2). Click words to select a range → "Cut clip from
+ * selection" (the engine ripple-cuts any deleted words out); double-click a word to fix its
+ * text; ✕ to delete it. Edits persist to words.json so caption re-burns use the fixes. */
+export function TranscriptView({ lines, speakers, tid, sourceId, onEdited }: { lines: TranscriptLine[]; speakers: Record<string, SpeakerInfo>; tid?: string; sourceId?: string; onEdited?: () => void }) {
+  const ctx = useSpool();
   const [q, setQ] = useState("");
-  const [active, setActive] = useState<string | null>(null);
+  const [editing, setEditing] = useState<{ idx: number; text: string } | null>(null);
+  const [sel, setSel] = useState<{ a: number; b: number } | null>(null);
   if (!lines.length) return <Empty icon="type" title="No transcript yet">Once this source finishes transcribing, the word-level transcript shows here.</Empty>;
+
+  const editable = !!tid;
+  const lo = sel ? Math.min(sel.a, sel.b) : 0, hi = sel ? Math.max(sel.a, sel.b) : 0;
+  const inSel = (ti: number) => sel != null && ti >= lo && ti <= hi;
+  const selWords = sel ? lines.flatMap((l) => l.tokens).filter((t) => inSel(t.ti)) : [];
+
+  const doOp = (idx: number, op: string, w?: string) => {
+    if (!tid) return;
+    ctx.client.editWord(tid, idx, w !== undefined ? { op, w } : { op }).then(() => { setEditing(null); onEdited?.(); }).catch(() => {});
+  };
+  const cutSelection = () => {
+    if (!sourceId || !selWords.length) return;
+    const end = Math.max(hi, ...selWords.map((t) => t.te));
+    ctx.client.cut(sourceId, { start: lo, end }).then(() => {
+      ctx.pushToast({ icon: "scissors", tone: "info", title: "Cutting clip from transcript", body: `${selWords.length} words · deleted words ripple out · track it in the queue` });
+      ctx.nav("queue");
+    }).catch(() => {});
+    setSel(null);
+  };
+
   return (
     <div>
       <div className="row" style={{ gap: 10, marginBottom: 16 }}>
@@ -175,7 +200,7 @@ export function TranscriptView({ lines, speakers }: { lines: TranscriptLine[]; s
           {Object.entries(speakers).map(([k, v]) => <span key={k} className="row" style={{ gap: 7, fontSize: 12.5 }}><span style={{ width: 9, height: 9, borderRadius: 3, background: v.color }} />{v.name}</span>)}
         </div>
         <span className="spacer" />
-        <span style={{ fontSize: 12, color: "var(--text-faint)" }}>Select text → “create clip from selection”</span>
+        <span style={{ fontSize: 12, color: "var(--text-faint)" }}>{editable ? "Click words to select a range · double-click to fix · ✕ to delete" : "Transcribe to edit"}</span>
       </div>
       <div className="panel" style={{ padding: "8px 4px", maxWidth: 760 }}>
         {lines.map((line) => {
@@ -187,18 +212,40 @@ export function TranscriptView({ lines, speakers }: { lines: TranscriptLine[]; s
                 <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)" }}>{fmtTC(line.t)}</div>
                 <div style={{ fontSize: 11.5, fontWeight: 600, color: sp.color }}>{sp.name}</div>
               </div>
-              <div style={{ lineHeight: 1.7, fontSize: 14 }}>
-                {line.tokens.map((tk, i) => (
-                  <span key={i} onClick={() => setActive(line.id + "-" + i)}
-                    style={{ cursor: "pointer", padding: "1px 1px", borderRadius: 3, background: active === line.id + "-" + i ? "var(--accent)" : "transparent", color: active === line.id + "-" + i ? "var(--accent-ink)" : "inherit" }}
-                    onMouseEnter={(e) => { if (active !== line.id + "-" + i) e.currentTarget.style.background = "var(--bg-3)"; }}
-                    onMouseLeave={(e) => { if (active !== line.id + "-" + i) e.currentTarget.style.background = "transparent"; }}>{tk.w} </span>
-                ))}
+              <div style={{ lineHeight: 1.9, fontSize: 14 }}>
+                {line.tokens.map((tk, i) => {
+                  if (editing && editing.idx === tk.idx) {
+                    return (
+                      <span key={i} style={{ display: "inline-flex", gap: 4, alignItems: "center", verticalAlign: "middle", margin: "0 3px" }}>
+                        <input autoFocus value={editing.text} onChange={(e) => setEditing({ idx: tk.idx, text: e.target.value })}
+                          onKeyDown={(e) => { if (e.key === "Enter" && editing.text.trim()) doOp(tk.idx, "set_text", editing.text.trim()); if (e.key === "Escape") setEditing(null); }}
+                          style={{ font: "inherit", fontSize: 14, padding: "1px 6px", borderRadius: 5, border: "1px solid var(--accent)", background: "var(--bg-1)", color: "var(--text)", width: Math.max(64, editing.text.length * 9) }} />
+                        <button className="btn subtle sm" title="save" style={{ padding: "2px 6px" }} onClick={() => editing.text.trim() && doOp(tk.idx, "set_text", editing.text.trim())}><Icon name="check" size={13} /></button>
+                        <button className="btn subtle sm" title="delete word" style={{ padding: "2px 6px", color: "var(--err, #e5484d)" }} onClick={() => doOp(tk.idx, "delete")}><Icon name="trash" size={13} /></button>
+                      </span>
+                    );
+                  }
+                  return (
+                    <span key={i}
+                      onClick={() => editable && setSel((c) => (!c || c.a !== c.b ? { a: tk.ti, b: tk.ti } : { a: c.a, b: tk.ti }))}
+                      onDoubleClick={() => editable && setEditing({ idx: tk.idx, text: tk.w })}
+                      title={editable ? "click: select · double-click: edit" : undefined}
+                      style={{ cursor: editable ? "pointer" : "default", padding: "1px 2px", borderRadius: 3, background: inSel(tk.ti) ? "var(--accent)" : "transparent", color: inSel(tk.ti) ? "var(--accent-ink)" : "inherit" }}>{tk.w} </span>
+                  );
+                })}
               </div>
             </div>
           );
         })}
       </div>
+      {editable && sel && selWords.length > 0 && (
+        <div className="row" style={{ position: "sticky", bottom: 16, marginTop: 16, gap: 12, padding: "10px 14px", borderRadius: 12, background: "var(--bg-1)", border: "1px solid var(--line-str)", boxShadow: "0 8px 30px rgba(0,0,0,0.18)", width: "fit-content" }}>
+          <Icon name="scissors" size={15} style={{ color: "var(--accent)" }} />
+          <span style={{ fontSize: 13 }}>{selWords.length} word{selWords.length === 1 ? "" : "s"} · {fmtTC(lo)}–{fmtTC(hi)}</span>
+          <Btn variant="primary" size="sm" icon="scissors" onClick={cutSelection}>Cut clip from selection</Btn>
+          <button className="btn subtle sm" onClick={() => setSel(null)}>Clear</button>
+        </div>
+      )}
     </div>
   );
 }
