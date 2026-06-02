@@ -399,3 +399,27 @@ export interface EventsSnapshot {
   transcripts: TranscribeJobView[];
   clips: ClipJobView[];
 }
+
+/** A transcript's v2 `words.json` as returned by `/transcripts/{tid}/export.json`. */
+export interface TranscriptWord {
+  idx: number;
+  w: string;
+  start: number | null;
+  end: number | null;
+  speaker?: string | null;
+  deleted?: boolean;
+}
+export interface TranscriptDocSegment {
+  start: number;
+  end: number;
+  text: string;
+  word_idxs: number[];
+  speaker: string | null;
+}
+export interface TranscriptDoc {
+  schema_version: number;
+  language?: string;
+  duration?: number;
+  words: TranscriptWord[];
+  segments: TranscriptDocSegment[];
+}

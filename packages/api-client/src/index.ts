@@ -16,6 +16,7 @@ import type {
   JobList,
   JobView,
   TranscribeJobView,
+  TranscriptDoc,
   TranscriptList,
 } from "@spool/types";
 
@@ -180,6 +181,10 @@ export class SpoolApiClient {
   }
   getTranscript(id: string): Promise<TranscribeJobView> {
     return this.get(`/transcripts/${encodeURIComponent(id)}`);
+  }
+  /** The full v2 transcript document (segments + words) for the viewer. */
+  getTranscriptDoc(id: string): Promise<TranscriptDoc> {
+    return this.get(`/transcripts/${encodeURIComponent(id)}/export.json`);
   }
   startTranscribe(parentJobId: string): Promise<TranscribeJobView> {
     return this.post(`/jobs/${encodeURIComponent(parentJobId)}/transcribe`);

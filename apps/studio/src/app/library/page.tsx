@@ -31,14 +31,6 @@ export default function LibraryPage() {
       note(source.id, "Couldn't start transcribe");
     }
   }
-  async function findMoments(source: JobView) {
-    try {
-      await client.findMoments(source.id, { mode: "funny" });
-      note(source.id, "Finding moments — see Queue");
-    } catch {
-      note(source.id, "Couldn't start — transcript needed");
-    }
-  }
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-6">
@@ -65,32 +57,40 @@ export default function LibraryPage() {
             const transcribed = tj?.status === "done";
             return (
               <Card key={source.id} className="flex flex-col overflow-hidden">
-                <div className="aspect-video bg-bg-3">
-                  {source.thumbnail ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={source.thumbnail} alt="" loading="lazy" className="h-full w-full object-cover" />
-                  ) : (
-                    <div className="grid h-full place-items-center text-text-faint">no thumbnail</div>
-                  )}
-                </div>
+                <Link href={`/sources/${source.id}`} className="block">
+                  <div className="aspect-video bg-bg-3">
+                    {source.thumbnail ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={source.thumbnail} alt="" loading="lazy" className="h-full w-full object-cover" />
+                    ) : (
+                      <div className="grid h-full place-items-center text-text-faint">no thumbnail</div>
+                    )}
+                  </div>
+                </Link>
                 <div className="flex flex-1 flex-col gap-3 p-4">
-                  <div className="flex-1">
-                    <p className="line-clamp-2 font-medium text-text">{source.title || source.url}</p>
+                  <Link href={`/sources/${source.id}`} className="flex-1">
+                    <p className="line-clamp-2 font-medium text-text hover:text-accent">{source.title || source.url}</p>
                     <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                       {tj?.duration_seconds ? <Badge>{fmtDuration(tj.duration_seconds)}</Badge> : null}
                       {transcribed && <Badge tone="ok">transcribed</Badge>}
                       {transcribing && <Badge tone="info">transcribing</Badge>}
                       {!tj && <Badge tone="warn">no transcript</Badge>}
                     </div>
-                  </div>
-                  {notice[source.id] ? (
-                    <p className="text-xs text-accent">{notice[source.id]}</p>
-                  ) : transcribed ? (
-                    <Button onClick={() => findMoments(source)}>Find moments</Button>
+                  </Link>
+                  {transcribed ? (
+                    <Link href={`/sources/${source.id}`}>
+                      <Button className="w-full">Open →</Button>
+                    </Link>
                   ) : transcribing ? (
-                    <Button variant="ghost" disabled>Transcribing…</Button>
+                    <Button variant="ghost" disabled>
+                      Transcribing…
+                    </Button>
+                  ) : notice[source.id] ? (
+                    <p className="text-xs text-accent">{notice[source.id]}</p>
                   ) : (
-                    <Button variant="ghost" onClick={() => transcribe(source)}>Transcribe</Button>
+                    <Button variant="ghost" onClick={() => transcribe(source)}>
+                      Transcribe
+                    </Button>
                   )}
                 </div>
               </Card>
