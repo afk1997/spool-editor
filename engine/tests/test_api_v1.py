@@ -1206,3 +1206,18 @@ def test_settings_clamps_numeric_and_rejects_bad_enums(client):
     assert c.patch("/api/v1/settings", json={"fast_default": "yes"}).status_code == 400
     # the rejected writes left the store untouched
     assert c.get("/api/v1/settings").get_json()["default_preset"] == "tiktok"
+
+
+def test_create_app_applies_persisted_concurrency_at_startup(tmp_path, monkeypatch):
+    """The "applies on restart" contract: a UI-written concurrency in the settings store wins
+    over the env default at create_app; the env still governs an unconfigured store."""
+    import json
+    import app as _app_module
+    dl = tmp_path / "downloads"
+    dl.mkdir(parents=True)
+    (dl / "settings.json").write_text(json.dumps({"clip_workers": 5, "max_workers": 7}))
+    monkeypatch.setattr(_app_module, "DOWNLOAD_DIR", dl)
+    monkeypatch.setenv("TROVE_RATE_LIMIT", "0")
+    application = _app_module.create_app()
+    assert application.extensions["trove.clips"].max_workers == 5   # render pool
+    assert application.extensions["trove.jobs"].max_workers == 7    # download pool
