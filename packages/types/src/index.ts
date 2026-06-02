@@ -226,3 +226,176 @@ export interface ProgressEvent {
   /** Pre-formatted, human-readable line (e.g. "Downloading… 42% · 3.1 MB/s · ETA 0:18"). */
   humanSummary?: string;
 }
+
+// ═════════════════════════ Wire types — the api_v1 contract ═════════════════════════
+//
+// These mirror routes/api_v1.py's JSON **exactly** (snake_case), so the typed client and
+// the screens speak the same shape the engine emits — no mapping layer to drift. The
+// camelCase interfaces above are the aspirational domain model; the `*View` types below
+// are what actually crosses the wire today (PROGRESS: "Phase-1 wiring reconciles the TS
+// types with the real api_v1 shape"). When they diverge, the wire types win.
+
+/** The pre-formatted, agent/CLI-friendly strings every job view carries (`_job_view.human`). */
+export interface HumanSummary {
+  progress?: string;
+  downloaded?: string;
+  size?: string;
+  speed?: string;
+  eta?: string;
+  elapsed?: string;
+  audio_duration?: string;
+  summary: string;
+}
+
+export interface Health {
+  ok: boolean;
+  version: string;
+}
+
+/** A download job (`_job_view`). */
+export interface JobView {
+  id: string;
+  url: string;
+  title: string;
+  status: JobStatus | "downloading";
+  filename: string | null;
+  thumbnail: string | null;
+  format_choice: string | null;
+  downloaded_bytes: number;
+  total_bytes: number;
+  speed_bps: number | null;
+  eta_seconds: number | null;
+  fragment_index: number | null;
+  fragment_count: number | null;
+  progress_pct: number;
+  elapsed_seconds: number;
+  auto_transcribe: boolean;
+  error_category: string | null;
+  error_message: string | null;
+  human: HumanSummary;
+}
+
+/** A transcribe job (`_tj_view`). */
+export interface TranscribeJobView {
+  id: string;
+  parent_job_id: string;
+  status: TranscribeStatus;
+  model_used: string;
+  progress_pct: number;
+  duration_seconds: number;
+  language_detected: string;
+  elapsed_seconds: number;
+  error_category: string | null;
+  error_message: string | null;
+  diarization_status: string | null;
+  diarization_error: string | null;
+  speaker_count: number | null;
+  human: HumanSummary;
+}
+
+export type ClipKind = "moments" | "cut" | "reframe" | "caption" | "export" | "pipeline";
+
+/** One moment from a `find_moments` job's `result.candidates`. */
+export interface MomentCandidate {
+  start: number;
+  end: number;
+  title: string;
+  rationale: string;
+  mode: string;
+  signals: string[];
+  source_id?: string;
+}
+
+/** A clip/render job's `result` — fields present depend on `kind`. */
+export interface ClipJobResult {
+  candidates?: MomentCandidate[];
+  count?: number;
+  mode?: string;
+  clip_id?: string;
+  clip_path?: string;
+  reframed_path?: string;
+  captioned_path?: string;
+  ass_path?: string;
+  render_id?: string;
+  output_path?: string;
+  preset?: string;
+  style?: string;
+  aspect?: string;
+  reframe_mode?: string;
+  source?: string;
+  segments?: SpeakerSegment[];
+  start?: number;
+  end?: number;
+}
+
+/** A clip/render job (`_clip_job_view`) — the render-queue entry. */
+export interface ClipJobView {
+  id: string;
+  kind: ClipKind;
+  source_id: string | null;
+  clip_id: string | null;
+  status: TranscribeStatus; // queued|running|done|error|cancelled
+  progress_pct: number;
+  stage: string | null;
+  elapsed_seconds: number;
+  params: Record<string, unknown>;
+  result: ClipJobResult;
+  error_category: string | null;
+  error_message: string | null;
+  human: HumanSummary;
+}
+
+/** Paginated list envelope (`{<key>, total, returned, limit, offset}`). */
+export interface Paginated {
+  total: number;
+  returned: number;
+  limit: number;
+  offset: number;
+}
+export interface JobList extends Paginated {
+  jobs: JobView[];
+}
+export interface TranscriptList extends Paginated {
+  transcripts: TranscribeJobView[];
+}
+export interface ClipJobList extends Paginated {
+  clip_jobs: ClipJobView[];
+}
+
+/** The feature / limit / format registry (`/capabilities`). */
+export interface Capabilities {
+  api_version: string;
+  schema_version: number;
+  auth_required: boolean;
+  features: Record<string, boolean>;
+  formats: {
+    transcript_export: string[];
+    clip_aspects?: string[];
+    reframe_modes?: string[];
+    caption_styles?: string[];
+    render_presets?: string[];
+  };
+  scopes: Record<string, string>;
+  limits: Record<string, unknown>;
+  openapi_url: string;
+}
+
+/** Dependency-doctor report (`/doctor`) — drives S0 Onboarding. */
+export interface DoctorTool {
+  present: boolean;
+  version: string | null;
+}
+export interface DoctorReport {
+  machine: Record<string, unknown>;
+  tools: Record<string, DoctorTool>;
+  encoders: string[];
+  ok: boolean;
+}
+
+/** One SSE frame from `/events` — the whole live state (jobs + transcripts + clips). */
+export interface EventsSnapshot {
+  ts: number;
+  jobs: JobView[];
+  transcripts: TranscribeJobView[];
+  clips: ClipJobView[];
+}
