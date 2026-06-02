@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { useLive } from "@/lib/engine-context";
 import { cn, StatusDot } from "./ui";
 import { CommandPalette } from "./command-palette";
+import { AgentPanel } from "./agent-panel";
 
 /** The persistent studio chrome: icon+label rail, top bar, and a live status/queue bar —
  *  all driven by the SSE snapshot (spec §6, the demo's layout). Labels sit under each rail
@@ -22,6 +23,7 @@ const NAV = [
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [agentOpen, setAgentOpen] = useState(false);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -68,15 +70,29 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       {/* top bar */}
       <header className="col-start-2 flex items-center justify-between border-b border-line bg-bg-1 px-5">
         <span className="font-display text-lg font-semibold tracking-tight text-text">Spool</span>
-        <button
-          type="button"
-          onClick={() => setPaletteOpen(true)}
-          aria-label="Open command palette"
-          className="flex items-center gap-2 rounded-sm border border-line bg-bg-2 px-2.5 py-1 text-xs text-text-faint hover:text-text-dim focus-visible:outline-2 focus-visible:outline-accent"
-        >
-          Search
-          <kbd className="font-mono">⌘K</kbd>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setPaletteOpen(true)}
+            aria-label="Open command palette"
+            className="flex items-center gap-2 rounded-sm border border-line bg-bg-2 px-2.5 py-1 text-xs text-text-faint hover:text-text-dim focus-visible:outline-2 focus-visible:outline-accent"
+          >
+            Search
+            <kbd className="font-mono">⌘K</kbd>
+          </button>
+          <button
+            type="button"
+            onClick={() => setAgentOpen((o) => !o)}
+            aria-label="Toggle agent panel"
+            aria-pressed={agentOpen}
+            className={cn(
+              "rounded-sm border border-line px-2.5 py-1 text-xs font-medium focus-visible:outline-2 focus-visible:outline-accent",
+              agentOpen ? "bg-accent text-accent-ink" : "bg-bg-2 text-text-dim hover:text-text",
+            )}
+          >
+            Agent
+          </button>
+        </div>
       </header>
 
       {/* main */}
@@ -86,6 +102,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <StatusBar />
 
       {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
+      {agentOpen && <AgentPanel onClose={() => setAgentOpen(false)} />}
     </div>
   );
 }
