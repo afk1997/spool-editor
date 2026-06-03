@@ -27,10 +27,17 @@
 > start/end so the editor showed the whole transcript from 0:00 (wrong captions). Pre-existing (the
 > old `-c copy` cut crashed identically); fixed by per-param keyframe reduction + a hard cap. Engine
 > **682 tests** + studio typecheck/lint/12 vitest/build + **e2e (51.2s)** green. Commits `e0b96f4`
-> (cut) · `5fbf836` (diar) · `<face-track>`.
-> **▶ NEXT:** manual testing (engine+studio left running on :8899/:3000), then Phase 3 (glass-box
-> ranking · watch-folder · recipes). Open follow-up: decouple VAD word-realignment from the
-> `TROVE_DIARIZATION` flag (measure first) — see "Next session" notes near the bottom.
+> (cut) · `5fbf836` (diar) · `9a3ec79` (face-track). **Framing/active-speaker re-verified** on a real
+> back-and-forth (Karpathy↔Zhan): the pan follows the talker through camera cuts incl. a wide two-shot
+> (100% face-present, centered) — measurement only, no code change.
+> **▶ NEXT — a post-Phase-2 *quality pass*, then Phase 3.** Kaivan scoped it (2026-06-03): see
+> **`docs/IMPROVEMENTS-PLAN.md`**. **In:** (A) decouple VAD realignment from the `TROVE_DIARIZATION`
+> flag · (B) fuse audio diarization into the auto-pan active-speaker pick · (C) lift diarization
+> accuracy · (D) caption craft (speaker color / line-breaks / emphasis) · (E) richer moment-finding
+> signals + feedback re-rank (**no local LLM** — keep the codex bridge) · (F) perf + a real-render
+> editor preview. **Deferred to after Phase 3 unless something underperforms:** per-stage failure
+> surfacing + Retry · disk↔store reconciliation / no-redownload · widened e2e + quality gate.
+> Engine+studio left running on :8899/:3000 for manual testing.
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,
