@@ -7,8 +7,15 @@
 > **Last updated:** 2026-06-03 · **Phase 0 — ✅ · Phase 1 — ✅ · Phase 2 — ✅ COMPLETE** (all 4 spec
 > done-whens + all 8 work-items: S7 reframe · S8 caption · transcript editing · S9 brand kits · library
 > search · S6 editor timeline · **Settings config writes** · **perf/virtualization** + an explicit, shipped
-> **FTS5** decision (additive trigram index). Engine **665 tests** + studio typecheck/lint/12 vitest/build
+> **FTS5** decision (additive trigram index). Engine **676 tests** + studio typecheck/lint/12 vitest/build
 > + Playwright e2e all green).
+> **Post-Phase-2 polish (live dogfooding, this session) — ✅ done:** honest transcribing state · Discovery
+> tabs filter+accumulate+Merge-next · CORS PATCH/DELETE · **cut→review→render flow** (Make clips cuts→Clips
+> tab; editor plays the real clip with live synced captions; Render burns) · editor aspect/Pan-Split-Center
+> live preview · **per-shot face-tracking reframe quality stack** (YuNet + adaptive zoom + rule-of-thirds +
+> stabilization + active-speaker + a measurement harness). Details in "Post-Phase-2 UX fixes" below.
+> **▶ NEXT (new session, before Phase 3):** caption↔audio sync + diarization accuracy — see
+> "Next session — caption sync + diarization" near the bottom. Then Phase 3 after more manual testing.
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,
@@ -405,6 +412,38 @@ Dogfooding turned up real flow/honesty bugs — all fixed + verified, suites + e
   the most prominent upper face — single-face shots unchanged). Measured on the real talk:
   center_dx 0.119→0.08, eyes on the upper third (y≈0.38), face-present 100%; close shots framed
   head-and-shoulders. ffmpeg crop w/h/x/y all vary over time. Pure logic TDD'd; suite 676 green.
+
+### Next session — caption↔audio sync + diarization accuracy (before Phase 3)
+
+Reported live: **captions feel out of sync with the audio**, and **diarization could be more
+accurate**. These are *two different things* — diagnose before fixing:
+
+- **Caption sync is driven by WORD timestamps + the clip window, NOT speaker diarization.** Captions
+  come from `words.json` (whisper.cpp word times), sliced to the clip `[start,end]` and re-based to 0
+  by `clip/captioner.py`, then burned (libass) onto the reframed cut.
+  - **Prime suspect:** the cut is **lossless `ffmpeg -c copy`** (`clip/cutter.py`), which is
+    **keyframe-aligned** — input-seek lands on the nearest keyframe, so the cut clip's *actual* first
+    frame ≠ the requested `start`. But the captioner re-bases word times assuming the clip starts
+    exactly at `start` → a constant offset = desync. **Verify:** ffprobe the cut clip's real
+    start/first-PTS vs `start`; if they differ, that's the drift. Fix options: accurate seek
+    (`-ss` *after* `-i`, or a re-encode for the captioned path), or compute the cut's true start and
+    re-base captions to it, or burn captions against the source timeline then cut.
+  - **Second suspect:** VAD word-realignment (`transcriber.realign_words_to_vad` + silero-vad) that
+    fixes whisper's post-silence drift — confirm it's applied + accurate; and the base whisper word
+    timestamps (model/params).
+  - **Verify with a metric, like the reframe harness:** burn captions on a known clip, then check the
+    active-word time vs the audio (or vs the word's true time) — drift in ms.
+- **Diarization accuracy** (separate, real goal): `engine/diarizer.py` (resemblyzer embeddings + VAD)
+  → speaker count + turn boundaries, fused with ROI in `clip/reframe.py` and surfaced as the
+  speaker-attributed transcript lines. Reframe speaker-following is now face-tracking (less reliant on
+  diar), so diarization mainly affects transcript speaker labels + the active-speaker fusion. Improve:
+  VAD tightness, embedding clustering, min-turn smoothing; measure speaker_count vs ground truth on a
+  known 2-speaker clip.
+
+Same discipline as the shipped slices: TDD the engine, verify on real media (re-import
+`jNQXAC9IVRw`, transcribe, clip, check caption timing against audio), measure, commit each verified
+slice, keep this file updated, suites + e2e green. **Reframe quality stack (YuNet face-tracking) is
+DONE — don't redo it.** Then Phase 3 after more manual testing.
 
 ## What's verified now
 
