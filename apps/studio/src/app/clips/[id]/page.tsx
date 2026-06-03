@@ -115,8 +115,12 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   //  - any other aspect the user picks here → re-frame LIVE by playing the original cut center-cropped
   //    (object-fit: cover) into the chosen frame, so 16:9 / 1:1 / 4:5 actually change the picture.
   //    The exact speaker-pan at that aspect bakes in on Render.
+  // The baked reframed cut is the real diar⊕ROI *pan* at 9:16 — show it only when the picks match
+  // it. "Center" (and other aspects) preview accurately as a centered crop of the original cut
+  // (object-fit: cover). "Split" can't be faked with one <video> (it stacks both speakers), so we
+  // show the cut + a hint and bake the real layout on Render.
   const reframedAspect = clip.aspect || "9:16";
-  const showReframed = !renderSrc && aspect === reframedAspect && artifact === "reframed";
+  const showReframed = !renderSrc && reframe === "pan" && aspect === reframedAspect && artifact === "reframed";
   const previewKind: "reframed" | "clip" = showReframed ? "reframed" : "clip";
   const previewSrc = renderSrc ?? ctx.client.clipArtifactUrl(id, previewKind);
   const previewFit: "contain" | "cover" = renderSrc || showReframed ? "contain" : "cover";
@@ -153,6 +157,9 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
               {!renderSrc && (
                 <>
                   {safe && <div style={{ position: "absolute", inset: "8% 6%", border: "1px dashed rgba(255,255,255,0.3)", borderRadius: 6, pointerEvents: "none" }} />}
+                  {reframe === "split" && (
+                    <div style={{ position: "absolute", top: "9%", left: "50%", transform: "translateX(-50%)", padding: "4px 9px", borderRadius: 6, background: "rgba(0,0,0,0.66)", color: "#fff", fontSize: 11, fontFamily: "var(--font-mono)", pointerEvents: "none", whiteSpace: "nowrap" }}>split · both speakers stack on Render</div>
+                  )}
                   {capLine.length > 0 && (
                     <div style={{ position: "absolute", left: 0, right: 0, bottom: "15%", textAlign: "center", padding: "0 8%", pointerEvents: "none", fontFamily: "var(--font-caption)", fontSize: 19, lineHeight: 1.2, textShadow: "0 2px 7px #000", WebkitTextStroke: "0.5px rgba(0,0,0,.6)", textTransform: style === "opus" ? "uppercase" : "none" }}>
                       {capLine.map((w) => <span key={w.idx} style={{ color: w.idx === activeWordIdx ? hl : "#fff", fontWeight: w.idx === activeWordIdx ? 800 : 600 }}>{w.w} </span>)}
@@ -160,7 +167,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
                   )}
                 </>
               )}
-              <div className="badge" style={{ position: "absolute", top: 8, left: 8 }}>{renderSrc ? "rendered" : "live preview"}</div>
+              <div className="badge" style={{ position: "absolute", top: 8, left: 8 }}>{renderSrc ? "rendered" : `live · ${reframe}`}</div>
             </div>
           </div>
           <div className="row" style={{ gap: 14, padding: "10px 18px", borderTop: "1px solid var(--line)", flex: "none" }}>
