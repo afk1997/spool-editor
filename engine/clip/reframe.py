@@ -22,6 +22,7 @@ import sys
 import tempfile
 
 from . import _ffmpeg
+from . import exporter
 
 # Vendored back-half (kept verbatim, MIT — THIRD_PARTY_LICENSES.md); invoked as CLI tools.
 _ROI_MOTION_SCRIPT = os.path.join(os.path.dirname(__file__), "backhalf", "roi_motion.py")
@@ -274,11 +275,13 @@ def render(
     out_w, out_h = _ASPECTS[aspect]
     src_w, src_h = probe_dimensions(clip_path)
     base = ["ffmpeg", "-y", "-i", clip_path]
+    # Intermediate pass → hardware encoder + visually-lossless quality (was an implicit ~CRF 23).
+    venc = exporter.intermediate_encode_flags()
 
     if mode == "split":
         argv = base + [
             "-filter_complex", _split_filter(track, out_w, out_h),
-            "-map", "[vout]", "-map", "0:a?", "-c:a", "copy", out_path,
+            "-map", "[vout]", "-map", "0:a?", *venc, "-c:a", "copy", out_path,
         ]
     else:
         if mode == "pan" and face_timeline:
@@ -287,7 +290,7 @@ def render(
             vf = _pan_vf(track, src_w, src_h, out_w, out_h, crop_margin)
         else:
             vf = _center_vf(src_w, src_h, out_w, out_h)
-        argv = base + ["-vf", vf, "-c:a", "copy", out_path]
+        argv = base + ["-vf", vf, *venc, "-c:a", "copy", out_path]
 
     _ffmpeg.run(
         argv,

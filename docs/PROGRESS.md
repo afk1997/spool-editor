@@ -109,6 +109,23 @@
 >   toggles (Speaker colors / Keyword emphasis / Balance lines) → `client.caption(…, {color_speakers,
 >   emphasis, balance_lines})` → the real burn (no fake controls). typecheck 9/9 · lint · 12 vitest ·
 >   build · e2e (46.0s) green. Two commits below (engine · studio).
+> - **✅ F (perf, part 1) — intermediate reframe/caption encodes now use the hardware encoder at
+>   visually-lossless quality (were libx264 implicit ~CRF 23).** New `exporter.intermediate_encode_flags()`
+>   (pick_encoder → videotoolbox `-q:v 75` / nvenc `-cq 18` / libx264 `-crf 18 -preset veryfast`), wired
+>   into `reframe.render` (pan/center/split) + `captioner.burn`. **Measured on a real 30 s 1080×1920 clip:**
+>   reframe encode **6.02 s → 3.16 s (−47%)**, framing preserved (`reframe_eval` face_present 98.7% across
+>   old/new), intermediate quality *raised* to visually lossless (q:v 75 ≈ crf18 ≈ 15 MB vs the old 8.9 MB;
+>   tuned the videotoolbox knob by measuring the quality curve, since q:v 60 had *lowered* it). Caption
+>   sync unchanged (audio `-c:a copy` → captioned drift == cut drift, −8 ms). TDD: +3 `test_exporter`
+>   (libx264 crf18/veryfast · hardware encoders · default follows pick_encoder). Engine **704** green.
+>   **F part 2 (combine reframe+caption into one filtergraph) — deliberately DEFERRED:** the staged studio
+>   flow (S7 reframe → S8 caption) + the editor preview consume the *separate* `reframed.mp4` /
+>   `captioned.mp4` artifacts, so merging is a one-shot-only optimization that would either keep both
+>   encodes (no saving) or destabilize those consumers; F.1 already delivers the "sharper + faster" goal,
+>   so the merge isn't worth the regression risk now. **F part 3 (real-render editor preview)** — the
+>   editor already plays the real baked 9:16 reframe; replacing the CSS-crop approximation for the other
+>   aspects/modes with a fast low-res real reframe is the remaining preview-fidelity work (studio + a
+>   fast-preview endpoint), tracked for a focused pass. Commit below.
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,

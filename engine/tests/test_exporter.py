@@ -69,3 +69,27 @@ def test_pick_encoder(gpu, enc):
 def test_export_rejects_unknown_preset(tmp_path):
     with pytest.raises(ValueError, match="unknown preset"):
         exporter.export("clip.mp4", preset="myspace", out_path=str(tmp_path / "o.mp4"))
+
+
+# ---- intermediate encode flags (item F): hardware + visually-lossless for reframe/caption ----
+
+def test_intermediate_flags_libx264_is_sharp_and_fast():
+    """The software fallback: CRF 18 (sharper than the old implicit ~23) at veryfast."""
+    f = exporter.intermediate_encode_flags("libx264")
+    assert f[:2] == ["-c:v", "libx264"]
+    assert _val(f, "-crf") == "18"
+    assert _val(f, "-preset") == "veryfast"
+
+
+def test_intermediate_flags_use_hardware_encoders():
+    vt = exporter.intermediate_encode_flags("h264_videotoolbox")
+    assert _val(vt, "-c:v") == "h264_videotoolbox" and "-crf" not in vt
+    nv = exporter.intermediate_encode_flags("h264_nvenc")
+    assert _val(nv, "-c:v") == "h264_nvenc"
+
+
+def test_intermediate_flags_default_follow_pick_encoder(monkeypatch):
+    monkeypatch.setattr(machine, "_detect_gpu", lambda: "metal")
+    assert _val(exporter.intermediate_encode_flags(), "-c:v") == "h264_videotoolbox"
+    monkeypatch.setattr(machine, "_detect_gpu", lambda: "cpu")
+    assert _val(exporter.intermediate_encode_flags(), "-c:v") == "libx264"

@@ -17,6 +17,7 @@ import sys
 import tempfile
 
 from . import _ffmpeg
+from . import exporter
 
 # The vendored back-half script (kept verbatim, MIT — see THIRD_PARTY_LICENSES.md);
 # it's a CLI tool, so we invoke it as one.
@@ -211,6 +212,8 @@ def burn(
         "ffmpeg", "-y",
         "-i", clip_path,
         "-vf", f"subtitles={_escape_filter_path(ass_path)}",
+        # Intermediate pass → hardware encoder + visually-lossless quality (was an implicit ~CRF 23).
+        *exporter.intermediate_encode_flags(),
         "-c:a", "copy",
         out_path,
     ]

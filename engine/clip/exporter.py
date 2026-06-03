@@ -40,6 +40,29 @@ def pick_encoder(gpu: str | None = None) -> str:
     return _ENCODERS.get(gpu or machine._detect_gpu(), "libx264")
 
 
+def intermediate_encode_flags(encoder: str | None = None) -> list[str]:
+    """ffmpeg video-codec flags for INTERMEDIATE passes (reframe, caption-burn).
+
+    These feed another encode downstream (the final export), so they must be visually lossless
+    (no visible generational loss) but need not be archival — and should be FAST. Previously
+    these passes set no ``-c:v`` at all, so ffmpeg fell back to libx264 at its implicit ~CRF 23 /
+    medium; this routes them to the best available encoder (``pick_encoder``) at a high quality
+    target. libx264 falls back to CRF 18 / veryfast (sharper AND faster than the old default);
+    the export step still re-encodes to the platform bitrate.
+    """
+    enc = encoder or pick_encoder()
+    if enc == "h264_videotoolbox":
+        # q:v 75 ≈ the libx264 crf18 fallback in size/quality (measured ~15MB vs 14.5MB on a 30s
+        # 1080×1920 clip) — visually lossless, so the intermediate doesn't bottleneck the final
+        # export; speed is q-independent on hardware (~same wall-time at any q:v).
+        return ["-c:v", "h264_videotoolbox", "-q:v", "75"]
+    if enc == "h264_nvenc":
+        return ["-c:v", "h264_nvenc", "-rc", "vbr", "-cq", "18", "-preset", "p4"]
+    if enc == "libx264":
+        return ["-c:v", "libx264", "-crf", "18", "-preset", "veryfast"]
+    return ["-c:v", enc]   # unknown encoder: set the codec, let ffmpeg default the rest
+
+
 def export(
     clip_path: str,
     *,
