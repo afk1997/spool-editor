@@ -187,19 +187,32 @@ function mapDownloads(snap: EventsSnapshot | null): SpoolDownload[] {
   })).reverse();
 }
 
-/** Build the demo's Candidate shape from a source's latest `find_moments` result.
- *  `signals` are the real glass-box reasons; `excerpt` is the real transcript text in range. */
+/** Build the demo's Candidate shape from a source's `find_moments` results.
+ *  `signals` are the real glass-box reasons; `excerpt` is the real transcript text in range.
+ *
+ *  Accumulates across EVERY completed scan for the source (oldest→newest), not just the latest —
+ *  so scanning another mode ADDS to the pool instead of wiping it, and the mode tabs filter a
+ *  growing set. Deduped by mode+range so re-running a mode doesn't double up. */
 export function mapCandidates(snap: EventsSnapshot | null, sourceId: string | undefined, words?: TranscriptWord[]): Candidate[] {
   if (!snap || !sourceId) return [];
-  const job = snap.clips
-    .filter((c) => c.kind === "moments" && c.source_id === sourceId && c.status === "done" && c.result.candidates?.length)
-    .at(-1);
-  if (!job?.result.candidates) return [];
-  return job.result.candidates.map((m, i) => ({
-    id: `${job.id}-${i}`, title: m.title, start: m.start, end: m.end, mode: cap(m.mode),
-    why: m.rationale, excerpt: words ? excerptFor(words, m.start, m.end) : "", signals: m.signals ?? [],
-    sel: i < 3, source_id: sourceId,
-  }));
+  const jobs = snap.clips.filter(
+    (c) => c.kind === "moments" && c.source_id === sourceId && c.status === "done" && c.result.candidates?.length,
+  );
+  const out: Candidate[] = [];
+  const seen = new Set<string>();
+  for (const job of jobs) {
+    (job.result.candidates ?? []).forEach((m, i) => {
+      const key = `${(m.mode || "").toLowerCase()}|${Math.round(m.start)}|${Math.round(m.end)}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({
+        id: `${job.id}-${i}`, title: m.title, start: m.start, end: m.end, mode: cap(m.mode),
+        why: m.rationale, excerpt: words ? excerptFor(words, m.start, m.end) : "", signals: m.signals ?? [],
+        sel: out.length < 3, source_id: sourceId, // the first few stay pre-selected for a quick "Make clips"
+      });
+    });
+  }
+  return out;
 }
 
 function excerptFor(words: TranscriptWord[], start: number, end: number): string {

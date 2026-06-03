@@ -33,7 +33,7 @@ function SignalPanel({ signals }: { signals: string[] }) {
   );
 }
 
-export function CandidateCard({ c, selected, onToggle, onAdjust }: { c: Candidate; selected: boolean; onToggle: (id: string) => void; onAdjust?: (c: Candidate) => void }) {
+export function CandidateCard({ c, selected, onToggle, onAdjust, onMerge }: { c: Candidate; selected: boolean; onToggle: (id: string) => void; onAdjust?: (c: Candidate) => void; onMerge?: (c: Candidate) => void }) {
   const [showSignals, setShowSignals] = useState(false);
   const [hover, setHover] = useState(false);
   return (
@@ -64,7 +64,7 @@ export function CandidateCard({ c, selected, onToggle, onAdjust }: { c: Candidat
       </div>
       <div className="row" style={{ padding: "10px 14px", borderTop: "1px solid var(--line)", gap: 8, background: "var(--bg-1)" }}>
         <Btn variant="ghost" size="sm" icon="crop" onClick={() => onAdjust && onAdjust(c)}>Adjust in/out</Btn>
-        <Btn variant="ghost" size="sm" icon="layers">Merge next</Btn>
+        <Btn variant="ghost" size="sm" icon="layers" onClick={() => onMerge?.(c)} disabled={!onMerge} title={onMerge ? "Extend this clip to include the next moment" : "No moment after this one to merge"}>Merge next</Btn>
         <span className="spacer" />
         <Btn variant={selected ? "primary" : "ghost"} size="sm" icon={selected ? "check" : "plus"} onClick={() => onToggle(c.id)}>{selected ? "Selected" : "Accept"}</Btn>
       </div>
@@ -105,6 +105,9 @@ export function AdjustModal({ c, onClose, onSave }: { c: Candidate; onClose: () 
 }
 
 const MODES = ["All", "Funny", "Insightful", "Hot-take", "Story", "How-to", "Q&A"];
+// The engine mode strings (canonical, hyphens kept — they key clip.moments._MODE_GUIDES, and the
+// candidate's mode round-trips back through these so the tab filter matches).
+const ENGINE_MODES = MODES.slice(1).map((m) => m.toLowerCase());
 
 export function DiscoveryBody({ candidates, sourceId, finding }: { candidates: Candidate[]; sourceId: string; finding: boolean }) {
   const ctx = useSpool();
@@ -118,25 +121,61 @@ export function DiscoveryBody({ candidates, sourceId, finding }: { candidates: C
   const isSel = (c: Candidate) => overrides[c.id] ?? c.sel;
   const sel = merged.filter(isSel);
   const toggle = (id: string) => setOverrides((o) => { const c = candidates.find((x) => x.id === id); return { ...o, [id]: !(o[id] ?? c?.sel ?? false) }; });
-  const refind = (m: string) => { setMode(m); if (m !== "All") ctx.client.findMoments(sourceId, { mode: m.toLowerCase().replace("-", "") }).catch(() => {}); };
-  const findMore = () => { ctx.client.findMoments(sourceId, { mode: mode === "All" ? "funny" : mode.toLowerCase().replace("-", "") }).catch(() => {}); ctx.pushToast({ icon: "sparkles", tone: "info", title: "Finding more moments", body: "Scanning the transcript…" }); };
-
   const view = mode === "All" ? merged : merged.filter((c) => c.mode.toLowerCase() === mode.toLowerCase());
+  const countFor = (m: string) => (m === "All" ? merged.length : merged.filter((c) => c.mode.toLowerCase() === m.toLowerCase()).length);
+
+  // The mode tabs FILTER the already-found candidates — instant, no re-scan, nothing lost.
+  // Finding more is the explicit action below; candidates accumulate (mapCandidates), so a new
+  // scan never discards what's already on screen.
+  const findMore = () => {
+    const modes = mode === "All" ? ENGINE_MODES : [mode.toLowerCase()];
+    modes.forEach((m) => ctx.client.findMoments(sourceId, { mode: m }).catch(() => {}));
+    ctx.pushToast({ icon: "sparkles", tone: "info",
+      title: mode === "All" ? "Scanning every mode" : `Finding more ${mode.toLowerCase()} moments`,
+      body: "New moments appear here as each scan finishes — your current picks stay put." });
+  };
+  // "Merge next": extend this clip's out-point to the next candidate's end (one clip spanning both).
+  const mergeNext = (c: Candidate) => {
+    const idx = view.findIndex((x) => x.id === c.id);
+    const next = view[idx + 1];
+    if (!next) return;
+    setRanges((r) => ({ ...r, [c.id]: { start: c.start, end: next.end } }));
+    setOverrides((o) => ({ ...o, [c.id]: true, [next.id]: false }));
+    ctx.pushToast({ icon: "layers", tone: "info", title: "Merged with the next moment", body: `Clip now spans ${fmtTC(c.start)} → ${fmtTC(next.end)}` });
+  };
 
   return (
     <div>
       <div className="row" style={{ gap: 10, marginBottom: 18, flexWrap: "wrap" }}>
         <div className="seg neutral" style={{ flexWrap: "wrap" }}>
-          {MODES.map((m) => <button key={m} className={mode === m ? "on" : ""} onClick={() => (m === "All" ? setMode("All") : refind(m))}>{m}</button>)}
+          {MODES.map((m) => {
+            const n = countFor(m);
+            return <button key={m} className={mode === m ? "on" : ""} onClick={() => setMode(m)}>{m}{n > 0 && <span className="mono" style={{ marginLeft: 6, opacity: 0.55, fontSize: 11 }}>{n}</span>}</button>;
+          })}
         </div>
         <div className="spacer" />
-        <Btn variant="ghost" icon="refresh" onClick={findMore}>Find more</Btn>
+        <Btn variant="ghost" icon="refresh" onClick={findMore}>{mode === "All" ? "Scan all modes" : `Find more ${mode.toLowerCase()}`}</Btn>
       </div>
 
-      {finding ? (
+      {/* Existing candidates always stay on screen — a scan-in-progress shows a banner above them,
+          never a wipe-to-skeletons (that was the bug). Skeletons only when there's nothing yet. */}
+      {view.length > 0 && (
+        <>
+          {finding && (
+            <div className="row" style={{ gap: 10, marginBottom: 14, color: "var(--accent)", fontSize: 13 }}>
+              <Icon name="sparkles" size={15} style={{ animation: "pulse 1.5s infinite" }} /> Scanning for more — your current moments stay below…
+            </div>
+          )}
+          <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingBottom: sel.length > 0 ? 80 : 0 }}>
+            {view.map((c, i) => <CandidateCard key={c.id} c={c} selected={isSel(c)} onToggle={toggle} onAdjust={setAdjust} onMerge={i < view.length - 1 ? mergeNext : undefined} />)}
+          </div>
+        </>
+      )}
+
+      {view.length === 0 && finding && (
         <div>
           <div className="row" style={{ gap: 10, marginBottom: 16, color: "var(--accent)", fontSize: 13 }}>
-            <Icon name="sparkles" size={16} style={{ animation: "pulse 1.5s infinite" }} /> Scanning transcript for {mode.toLowerCase()} moments…
+            <Icon name="sparkles" size={16} style={{ animation: "pulse 1.5s infinite" }} /> Scanning transcript{mode === "All" ? "" : ` for ${mode.toLowerCase()} moments`}…
           </div>
           {[0, 1, 2].map((i) => (
             <div key={i} className="card" style={{ display: "flex", gap: 14, padding: 13, marginBottom: 12 }}>
@@ -145,17 +184,18 @@ export function DiscoveryBody({ candidates, sourceId, finding }: { candidates: C
             </div>
           ))}
         </div>
-      ) : view.length === 0 ? (
-        <Empty icon="scan" title="No strong moments yet" action={<Btn variant="primary" icon="sparkles" onClick={findMore}>Find moments</Btn>}>
-          Run discovery to scan this transcript for clip-worthy moments — punchlines, hot-takes, stories and more.
-        </Empty>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingBottom: sel.length > 0 ? 80 : 0 }}>
-          {view.map((c) => <CandidateCard key={c.id} c={c} selected={isSel(c)} onToggle={toggle} onAdjust={setAdjust} />)}
-        </div>
       )}
 
-      {sel.length > 0 && !finding && (
+      {view.length === 0 && !finding && (
+        <Empty icon="scan" title={mode === "All" ? "No moments yet" : `No ${mode.toLowerCase()} moments yet`}
+          action={<Btn variant="primary" icon="sparkles" onClick={findMore}>{mode === "All" ? "Scan all modes" : `Find ${mode.toLowerCase()} moments`}</Btn>}>
+          {mode === "All"
+            ? "Scan the transcript for clip-worthy moments — punchlines, hot-takes, stories and more. Each mode you scan adds to its tab."
+            : `No ${mode.toLowerCase()} moments found yet — scan for them. Moments you've already found stay under their own tabs.`}
+        </Empty>
+      )}
+
+      {sel.length > 0 && (
         <div style={{ position: "sticky", bottom: 0, marginTop: 14, padding: "12px 16px", background: "var(--bg-1)", border: "1px solid var(--line-str)", borderRadius: "var(--radius)", boxShadow: "var(--shadow-pop)", display: "flex", alignItems: "center", gap: 14 }}>
           <span className="chip solid">{sel.length}</span>
           <span style={{ fontSize: 13.5, fontWeight: 600 }}>candidates selected</span>
