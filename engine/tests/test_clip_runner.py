@@ -381,7 +381,34 @@ def test_pipeline_chains_every_stage_with_progress(runner, monkeypatch):
     d = runner.clip_dir("clipP")
     assert job.clip_id == "clipP" and job.result["render_id"] == "rendP"
     assert job.result["output_path"] == str(d / "renders" / "rendP.mp4")
+    # the clip window rides in the result so the editor can trim its transcript timeline
+    assert job.result["start"] == 1.0 and job.result["end"] == 9.0
     assert (d / "meta.json").exists()
+
+
+def test_pipeline_stop_after_reframe_skips_caption_and_export(runner, monkeypatch):
+    """'Make clips' cuts + reframes (auto-reframe) and STOPS — no caption/export burn. The clip
+    lands ready to review (reframed.mp4 + its window) and the user renders later from the editor."""
+    _words_file(runner)
+    order = []
+    monkeypatch.setattr(cr.cutter, "cut", lambda s, a, b, out, **k: (order.append("cut"), Path(out).parent.mkdir(parents=True, exist_ok=True), Path(out).write_bytes(b"C"), out)[-1])
+    monkeypatch.setattr(cr.reframe, "detect_faces", lambda c, **k: {"rois": {"left": {"x": 0, "y": 0, "w": 1, "h": 1}, "right": {"x": 1, "y": 0, "w": 1, "h": 1}}, "width": 2, "height": 1, "frame_path": k.get("frame_path")})
+    monkeypatch.setattr(cr.reframe, "speaker_track", lambda c, **k: (order.append("track"), {"segments": [], "roiL": k["roi_left"], "roiR": k["roi_right"], "source": "roi"})[-1])
+    monkeypatch.setattr(cr.reframe, "render", lambda c, t, **k: (order.append("reframe"), Path(k["out_path"]).write_bytes(b"R"), k["out_path"])[-1])
+    monkeypatch.setattr(cr.captioner, "generate", lambda w, **k: order.append("caption.gen"))
+    monkeypatch.setattr(cr.exporter, "export", lambda c, **k: order.append("export"))
+
+    job = _job("pipeline", source_id="src1")
+    runner.pipeline_target(
+        source_id="src1", clip_id="clipS", render_id="rendS",
+        params={"start": 2.0, "end": 8.0, "aspect": "9:16", "mode": "pan", "stop_after": "reframe"},
+    )(job)
+
+    assert order == ["cut", "track", "reframe"]            # NO caption / export
+    assert job.result["clip_id"] == "clipS"
+    assert job.result["start"] == 2.0 and job.result["end"] == 8.0
+    assert job.result["reframed_path"].endswith("reframed.mp4")
+    assert "render_id" not in job.result and "output_path" not in job.result
 
 
 # ---- cancellation ----------------------------------------------------

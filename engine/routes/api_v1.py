@@ -1689,13 +1689,18 @@ def render_pipeline(source_id):
     mode = str(data.get("mode") or "pan")
     preset = str(data.get("preset") or "tiktok")
     style = str(data.get("style") or "opus")
+    # stop_after='reframe' = the "Make clips" path: cut + auto-reframe to review, no burn/export.
+    stop_after = data.get("stop_after")
     if (aspect not in _CLIP_ASPECTS or mode not in _CLIP_MODES
-            or preset not in _CLIP_PRESETS or style not in _CAPTION_STYLES):
+            or preset not in _CLIP_PRESETS or style not in _CAPTION_STYLES
+            or (stop_after is not None and stop_after != "reframe")):
         return jsonify({"error": "bad_params"}), 400
     start, end = rng
     clip_id, render_id = uuid.uuid4().hex[:10], uuid.uuid4().hex[:10]
     params = {"start": start, "end": end, "aspect": aspect, "mode": mode,
               "style": style, "preset": preset}
+    if stop_after:
+        params["stop_after"] = stop_after
     jid = _cm().submit(kind="pipeline", source_id=source_id, clip_id=clip_id, params=params,
                        target=_cr().pipeline_target(source_id=source_id, clip_id=clip_id,
                                                     render_id=render_id, params=params))

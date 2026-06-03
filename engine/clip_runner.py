@@ -338,10 +338,17 @@ class ClipRunner:
         def _work(job):
             def body():
                 cm = self.clip_manager
+                start, end = float(params.get("start", 0.0)), float(params.get("end", 0.0))
                 cm.update_progress(job.id, 5, stage="cut")
                 self._do_cut(job, source_id=source_id, clip_id=clip_id, params=params)
                 cm.update_progress(job.id, 30, stage="reframe")
-                self._do_reframe(job, clip_id=clip_id, params=params)
+                rf = self._do_reframe(job, clip_id=clip_id, params=params)
+                # "Make clips" = cut + auto-reframe, then STOP — the clip lands ready to review
+                # (reframed.mp4 + its window for the editor timeline); the user renders later.
+                if params.get("stop_after") == "reframe":
+                    job.result = {"clip_id": clip_id, "reframed_path": rf["reframed_path"],
+                                  "aspect": params.get("aspect", "9:16"), "start": start, "end": end}
+                    return
                 cm.update_progress(job.id, 65, stage="caption")
                 self._do_caption(job, clip_id=clip_id, params=params)
                 cm.update_progress(job.id, 90, stage="export")
@@ -349,6 +356,7 @@ class ClipRunner:
                 job.result = {"clip_id": clip_id, "render_id": render_id, "output_path": out,
                               "aspect": params.get("aspect", "9:16"),
                               "preset": params.get("preset", "tiktok"),
-                              "style": params.get("style", "opus")}
+                              "style": params.get("style", "opus"),
+                              "start": start, "end": end}
             self._cancellable(job, body)
         return _work

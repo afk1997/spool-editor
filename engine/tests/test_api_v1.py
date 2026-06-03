@@ -851,6 +851,14 @@ def test_edit_transcript_word_400_bad_op(client, tmp_path):
     assert c.post("/api/v1/transcripts/t1/words/0", json={"op": "explode"}).status_code == 400
 
 
+def test_render_pipeline_rejects_bad_stop_after(client, tmp_path):
+    """The 'Make clips' path passes stop_after='reframe' (cut + reframe, no burn); any other
+    value is a 400 so a typo can't silently run the full export."""
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())  # source id "abc" + words.json
+    assert c.post("/api/v1/sources/abc/render", json={"start": 0.0, "end": 1.0, "stop_after": "explode"}).status_code == 400
+
+
 def test_chunk_text_format_default_returns_full_body(client, tmp_path):
     app, c = client
     _seed_done_transcript(app, tmp_path, body_text="hello world\n")
