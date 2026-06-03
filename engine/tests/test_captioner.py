@@ -118,6 +118,90 @@ def test_generate_appends_watermark_and_lower_third(tmp_path):
     assert "\\an9" in content                                # watermark pinned top-right
 
 
+# ---- caption craft (item D): speaker color · line balance · keyword emphasis ----
+
+def _write_2spk_words(tmp_path) -> str:
+    """Six words in [0,3], two speakers (S1 then S2), with one ALL-CAPS word (NASA)."""
+    p = tmp_path / "two.words.json"
+    spk = ["Speaker 1", "Speaker 1", "Speaker 1", "Speaker 2", "Speaker 2", "Speaker 2"]
+    txt = ["the", "quick", "brown", "fox", "jumps", "NASA"]
+    p.write_text(json.dumps({"schema_version": 2, "words": [
+        {"idx": i, "w": txt[i], "start": i * 0.5, "end": i * 0.5 + 0.4,
+         "deleted": False, "speaker": spk[i]} for i in range(6)]}))
+    return str(p)
+
+
+def test_caption_craft_off_by_default_is_unchanged(tmp_path):
+    """With no caption-craft flags, the ASS carries NO speaker-color or scale tags — the
+    output is the original (byte-identical guard is also covered by the cross-version diff)."""
+    words = _write_2spk_words(tmp_path)
+    out = tmp_path / "plain.ass"
+    captioner.generate(words, clip_start=0.0, clip_end=3.0, style="opus", out_ass_path=str(out))
+    content = out.read_text()
+    assert "\\fscx120" not in content                  # no emphasis scaling
+    assert "&H003CC9FF&" not in content                # no speaker-2 palette color
+
+
+def test_color_speakers_tints_words_per_speaker(tmp_path):
+    words = _write_2spk_words(tmp_path)
+    out = tmp_path / "spk.ass"
+    captioner.generate(words, clip_start=0.0, clip_end=3.0, style="opus",
+                       color_speakers=True, out_ass_path=str(out))
+    content = out.read_text()
+    assert "&H003CC9FF&" in content                    # speaker 2 → palette[1] (gold)
+
+
+def test_color_speakers_reads_speaker_from_segments(tmp_path):
+    """The REAL serialized words.json carries the speaker on SEGMENTS, not the flat word list.
+    Speaker-coloring must still resolve each word's speaker from its containing segment."""
+    p = tmp_path / "seg.words.json"
+    p.write_text(json.dumps({
+        "schema_version": 2,
+        "words": [   # flat words have NO speaker key (the production serialization)
+            {"idx": 0, "w": "alpha", "start": 0.0, "end": 0.4, "deleted": False},
+            {"idx": 1, "w": "beta", "start": 0.5, "end": 0.9, "deleted": False},
+            {"idx": 2, "w": "gamma", "start": 2.0, "end": 2.4, "deleted": False},
+        ],
+        "segments": [   # ...but the segments do
+            {"start": 0.0, "end": 1.0, "speaker": "Speaker 1", "words": []},
+            {"start": 1.5, "end": 3.0, "speaker": "Speaker 2", "words": []},
+        ],
+    }))
+    out = tmp_path / "seg.ass"
+    captioner.generate(str(p), clip_start=0.0, clip_end=3.0, style="opus",
+                       color_speakers=True, out_ass_path=str(out))
+    assert "&H003CC9FF&" in out.read_text()        # speaker 2 (from segment lookup) → palette[1]
+
+
+def test_color_speakers_noop_for_single_speaker(tmp_path):
+    """One speaker in the window → captions stay exactly as they were (no palette tinting)."""
+    words = _write_words(tmp_path)                      # speaker-less / single
+    out = tmp_path / "one.ass"
+    captioner.generate(words, clip_start=10.0, clip_end=12.0, style="opus",
+                       color_speakers=True, out_ass_path=str(out))
+    assert "&H003CC9FF&" not in out.read_text()
+
+
+def test_emphasis_scales_allcaps_keyword(tmp_path):
+    words = _write_2spk_words(tmp_path)
+    out = tmp_path / "emph.ass"
+    captioner.generate(words, clip_start=0.0, clip_end=3.0, style="opus",
+                       emphasis=True, out_ass_path=str(out))
+    content = out.read_text()
+    assert "\\fscx120\\fscy120}NASA" in content         # the ALL-CAPS word is scaled up
+    assert "\\fscx120\\fscy120}the" not in content      # ordinary words are not
+
+
+def test_build_chunks_balance_removes_orphan_last_line():
+    from clip.backhalf import ass_captions
+    words = [{"start": i, "end": i + 1, "text": str(i)} for i in range(7)]
+    assert [len(c) for c in ass_captions.build_chunks(words, 3)] == [3, 3, 1]            # fixed
+    assert [len(c) for c in ass_captions.build_chunks(words, 3, balance=True)] == [3, 2, 2]  # balanced
+    # exact-fit input is untouched by balancing
+    six = [{"start": i, "end": i + 1, "text": str(i)} for i in range(6)]
+    assert [len(c) for c in ass_captions.build_chunks(six, 3, balance=True)] == [3, 3]
+
+
 # ---- burn ----------------------------------------------------------------
 
 class _FakePopen:

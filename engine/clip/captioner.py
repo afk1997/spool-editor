@@ -25,6 +25,11 @@ _VALID_STYLES = ("opus", "karaoke", "minimal")
 BURN_TIMEOUT = 3600
 _PLAY_H = 1920  # matches ass_captions PlayResY — for the position→MarginV mapping
 
+# Distinct, high-contrast-on-dark ASS colors (&H00BBGGRR&) assigned to speakers in
+# first-appearance order when speaker-coloring is on. [0] is white so a single speaker /
+# the dominant speaker reads as the normal caption (and stays byte-identical).
+_SPEAKER_PALETTE = ["&H00FFFFFF&", "&H003CC9FF&", "&H00FFE14D&", "&H005CE05C&", "&H00C9A6FF&"]
+
 
 def _hex_to_ass(hexcolor: str) -> str:
     """'#RRGGBB' (or '#RGB') → ASS '&H00BBGGRR&'."""
@@ -79,10 +84,19 @@ def generate(
     overrides: dict | None = None,
     watermark: str | None = None,
     lower_third: str | None = None,
+    color_speakers: bool = False,
+    emphasis: bool = False,
+    balance_lines: bool = False,
     out_ass_path: str,
 ) -> str:
     """Slice ``words.json`` to ``[clip_start, clip_end]`` (re-based to 0) and write a
     styled ASS file (opus / karaoke / minimal) via the vendored generator.
+
+    Caption-craft options (all additive — defaults reproduce today's ASS byte-for-byte):
+      ``color_speakers`` — tint each word by its diarization speaker (a palette assigned in
+        first-appearance order); only active when ≥2 speakers appear in the window.
+      ``emphasis`` — scale up salient words (auto: source ALL-CAPS / acronyms).
+      ``balance_lines`` — rebalance chunks so the last line isn't a 1-word orphan.
 
     Returns ``out_ass_path``. Raises ``ValueError`` for a bad style, an inverted
     window, or a window containing no words.
@@ -94,6 +108,18 @@ def generate(
 
     with open(words_json_path) as f:
         data = json.load(f)
+
+    # The serialized words.json carries the diarization speaker on SEGMENTS, not on the flat
+    # word list — so resolve each word's speaker from its containing segment (source-time
+    # lookup), falling back to a per-word `speaker` if a future transcript persists one.
+    segs = [s for s in (data.get("segments") or [])
+            if s.get("start") is not None and s.get("end") is not None and s.get("speaker")]
+
+    def _speaker_at(mid: float):
+        for s in segs:
+            if float(s["start"]) <= mid < float(s["end"]):
+                return s["speaker"]
+        return None
 
     sliced = []
     for w in data.get("words", []):
@@ -112,6 +138,9 @@ def generate(
             "start": round(max(0.0, start - clip_start), 3),
             "end": round(max(0.0, min(end, clip_end) - clip_start), 3),
             "word": text,
+            # speaker for speaker-colored captions (None when undiarized): segment lookup in
+            # SOURCE time (before re-basing), with a flat-word fallback.
+            "speaker": w.get("speaker") or _speaker_at((start + end) / 2),
         })
     if not sliced:
         raise ValueError(f"no words in clip window [{clip_start}, {clip_end}]")
@@ -124,6 +153,20 @@ def generate(
             json.dump({"segments": [{"words": sliced}]}, f)
         argv = [sys.executable, _ASS_SCRIPT, tmp_path, out_ass_path, style]
         ass_ov = _ass_overrides(overrides) if overrides else {}
+        # Caption-craft options → ass_captions overrides (each off by default → output unchanged).
+        if color_speakers:
+            seen: list = []
+            for s in sliced:
+                sp = s.get("speaker")
+                if sp is not None and sp not in seen:
+                    seen.append(sp)
+            if len(seen) >= 2:   # one speaker → leave the captions exactly as they were
+                ass_ov["speaker_colors"] = {
+                    sp: _SPEAKER_PALETTE[i % len(_SPEAKER_PALETTE)] for i, sp in enumerate(seen)}
+        if emphasis:
+            ass_ov["emphasis"] = "auto"
+        if balance_lines:
+            ass_ov["balance"] = True
         if ass_ov:
             argv.append(json.dumps(ass_ov))
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)

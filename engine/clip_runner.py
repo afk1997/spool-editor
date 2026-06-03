@@ -273,6 +273,9 @@ class ClipRunner:
         captioner.generate(words_path, clip_start=float(meta["start"]), clip_end=float(meta["end"]),
                            style=params.get("style", "opus"), overrides=params.get("overrides"),
                            watermark=params.get("watermark"), lower_third=params.get("lower_third"),
+                           color_speakers=bool(params.get("color_speakers")),
+                           emphasis=bool(params.get("emphasis")),
+                           balance_lines=bool(params.get("balance_lines")),
                            out_ass_path=ass)
         video_in = self._stage_input(d, ("reframed.mp4", "clip.mp4"))
         out = str(d / "captioned.mp4")

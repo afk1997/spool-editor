@@ -1648,6 +1648,11 @@ def caption_clip(clip_id):
             if not isinstance(v, str):
                 return jsonify({"error": "bad_overrides"}), 400
             params[key] = v[:60]
+    # Caption-craft toggles (item D, all additive — captions are byte-identical when off):
+    # speaker color, balanced line-breaking, keyword emphasis.
+    for key in ("color_speakers", "emphasis", "balance_lines"):
+        if data.get(key) is not None:
+            params[key] = bool(data[key])
     jid = _cm().submit(kind="caption", clip_id=clip_id, params=params,
                        target=_cr().caption_target(clip_id=clip_id, params=params))
     return jsonify(_clip_job_view(_cm().get(jid))), 201

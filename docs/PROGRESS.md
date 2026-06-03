@@ -91,6 +91,21 @@
 >   pan (the plan's #1 risk). The tie-break activation (ambiguous two-shot → audio side) is covered by the
 >   unit tests; the byte-identical fallback is the safety guarantee. Engine **695** + studio e2e (50.0s)
 >   green. Commit below.
+> - **✅ D (engine) — caption craft: speaker color · balanced line-breaking · keyword emphasis (all
+>   additive, byte-identical when off).** Refactored the vendored `ass_captions.py` to be importable
+>   (`build_chunks`/`render`/`main` + a `__main__` guard) — **verified byte-identical** to the prior
+>   script across opus/karaoke/minimal via a cross-version diff. New off-by-default options threaded
+>   `captioner.generate` → `clip_runner._do_caption` → `POST /clips/<id>/captions` (so the agent/MCP/CLI
+>   reach them): `color_speakers` (tint each word by its diarization speaker via a first-appearance
+>   palette; only when ≥2 speakers present), `emphasis` (scale up ALL-CAPS/acronym keywords), `balance_lines`
+>   (rebalance chunks so the last line isn't a 1-word orphan, e.g. 7@3 → [3,2,2] not [3,3,1]). **Real-media
+>   testing caught a real bug** (why the brief mandates it): the serialized `words.json` carries `speaker`
+>   on SEGMENTS, not the flat word list, so coloring silently no-op'd — fixed `generate` to resolve each
+>   word's speaker from its containing segment (source-time lookup, flat-word fallback); on the real
+>   interview window [140,180] S2 now renders gold. TDD: +6 (`build_chunks` balance; color on flat-word +
+>   real segment formats; single-speaker no-op; emphasis scales only keywords; off-by-default carries no
+>   color/scale tags). `caption_sync_eval`: captions add **0 drift** (captioned == cut, default path
+>   unchanged). Engine **701** green. Studio S8 toggles + commit below.
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,
