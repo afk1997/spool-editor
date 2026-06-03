@@ -188,6 +188,106 @@ def mouth_motion(patches) -> float:
     return total / n if n else 0.0
 
 
+# ---- active-speaker selection: video authority + an audio (diarization) tie-break ------------
+# A shot may show several faces (a wide two-shot). Mouth motion picks the talker when one face is
+# clearly moving more; when it's ambiguous (no clear winner) we fall back — historically to the
+# largest/most-prominent face, which in a two-shot can be the LISTENER. Item B lets the audio
+# diarization break that tie: the face on the audio-active speaker's screen side. Video stays the
+# authority — a clear visual winner is never overridden — so bad diarization can't hurt the pan.
+
+def _score_clusters(shot, w0: int, h0: int):
+    """Cluster a shot's face samples into people and score each: mouth motion, median bbox area,
+    median normalized center (cy for audience filtering, cx for the audio-side tie-break).
+
+    Returns ``(scored, upper)``; ``upper`` drops likely foreground/audience faces (cy below
+    ``_AUDIENCE_CY``), falling back to all clusters if that would empty the list."""
+    import statistics
+    all_faces = [(t, cx, cy, fw, fh, patch)
+                 for (t, fl, _w, _h) in shot for (cx, cy, fw, fh, _sc, patch) in fl]
+    if not all_faces:
+        return [], []
+    clusters = cluster_by_x(all_faces, w0)
+    scored = [{
+        "members": c,
+        "motion": mouth_motion([m[5] for m in sorted(c, key=lambda m: m[0])]),
+        "area": statistics.median([m[3] * m[4] for m in c]),
+        "cy": statistics.median([m[2] / h0 for m in c]),
+        "cx": statistics.median([m[1] / w0 for m in c]),
+    } for c in clusters]
+    upper = [c for c in scored if c["cy"] <= _AUDIENCE_CY] or scored
+    return scored, upper
+
+
+def _clear_motion_winner(upper):
+    """The UNAMBIGUOUS mouth-motion talker among ≥2 clusters (top motion > 1.25× the runner-up and
+    > 0), else None. This is the confident visual pick — it always wins and teaches the audio→side
+    map, so audio only ever resolves the shots video is unsure about."""
+    if len(upper) < 2:
+        return None
+    by_motion = sorted(upper, key=lambda c: c["motion"], reverse=True)
+    if by_motion[0]["motion"] > 1.25 * by_motion[1]["motion"] and by_motion[0]["motion"] > 0:
+        return by_motion[0]
+    return None
+
+
+def _pick_cluster_on_side(upper, side):
+    """The cluster furthest to ``side`` by normalized center x. None if side invalid / list empty."""
+    if not upper or side not in ("left", "right"):
+        return None
+    return min(upper, key=lambda c: c["cx"]) if side == "left" else max(upper, key=lambda c: c["cx"])
+
+
+def select_talker(upper, *, want_side: str | None = None):
+    """Pick the active-speaker cluster among ``upper``.
+
+    Video is the authority: a CLEAR mouth-motion winner always wins, so a bad audio guess can never
+    override a confident visual pick. Only when motion is ambiguous does the audio-active speaker's
+    side (``want_side``, from diarization) break the tie. With no audio signal (``want_side`` None)
+    this is byte-identical to the prior behavior — the largest/most-prominent face. A single cluster
+    (single-camera shot) is returned unchanged."""
+    if not upper:
+        return None
+    if len(upper) < 2:
+        return upper[0]
+    clear = _clear_motion_winner(upper)
+    if clear is not None:
+        return clear                                     # confident visual winner — audio can't override
+    if want_side is not None:                            # ambiguous → let audio break the tie
+        on_side = _pick_cluster_on_side(upper, want_side)
+        if on_side is not None:
+            return on_side
+    return max(upper, key=lambda c: c["area"])           # prior fallback: most prominent face
+
+
+def rebase_diarization(turns, clip_start: float, duration: float):
+    """Re-base SOURCE-relative audio turns to the cut clip's timeline (the clip starts at 0),
+    clipping to [0, duration] and dropping turns outside the window.
+
+    The transcript's speaker turns are in source time, but ``track`` measures everything on the cut
+    clip (clip-relative). Without this shift, turns from a clip cut deep into a source never overlap
+    the clip's shots and the audio tie-break silently never fires."""
+    out = []
+    for t in (turns or []):
+        s = max(0.0, float(t["start"]) - clip_start)
+        e = min(float(duration), float(t["end"]) - clip_start)
+        if e > s:
+            out.append({"start": s, "end": e, "speaker": t["speaker"]})
+    return out
+
+
+def _audio_side_for_window(diarization, side_map, start: float, end: float):
+    """Screen side ('left'/'right') of the diar speaker most active over [start, end], via
+    ``side_map`` (speaker → side). None when no turn overlaps or that speaker has no mapped side."""
+    tally: dict = {}
+    for t in (diarization or []):
+        ov = min(end, float(t["end"])) - max(start, float(t["start"]))
+        if ov > 0:
+            tally[t["speaker"]] = tally.get(t["speaker"], 0.0) + ov
+    if not tally:
+        return None
+    return side_map.get(max(tally, key=tally.get))
+
+
 # ---- I/O (verified on real media) -----------------------------------
 
 def _mouth_patch(cv2, gray, fx: float, fy: float, fw: float, fh: float):
@@ -223,12 +323,19 @@ def scene_cuts(clip_path: str, duration: float, threshold: float = 0.3):
 
 
 def track(clip_path: str, duration: float, src_w: int, src_h: int, out_w: int, out_h: int,
-          *, cancel_check=None):
+          *, cancel_check=None, diarization=None):
     """Stabilized crop timeline ``[(t,x,y,w,h,snap)]`` (source px) following the speaker's face
     across the clip. The zoom is **constant per shot** (the shot's median face size → one crop size,
     so it doesn't pulse with per-frame detection noise) and the crop pans (x/y) to follow the face
     within the shot, snapping at each scene cut. ``[]`` when OpenCV/YuNet is unavailable, the decode
-    fails, or no face is found — the caller then uses the diar⊕ROI 2-ROI pan."""
+    fails, or no face is found — the caller then uses the diar⊕ROI 2-ROI pan.
+
+    ``diarization`` (optional audio turns ``[{start, end, speaker}]``) only breaks the tie in
+    ambiguous multi-face shots: shots with a CLEAR mouth-motion winner teach a speaker→screen-side
+    map, and the audio-active speaker's side then picks the talker where motion is unclear (a wide
+    two-shot, or a speaker briefly off-mic-visually). Video stays the authority — a confident visual
+    pick is never overridden — so bad diarization can't degrade the pan. ``None`` → behavior is
+    byte-identical to the video-only tracker."""
     if not available():
         return []
     import glob
@@ -277,35 +384,48 @@ def track(clip_path: str, duration: float, src_w: int, src_h: int, out_w: int, o
     if not dets:
         return []
 
-    points = []
-    found_any = False
+    # Group sampled detections into shots (one window per scene-cut segment) once; both the
+    # side-map pass and the emission pass iterate it.
+    shots = []
     for bi in range(len(bounds) - 1):
         s, e = bounds[bi], bounds[bi + 1]
-        shot = [d for d in dets if s <= d[0] < e]
-        if not shot:
-            continue
+        sh = [d for d in dets if s <= d[0] < e]
+        if sh:
+            shots.append((s, e, sh))
+
+    # Pass 1 (only with diarization): learn the speaker→screen-side map from shots that have a
+    # CLEAR visual winner. Those confident picks are the *where*; the audio turns are the *who*.
+    # Audio is then used ONLY to resolve ambiguous shots in pass 2 — never to override a clear
+    # visual pick — so a wrong diarization label can't move a confidently-framed shot.
+    side_map = {}
+    if diarization:
+        video_segs = []
+        for (s, e, sh) in shots:
+            w0, h0 = sh[0][2], sh[0][3]
+            _scored, upper = _score_clusters(sh, w0, h0)
+            winner = _clear_motion_winner(upper)
+            if winner is not None:
+                video_segs.append({"start": s, "end": e,
+                                   "speaker": "left" if winner["cx"] < 0.5 else "right"})
+        if video_segs:
+            from clip import reframe  # local import avoids a module-load cycle
+            side_map = reframe.diar_speaker_sides(video_segs, diarization)
+
+    points = []
+    found_any = False
+    for (s, e, shot) in shots:
         w0, h0 = shot[0][2], shot[0][3]
-        # All face samples in the shot → cluster into people, then follow the one TALKING (most
-        # mouth motion) when it's a clear winner; else the most prominent upper face. One person per
-        # shot → that person (= the camera's subject), so single-face shots behave as before.
-        all_faces = [(t, cx, cy, fw, fh, patch)
-                     for (t, fl, _w, _h) in shot for (cx, cy, fw, fh, _sc, patch) in fl]
-        if not all_faces:
+        # Cluster the shot's faces into people, then follow the one TALKING (clear mouth-motion
+        # winner). When motion is ambiguous, the audio-active speaker's side breaks the tie (item B);
+        # with no diarization, the most prominent face — single-face shots behave as before.
+        _scored, upper = _score_clusters(shot, w0, h0)
+        if not upper:
             continue
-        clusters = cluster_by_x(all_faces, w0)
-        scored = [{
-            "members": c,
-            "motion": mouth_motion([m[5] for m in sorted(c, key=lambda m: m[0])]),
-            "area": statistics.median([m[3] * m[4] for m in c]),
-            "cy": statistics.median([m[2] / h0 for m in c]),
-        } for c in clusters]
-        upper = [c for c in scored if c["cy"] <= _AUDIENCE_CY] or scored
-        if len(upper) >= 2:
-            by_motion = sorted(upper, key=lambda c: c["motion"], reverse=True)
-            talker = (by_motion[0] if by_motion[0]["motion"] > 1.25 * by_motion[1]["motion"] and by_motion[0]["motion"] > 0
-                      else max(upper, key=lambda c: c["area"]))
-        else:
-            talker = upper[0]
+        want_side = (_audio_side_for_window(diarization, side_map, s, e)
+                     if (diarization and side_map) else None)
+        talker = select_talker(upper, want_side=want_side)
+        if talker is None:
+            continue
         members = {round(m[0], 3): m for m in talker["members"]}  # talker face per sampled time
         face_hs = [m[4] for m in talker["members"]]
         if not face_hs:

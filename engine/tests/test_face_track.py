@@ -3,7 +3,69 @@ face, framing it (adaptive zoom + rule-of-thirds), temporal smoothing, and build
 crop expressions. The OpenCV (YuNet) + ffmpeg I/O is verified on real media + the quality harness."""
 from __future__ import annotations
 
-from clip.face_track import pick_face, frame_rect, smooth_track, crop_exprs, cluster_by_x, mouth_motion
+from clip.face_track import (
+    pick_face, frame_rect, smooth_track, crop_exprs, cluster_by_x, mouth_motion,
+    select_talker, _audio_side_for_window, rebase_diarization,
+)
+
+
+def test_rebase_diarization_shifts_source_turns_to_clip_time():
+    # The transcript's turns are SOURCE-relative; a clip cut from [180, 220] starts at 0.
+    turns = [{"start": 180.0, "end": 205.0, "speaker": "S1"},
+             {"start": 205.0, "end": 230.0, "speaker": "S2"}]
+    out = rebase_diarization(turns, clip_start=180.0, duration=40.0)
+    assert out == [{"start": 0.0, "end": 25.0, "speaker": "S1"},
+                   {"start": 25.0, "end": 40.0, "speaker": "S2"}]   # S2 clipped to the clip end
+
+
+def test_rebase_diarization_drops_turns_outside_the_window():
+    turns = [{"start": 100.0, "end": 150.0, "speaker": "X"}]        # entirely before the clip
+    assert rebase_diarization(turns, clip_start=180.0, duration=40.0) == []
+    assert rebase_diarization([], clip_start=10.0, duration=5.0) == []
+
+
+# --- active-speaker selection: video authority + audio tie-break (item B) ---------------
+
+def _cl(motion, area, cx):
+    """A scored face-cluster as `track` builds them (mouth motion / median area / norm x)."""
+    return {"motion": motion, "area": area, "cx": cx, "members": []}
+
+
+def test_select_talker_single_cluster_returns_it():
+    only = _cl(0.0, 100, 0.5)
+    assert select_talker([only]) is only
+
+
+def test_select_talker_clear_motion_winner_wins_and_audio_cannot_override():
+    # Left talks far more than right → a STRONG visual pick. Even when the audio side says
+    # 'right', the confident visual winner must stand (bad diar can't override a strong pick).
+    left = _cl(10.0, 100, 0.2)
+    right = _cl(1.0, 300, 0.8)
+    assert select_talker([left, right], want_side="right") is left
+
+
+def test_select_talker_ambiguous_uses_audio_side():
+    # Motions tied (no clear winner) → the audio-active speaker's side breaks the tie.
+    left = _cl(2.0, 100, 0.2)
+    right = _cl(2.0, 300, 0.8)
+    assert select_talker([left, right], want_side="left") is left
+    assert select_talker([left, right], want_side="right") is right
+
+
+def test_select_talker_ambiguous_without_audio_falls_back_to_largest_area():
+    # No diarization signal → identical to today's behavior (most prominent / largest face).
+    left = _cl(2.0, 100, 0.2)
+    right = _cl(2.0, 300, 0.8)
+    assert select_talker([left, right], want_side=None) is right
+
+
+def test_audio_side_for_window_maps_dominant_speaker_to_its_side():
+    diar = [{"start": 0.0, "end": 5.0, "speaker": "Speaker 1"},
+            {"start": 5.0, "end": 10.0, "speaker": "Speaker 2"}]
+    side_map = {"Speaker 1": "left", "Speaker 2": "right"}
+    assert _audio_side_for_window(diar, side_map, 0.0, 4.0) == "left"
+    assert _audio_side_for_window(diar, side_map, 6.0, 9.0) == "right"
+    assert _audio_side_for_window(diar, side_map, 100.0, 110.0) is None  # no overlapping turn
 
 
 def test_cluster_by_x_groups_two_people_and_merges_one():

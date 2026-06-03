@@ -244,8 +244,13 @@ class ClipRunner:
                 dur = float(meta.get("end", 0) or 0) - float(meta.get("start", 0) or 0)
                 src_w, src_h = reframe.probe_dimensions(clip_path)
                 out_w, out_h = reframe.aspect_dims(params.get("aspect", "9:16"))
+                # Fuse the audio diarization into the per-shot active-speaker pick: it only breaks
+                # ties in ambiguous multi-face shots; a clear visual winner always wins, so bad diar
+                # can't degrade the pan. The transcript turns are SOURCE-relative — re-base them to
+                # the cut clip's timeline (it starts at 0) or the tie-break never overlaps a shot.
+                clip_diar = face_track.rebase_diarization(diar, float(meta.get("start", 0) or 0), dur)
                 ft = face_track.track(clip_path, dur, src_w, src_h, out_w, out_h,
-                                      cancel_check=lambda: job._cancel_flag)
+                                      cancel_check=lambda: job._cancel_flag, diarization=clip_diar)
                 face_timeline = ft or None
             except Exception:
                 face_timeline = None

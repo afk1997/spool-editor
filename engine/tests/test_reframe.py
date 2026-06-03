@@ -81,6 +81,22 @@ def test_fuse_with_no_turns_falls_back_to_video():
     assert reframe._fuse_diar_roi(video, []) == video
 
 
+def test_diar_speaker_sides_maps_speakers_to_opposite_sides():
+    """The reusable speaker->side map (also used by the auto-pan face-track fusion, item B):
+    each diar speaker resolves to the screen side its turns most overlap in the video timeline,
+    distinct speakers kept on opposite sides."""
+    video = [
+        {"start": 0.0, "end": 5.0, "speaker": "left"},
+        {"start": 5.0, "end": 10.0, "speaker": "right"},
+    ]
+    diar = [
+        {"start": 0.0, "end": 5.0, "speaker": "S1"},
+        {"start": 5.0, "end": 10.0, "speaker": "S2"},
+    ]
+    assert reframe.diar_speaker_sides(video, diar) == {"S1": "left", "S2": "right"}
+    assert reframe.diar_speaker_sides(video, []) == {}
+
+
 # ---- orchestration (ffmpeg + roi_motion mocked) ---------------------------
 
 def _rois():

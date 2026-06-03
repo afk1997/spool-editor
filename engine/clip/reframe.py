@@ -158,20 +158,27 @@ def _video_side_for(video_segments: list[dict], start: float, end: float) -> str
     return "left" if tally["left"] >= tally["right"] else "right"
 
 
-def _fuse_diar_roi(video_segments: list[dict], diarization: list[dict]) -> list[dict]:
-    """Fuse audio turns with the video ROI timeline.
-
-    Audio turns are the robust *when/who*; the ROI motion supplies *where* (L/R). We map
-    each audio speaker label to the side its turns most overlap in the video timeline,
-    then emit a segment per audio turn with that side, collapsing consecutive same-side.
-    """
-    turns = sorted(
+def _diar_turns(diarization: list[dict]) -> list[dict]:
+    """Sorted, validated audio turns ``[{start, end, speaker}]`` (drops zero/negative spans)."""
+    return sorted(
         ({"start": float(t["start"]), "end": float(t["end"]), "speaker": t["speaker"]}
          for t in diarization if t.get("end", 0) > t.get("start", 0)),
         key=lambda t: t["start"],
     )
+
+
+def diar_speaker_sides(video_segments: list[dict], diarization: list[dict]) -> dict[str, str]:
+    """Map each diar speaker label to the screen side ('left'/'right') its turns most overlap in
+    the video timeline, keeping distinct speakers on opposite sides.
+
+    The shared core of two fusions: the diar⊕ROI 2-ROI timeline (``_fuse_diar_roi``) and the
+    auto-pan face-track active-speaker tie-break (``clip/face_track.track``). ``{}`` when there are
+    no turns. ``video_segments`` carry the *where* (which side has motion/a clear talker, when);
+    the audio turns carry the robust *who/when*.
+    """
+    turns = _diar_turns(diarization)
     if not turns:
-        return _collapse(video_segments)
+        return {}
 
     # 1. speaker label -> accumulated video side preference.
     pref: dict[str, dict[str, float]] = {}
@@ -199,8 +206,21 @@ def _fuse_diar_roi(video_segments: list[dict], diarization: list[dict]) -> list[
             free = ({"left", "right"} - taken)
             side_map[t["speaker"]] = free.pop() if free else "left"
             taken.add(side_map[t["speaker"]])
+    return side_map
 
-    # 3. emit a segment per audio turn with its mapped side, then collapse.
+
+def _fuse_diar_roi(video_segments: list[dict], diarization: list[dict]) -> list[dict]:
+    """Fuse audio turns with the video ROI timeline.
+
+    Audio turns are the robust *when/who*; the ROI motion supplies *where* (L/R). We map
+    each audio speaker label to the side its turns most overlap in the video timeline
+    (``diar_speaker_sides``), then emit a segment per audio turn with that side, collapsing
+    consecutive same-side.
+    """
+    turns = _diar_turns(diarization)
+    if not turns:
+        return _collapse(video_segments)
+    side_map = diar_speaker_sides(video_segments, diarization)
     fused = [{"start": t["start"], "end": t["end"], "speaker": side_map[t["speaker"]]} for t in turns]
     return _collapse(fused)
 

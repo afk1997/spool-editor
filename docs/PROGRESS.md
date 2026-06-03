@@ -74,6 +74,23 @@
 >   dep + a fragile threshold regression). SpeechBrain uninstalled (eval-only, never added to
 >   `requirements.txt`). Benchmark + ECAPA harness kept as reproducible acceptance tooling. Engine **687**
 >   green (no engine code changed). Commit below.
+> - **✅ B — audio diarization fused into the auto-pan active-speaker pick (additive, video stays the
+>   authority).** In a wide two-shot the per-shot tracker fell back to the largest face when mouth-motion
+>   had no clear winner — sometimes the LISTENER. Now `face_track.track(diarization=…)`: a first pass
+>   learns a speaker→screen-side map from shots that DO have a clear visual winner (reusing the factored
+>   `reframe.diar_speaker_sides`), and `select_talker` consults the audio-active speaker's side ONLY when
+>   motion is ambiguous — a clear visual winner is never overridden, so bad diar can't degrade the pan.
+>   Found + fixed a latent time-base bug: `diarization_from_words` turns are SOURCE-relative but the
+>   tracker works in clip time, so `clip_runner` now `rebase_diarization`s them to the cut window (else
+>   the fusion silently never overlaps a shot on any clip not cut from t=0). TDD: +9 (`select_talker`
+>   video-wins / ambiguous-uses-audio / no-audio-fallback / single; `_audio_side_for_window`;
+>   `rebase_diarization`; `reframe.diar_speaker_sides`). **Verified on real media** (new
+>   `scripts/active_speaker_eval.py`): on two interview windows the camera already cuts to the talker, so
+>   B is correctly a **no-op** — timelines byte-identical and `reframe_eval` **identical** (face_present
+>   99%, center_dx 0.124, jitter 0.0732, y_pos 0.358), proving bad/any diar cannot regress a confident
+>   pan (the plan's #1 risk). The tie-break activation (ambiguous two-shot → audio side) is covered by the
+>   unit tests; the byte-identical fallback is the safety guarantee. Engine **695** + studio e2e (50.0s)
+>   green. Commit below.
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,
