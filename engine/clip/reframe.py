@@ -258,6 +258,7 @@ def render(
     crop_margin: float = 0.0,
     out_path: str,
     face_timeline=None,
+    preview: bool = False,
     cancel_check=None,
     register_proc=None,
     timeout: int | None = None,
@@ -266,7 +267,11 @@ def render(
     {9:16, 16:9, 1:1, 4:5}. ``pan`` follows the speaker: with a ``face_timeline`` (per-shot face
     tracking) the crop-x follows the detected face; otherwise it hard-cuts between the two ROIs
     via the vendored ``pan_expr`` from ``track``. ``split`` stacks both ROIs; ``center`` is a
-    centered crop. Returns ``out_path``."""
+    centered crop. Returns ``out_path``.
+
+    ``preview`` renders a fast, low-res (640-tall) throwaway so the editor can show the REAL reframe
+    at the chosen aspect/mode (what-you-see = what-you-get) instead of a CSS crop approximation —
+    ultrafast/low-quality since it's never delivered."""
     if aspect not in _ASPECTS:
         raise ValueError(f"unknown aspect {aspect!r}; expected one of {list(_ASPECTS)}")
     if mode not in _MODES:
@@ -275,13 +280,19 @@ def render(
     out_w, out_h = _ASPECTS[aspect]
     src_w, src_h = probe_dimensions(clip_path)
     base = ["ffmpeg", "-y", "-i", clip_path]
-    # Intermediate pass → hardware encoder + visually-lossless quality (was an implicit ~CRF 23).
-    venc = exporter.intermediate_encode_flags()
+    # Final intermediate pass → hardware encoder + visually-lossless quality (was an implicit
+    # ~CRF 23). A preview is throwaway, so encode it tiny + ultrafast instead.
+    venc = (["-c:v", "libx264", "-crf", "30", "-preset", "ultrafast"]
+            if preview else exporter.intermediate_encode_flags())
+    pre = ",scale=-2:640" if preview else ""   # downscale the finished crop for a fast preview
 
     if mode == "split":
+        sf = _split_filter(track, out_w, out_h)
+        if preview:
+            sf += ";[vout]scale=-2:640[vpre]"
         argv = base + [
-            "-filter_complex", _split_filter(track, out_w, out_h),
-            "-map", "[vout]", "-map", "0:a?", *venc, "-c:a", "copy", out_path,
+            "-filter_complex", sf,
+            "-map", "[vpre]" if preview else "[vout]", "-map", "0:a?", *venc, "-c:a", "copy", out_path,
         ]
     else:
         if mode == "pan" and face_timeline:
@@ -290,7 +301,7 @@ def render(
             vf = _pan_vf(track, src_w, src_h, out_w, out_h, crop_margin)
         else:
             vf = _center_vf(src_w, src_h, out_w, out_h)
-        argv = base + ["-vf", vf, *venc, "-c:a", "copy", out_path]
+        argv = base + ["-vf", vf + pre, *venc, "-c:a", "copy", out_path]
 
     _ffmpeg.run(
         argv,

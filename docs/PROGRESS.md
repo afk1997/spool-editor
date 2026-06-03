@@ -122,10 +122,19 @@
 >   flow (S7 reframe → S8 caption) + the editor preview consume the *separate* `reframed.mp4` /
 >   `captioned.mp4` artifacts, so merging is a one-shot-only optimization that would either keep both
 >   encodes (no saving) or destabilize those consumers; F.1 already delivers the "sharper + faster" goal,
->   so the merge isn't worth the regression risk now. **F part 3 (real-render editor preview)** — the
->   editor already plays the real baked 9:16 reframe; replacing the CSS-crop approximation for the other
->   aspects/modes with a fast low-res real reframe is the remaining preview-fidelity work (studio + a
->   fast-preview endpoint), tracked for a focused pass. Commit below.
+>   so the merge isn't worth the regression risk now. Commit below.
+> - **✅ F (preview fidelity, part 3) — the editor previews the REAL reframe, not a CSS crop.**
+>   `reframe.render(preview=True)` renders a fast low-res (640-tall, libx264 ultrafast) throwaway;
+>   `clip_runner._do_reframe` writes it to `preview.mp4` and does NOT clobber the baked `reframed.mp4` /
+>   `track.json`; `POST /clips/<id>/reframe` accepts `preview`; the `preview` artifact is servable. Studio
+>   editor (S6): a **"Preview real reframe"** button renders the actual reframe for the chosen aspect/mode
+>   and plays it (what-you-see = what-you-get) — the instant CSS crop stays as the until-ready
+>   approximation; preview relevance is DERIVED per-combo (no setState-in-effect). **Measured:** preview
+>   render **0.46 s** (vs 1.41 s full) at 1:1; **live API probe** → `preview.mp4` 640×640 (the real 1:1
+>   pan) with the baked `reframed.mp4` still 1080×1920 (no clobber). TDD: +2 `test_reframe` (preview
+>   downscales + ultrafast; default unchanged). Engine **706** · studio typecheck/lint/12 vitest/build/e2e
+>   (47.0 s) green. **→ Item F complete** (F.1 encodes · F.3 preview; F.2 merge deferred w/ rationale).
+>   Commit below.
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,

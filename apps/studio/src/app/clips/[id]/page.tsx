@@ -85,6 +85,21 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   const [artifact, setArtifact] = useState<"reframed" | "clip">("reframed"); // which intermediate to preview
   const videoRef = useRef<HTMLVideoElement>(null);
 
+  // F.3 — real-render preview: render a fast low-res REAL reframe for the chosen aspect/mode so the
+  // editor shows what-you-get (not a CSS crop). Per-combo: cleared whenever aspect/mode changes.
+  const [pvJob, setPvJob] = useState<{ id: string; aspect: string; mode: string } | null>(null);
+  // Relevance is DERIVED (no effect): a stored preview only applies while its combo matches the
+  // current aspect/mode — change either and it's ignored (falls back to the live crop) until re-run.
+  const pvMatch = !!pvJob && pvJob.aspect === aspect && pvJob.mode === reframe;
+  const pvLive = pvMatch ? (snapshot?.clips ?? []).find((c) => c.id === pvJob!.id) : undefined;
+  const pvReady = pvMatch && pvLive?.status === "done";
+  const pvRendering = pvMatch && !pvReady && pvLive?.status !== "error";
+  const requestPreview = () => {
+    ctx.client.reframe(id, { aspect, mode: reframe, preview: true })
+      .then((j) => setPvJob({ id: j.id, aspect, mode: reframe }))
+      .catch(() => ctx.pushToast({ icon: "alert", tone: "warn", title: "Preview failed", body: "couldn't render the reframe preview" }));
+  };
+
   // Render = burn the chosen caption style + export (reframe first if the format changed here).
   const render = () => ctx.makeClipsFrom([{ id }], { aspect, mode: reframe, preset, style });
   const capWords = (clip.title || "your caption here").split(" ").slice(0, 8);
@@ -116,14 +131,18 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   //    (object-fit: cover) into the chosen frame, so 16:9 / 1:1 / 4:5 actually change the picture.
   //    The exact speaker-pan at that aspect bakes in on Render.
   // The baked reframed cut is the real diar⊕ROI *pan* at 9:16 — show it only when the picks match
-  // it. "Center" (and other aspects) preview accurately as a centered crop of the original cut
-  // (object-fit: cover). "Split" can't be faked with one <video> (it stacks both speakers), so we
-  // show the cut + a hint and bake the real layout on Render.
+  // it. For any other combo, "Preview real reframe" (F.3) renders the actual low-res reframe to
+  // preview.mp4 → played here (contain, what-you-get); until then the original cut is shown
+  // center-cropped (object-fit: cover) as an instant approximation, with a hint for Split.
   const reframedAspect = clip.aspect || "9:16";
   const showReframed = !renderSrc && reframe === "pan" && aspect === reframedAspect && artifact === "reframed";
+  const usePreview = !renderSrc && !showReframed && pvReady;   // the real low-res reframe for this combo
   const previewKind: "reframed" | "clip" = showReframed ? "reframed" : "clip";
-  const previewSrc = renderSrc ?? ctx.client.clipArtifactUrl(id, previewKind);
-  const previewFit: "contain" | "cover" = renderSrc || showReframed ? "contain" : "cover";
+  const previewSrc = renderSrc
+    ? renderSrc
+    : usePreview ? `${ctx.client.clipArtifactUrl(id, "preview")}?v=${pvJob!.id}`
+    : ctx.client.clipArtifactUrl(id, previewKind);
+  const previewFit: "contain" | "cover" = renderSrc || showReframed || usePreview ? "contain" : "cover";
   const hl = ({ opus: "var(--caption-hl)", karaoke: "#37E2A0", minimal: "#ffffff" } as Record<string, string>)[style] || "var(--caption-hl)";
   let activeIdx = -1;
   for (let i = 0; i < tlWords.length; i++) { if (((tlWords[i].start ?? lo) - lo) <= cur) activeIdx = i; else break; }
@@ -149,7 +168,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
             <div style={{ height: "100%", aspectRatio: aspect === "9:16" ? "9/16" : aspect === "1:1" ? "1/1" : aspect === "4:5" ? "4/5" : "16/9", maxHeight: "52vh", borderRadius: 10, overflow: "hidden", position: "relative", border: "1px solid var(--line-str)", background: "#000" }}>
               {/* Play the real clip: the burned render if there is one, otherwise the reframed cut
                   (→ raw cut on 404). The caption overlay is live only for the un-burned preview. */}
-              <video key={renderSrc ? selRender?.result.render_id : previewKind} ref={videoRef} src={previewSrc} controls playsInline
+              <video key={renderSrc ? selRender?.result.render_id : usePreview ? `pv-${pvJob!.id}` : previewKind} ref={videoRef} src={previewSrc} controls playsInline
                 onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)}
                 onTimeUpdate={(e) => setCur(e.currentTarget.currentTime)}
                 onError={() => { if (!renderSrc && artifact === "reframed") setArtifact("clip"); }}
@@ -157,7 +176,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
               {!renderSrc && (
                 <>
                   {safe && <div style={{ position: "absolute", inset: "8% 6%", border: "1px dashed rgba(255,255,255,0.3)", borderRadius: 6, pointerEvents: "none" }} />}
-                  {reframe === "split" && (
+                  {reframe === "split" && !usePreview && (
                     <div style={{ position: "absolute", top: "9%", left: "50%", transform: "translateX(-50%)", padding: "4px 9px", borderRadius: 6, background: "rgba(0,0,0,0.66)", color: "#fff", fontSize: 11, fontFamily: "var(--font-mono)", pointerEvents: "none", whiteSpace: "nowrap" }}>split · both speakers stack on Render</div>
                   )}
                   {capLine.length > 0 && (
@@ -167,7 +186,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
                   )}
                 </>
               )}
-              <div className="badge" style={{ position: "absolute", top: 8, left: 8 }}>{renderSrc ? "rendered" : `live · ${reframe}`}</div>
+              <div className="badge" style={{ position: "absolute", top: 8, left: 8 }}>{renderSrc ? "rendered" : usePreview ? `preview · ${reframe}` : `live · ${reframe}`}</div>
             </div>
           </div>
           <div className="row" style={{ gap: 14, padding: "10px 18px", borderTop: "1px solid var(--line)", flex: "none" }}>
@@ -222,6 +241,16 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
                     ))}
                   </div>
                 </div>
+                {!showReframed && (
+                  <div>
+                    <Btn variant="ghost" icon="scan" onClick={requestPreview} disabled={pvRendering} style={{ width: "100%" }}>
+                      {pvRendering ? "Rendering real preview…" : pvReady ? "Re-render preview" : "Preview real reframe"}
+                    </Btn>
+                    <div className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 6, lineHeight: 1.5 }}>
+                      {pvReady ? "showing the real low-res reframe (what Render bakes)" : "renders the actual reframe for this aspect/mode (vs. the live crop)"}
+                    </div>
+                  </div>
+                )}
                 <Btn variant="ghost" icon="scan" onClick={() => ctx.nav("reframe", { id })}>Open ROI editor →</Btn>
               </div>
             )}

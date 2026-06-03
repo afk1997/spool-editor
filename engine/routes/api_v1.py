@@ -394,7 +394,8 @@ _CLIP_ASPECTS = ("9:16", "16:9", "1:1", "4:5")
 _CLIP_MODES = ("pan", "split", "center")
 _CLIP_PRESETS = ("tiktok", "reels", "shorts", "youtube", "linkedin", "x")
 _CAPTION_STYLES = ("opus", "karaoke", "minimal")
-_CLIP_ARTIFACTS = {"clip": "clip.mp4", "reframed": "reframed.mp4", "captioned": "captioned.mp4"}
+_CLIP_ARTIFACTS = {"clip": "clip.mp4", "reframed": "reframed.mp4", "captioned": "captioned.mp4",
+                   "preview": "preview.mp4"}
 
 
 def _is_hex_color(v) -> bool:
@@ -1593,6 +1594,8 @@ def reframe_clip(clip_id):
     if aspect not in _CLIP_ASPECTS or mode not in _CLIP_MODES:
         return jsonify({"error": "bad_params"}), 400
     params = {"aspect": aspect, "mode": mode}
+    if data.get("preview") is not None:
+        params["preview"] = bool(data["preview"])  # editor what-you-see preview: fast low-res to preview.mp4
     if isinstance(data.get("rois"), dict):
         params["rois"] = data["rois"]
     # Phase-2 S7 tuning knobs: numeric, clamped to safe ranges.

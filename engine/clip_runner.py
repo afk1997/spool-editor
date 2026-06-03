@@ -232,8 +232,12 @@ class ClipRunner:
                 min_dwell=float(params.get("min_dwell", 1.0)), smoothing=params.get("smoothing"),
                 work_dir=str(d), **self._hooks(job),
             )
-        (d / "track.json").write_text(json.dumps(track))
-        out = str(d / "reframed.mp4")
+        # Editor preview: a fast low-res reframe to preview.mp4 that does NOT clobber the baked
+        # reframed.mp4 / track.json (so the real render's artifacts survive a preview).
+        preview = bool(params.get("preview"))
+        out = str(d / ("preview.mp4" if preview else "reframed.mp4"))
+        if not preview:
+            (d / "track.json").write_text(json.dumps(track))
         mode = params.get("mode", "pan")
         # Auto pan (no manual ROIs, no hand-edited track) → follow the real speaker's face through
         # cuts via per-shot face tracking. Manual ROIs / edited tracks keep the diar⊕ROI 2-ROI pan.
@@ -255,11 +259,12 @@ class ClipRunner:
             except Exception:
                 face_timeline = None
             track["face_track"] = bool(face_timeline)  # surfaced in track.json for inspection
-            (d / "track.json").write_text(json.dumps(track))
+            if not preview:
+                (d / "track.json").write_text(json.dumps(track))
         reframe.render(clip_path, track, aspect=params.get("aspect", "9:16"),
                        mode=mode, crop_margin=float(params.get("crop_margin", 0.0)),
-                       out_path=out, face_timeline=face_timeline, **self._hooks(job))
-        return {"reframed_path": out, "track": track}
+                       out_path=out, face_timeline=face_timeline, preview=preview, **self._hooks(job))
+        return {"reframed_path": out, "track": track, "preview": preview}
 
     def _do_caption(self, job, *, clip_id: str, params: dict) -> dict:
         d = self.clip_dir(clip_id)

@@ -192,6 +192,25 @@ def test_render_split_stacks_both_rois(monkeypatch, tmp_path):
     assert "-map" in argv and "[vout]" in argv
 
 
+def test_render_preview_is_low_res_and_ultrafast(monkeypatch, tmp_path):
+    """The editor preview renders the REAL reframe, but downscaled + ultrafast (throwaway)."""
+    captured = _capture_render(monkeypatch)
+    reframe.render("clip.mp4", _track(), aspect="9:16", mode="pan", preview=True,
+                   out_path=str(tmp_path / "preview.mp4"))
+    argv = captured["argv"]
+    vf = argv[argv.index("-vf") + 1]
+    assert vf.endswith(",scale=-2:640")              # downscaled after the real crop/scale
+    assert "scale=1080:1920" in vf                   # the real reframe is still computed first
+    assert "ultrafast" in argv and argv[argv.index("-crf") + 1] == "30"  # fast throwaway encode
+
+
+def test_render_default_is_not_downscaled(monkeypatch, tmp_path):
+    captured = _capture_render(monkeypatch)
+    reframe.render("clip.mp4", _track(), aspect="9:16", mode="pan", out_path=str(tmp_path / "o.mp4"))
+    vf = captured["argv"][captured["argv"].index("-vf") + 1]
+    assert "scale=-2:640" not in vf and "ultrafast" not in captured["argv"]  # full-res real render
+
+
 def test_render_pan_without_segments_falls_back_to_center(monkeypatch, tmp_path):
     captured = _capture_render(monkeypatch)
     track = _track()

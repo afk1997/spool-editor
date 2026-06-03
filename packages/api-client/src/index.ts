@@ -65,6 +65,8 @@ export interface ReframeParams {
   crop_margin?: number;
   /** A hand-edited speaker track (drag/flip in S7) — rendered verbatim, skipping diar⊕ROI. */
   segments?: TrackSegment[];
+  /** Editor preview: render a fast low-res reframe to preview.mp4 (does not touch reframed.mp4). */
+  preview?: boolean;
 }
 export interface Roi {
   x: number;
@@ -376,7 +378,7 @@ export class SpoolApiClient {
 
   /** Stream URL for a clip's intermediate artifact (cut/reframed/captioned mp4) — for the
    *  editor previews (S6/S7/S8). Final platform renders use `renderFileUrl`. */
-  clipArtifactUrl(clipId: string, name: "clip" | "reframed" | "captioned"): string {
+  clipArtifactUrl(clipId: string, name: "clip" | "reframed" | "captioned" | "preview"): string {
     return `${this.baseUrl}/api/v1/clips/${encodeURIComponent(clipId)}/artifacts/${name}`;
   }
 
