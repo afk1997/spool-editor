@@ -109,10 +109,17 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   const togglePlay = () => { const v = videoRef.current; if (v) { if (v.paused) void v.play(); else v.pause(); setPlaying(!v.paused); } else setPlaying((p) => !p); };
   const others = ctx.clips.filter((c) => c.src === clip.src && c.id !== clip.id).slice(0, 4);
 
-  // Live preview: when there's no burned render yet, play the real reframed clip (falling back to
-  // the raw cut) and overlay the transcript captions IN SYNC with the playhead — the standard
-  // "watch it with captions, tweak, then Render" flow. The exact ASS burn happens on Render.
-  const previewSrc = renderSrc ?? ctx.client.clipArtifactUrl(id, artifact);
+  // Live preview source + framing:
+  //  - a burned render → play it as-is (contain).
+  //  - the clip's baked aspect (9:16) → play the real reframed cut (the diar⊕ROI speaker-pan), contain.
+  //  - any other aspect the user picks here → re-frame LIVE by playing the original cut center-cropped
+  //    (object-fit: cover) into the chosen frame, so 16:9 / 1:1 / 4:5 actually change the picture.
+  //    The exact speaker-pan at that aspect bakes in on Render.
+  const reframedAspect = clip.aspect || "9:16";
+  const showReframed = !renderSrc && aspect === reframedAspect && artifact === "reframed";
+  const previewKind: "reframed" | "clip" = showReframed ? "reframed" : "clip";
+  const previewSrc = renderSrc ?? ctx.client.clipArtifactUrl(id, previewKind);
+  const previewFit: "contain" | "cover" = renderSrc || showReframed ? "contain" : "cover";
   const hl = ({ opus: "var(--caption-hl)", karaoke: "#37E2A0", minimal: "#ffffff" } as Record<string, string>)[style] || "var(--caption-hl)";
   let activeIdx = -1;
   for (let i = 0; i < tlWords.length; i++) { if (((tlWords[i].start ?? lo) - lo) <= cur) activeIdx = i; else break; }
@@ -138,11 +145,11 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
             <div style={{ height: "100%", aspectRatio: aspect === "9:16" ? "9/16" : aspect === "1:1" ? "1/1" : aspect === "4:5" ? "4/5" : "16/9", maxHeight: "52vh", borderRadius: 10, overflow: "hidden", position: "relative", border: "1px solid var(--line-str)", background: "#000" }}>
               {/* Play the real clip: the burned render if there is one, otherwise the reframed cut
                   (→ raw cut on 404). The caption overlay is live only for the un-burned preview. */}
-              <video key={renderSrc ? selRender?.result.render_id : artifact} ref={videoRef} src={previewSrc} controls playsInline
+              <video key={renderSrc ? selRender?.result.render_id : previewKind} ref={videoRef} src={previewSrc} controls playsInline
                 onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)}
                 onTimeUpdate={(e) => setCur(e.currentTarget.currentTime)}
                 onError={() => { if (!renderSrc && artifact === "reframed") setArtifact("clip"); }}
-                style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", background: "#000" }} />
+                style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: previewFit, background: "#000" }} />
               {!renderSrc && (
                 <>
                   {safe && <div style={{ position: "absolute", inset: "8% 6%", border: "1px dashed rgba(255,255,255,0.3)", borderRadius: 6, pointerEvents: "none" }} />}
