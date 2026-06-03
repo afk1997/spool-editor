@@ -152,6 +152,8 @@ export interface PipelineParams {
   mode?: string;
   style?: string;
   preset?: string;
+  /** 'reframe' = cut + auto-reframe then STOP (no caption/export) — the "Make clips" path. */
+  stop_after?: "reframe";
 }
 
 function qs(params: Record<string, unknown>): string {

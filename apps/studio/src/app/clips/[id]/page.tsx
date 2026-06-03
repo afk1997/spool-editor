@@ -4,7 +4,7 @@ import { useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { useSpool, type SpoolClip } from "@/components/spool/context";
 import { useEngineQuery, useLive } from "@/lib/engine-context";
-import { Btn, Chip, Empty, Icon, Seg, Switch, Thumb, fmtTC } from "@spool/ui";
+import { Btn, Chip, Empty, Icon, Seg, Switch, fmtTC } from "@spool/ui";
 
 /* S6 Editor — connective hub, 1:1 port of the demo (06). Preview · transport · timeline ·
  * inspector (Format / Captions / Brand / Export). Render runs the real engine with the
@@ -80,9 +80,13 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   const [reframe, setReframe] = useState("pan");
   const [preset, setPreset] = useState(clip.platform || "tiktok");
   const [safe, setSafe] = useState(true);
+  const [cur, setCur] = useState(0);               // playhead (clip-relative seconds) for the live caption overlay
+  const [style, setStyle] = useState(clip.style || "opus");
+  const [artifact, setArtifact] = useState<"reframed" | "clip">("reframed"); // which intermediate to preview
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  const render = () => ctx.makeClipsFrom([{ id }], { aspect, mode: reframe, preset });
+  // Render = burn the chosen caption style + export (reframe first if the format changed here).
+  const render = () => ctx.makeClipsFrom([{ id }], { aspect, mode: reframe, preset, style });
   const capWords = (clip.title || "your caption here").split(" ").slice(0, 8);
   const renders = (snapshot?.clips ?? []).filter((c) => c.clip_id === id && (c.kind === "export" || c.kind === "pipeline") && c.status === "done" && c.result.render_id);
   const [ver, setVer] = useState<number | null>(null);   // A/B: which render version is in the preview (null = latest)
@@ -105,6 +109,17 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   const togglePlay = () => { const v = videoRef.current; if (v) { if (v.paused) void v.play(); else v.pause(); setPlaying(!v.paused); } else setPlaying((p) => !p); };
   const others = ctx.clips.filter((c) => c.src === clip.src && c.id !== clip.id).slice(0, 4);
 
+  // Live preview: when there's no burned render yet, play the real reframed clip (falling back to
+  // the raw cut) and overlay the transcript captions IN SYNC with the playhead — the standard
+  // "watch it with captions, tweak, then Render" flow. The exact ASS burn happens on Render.
+  const previewSrc = renderSrc ?? ctx.client.clipArtifactUrl(id, artifact);
+  const hl = ({ opus: "var(--caption-hl)", karaoke: "#37E2A0", minimal: "#ffffff" } as Record<string, string>)[style] || "var(--caption-hl)";
+  let activeIdx = -1;
+  for (let i = 0; i < tlWords.length; i++) { if (((tlWords[i].start ?? lo) - lo) <= cur) activeIdx = i; else break; }
+  const lineStart = Math.max(0, activeIdx - 2);
+  const capLine = tlWords.slice(lineStart, lineStart + 6);
+  const activeWordIdx = tlWords[activeIdx]?.idx;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }} className="fadein">
       <div className="row" style={{ gap: 10, padding: "12px 20px", borderBottom: "1px solid var(--line)", flex: "none" }}>
@@ -120,27 +135,30 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
       <div style={{ flex: 1, display: "grid", gridTemplateColumns: "1fr 320px", minHeight: 0 }}>
         <div style={{ display: "flex", flexDirection: "column", minHeight: 0, borderRight: "1px solid var(--line)" }}>
           <div style={{ flex: 1, display: "grid", placeItems: "center", padding: 24, background: "#070809", minHeight: 0 }}>
-            <div style={{ height: "100%", aspectRatio: aspect === "9:16" ? "9/16" : aspect === "1:1" ? "1/1" : aspect === "4:5" ? "4/5" : "16/9", maxHeight: "52vh", borderRadius: 10, overflow: "hidden", position: "relative", border: "1px solid var(--line-str)" }}>
-              {renderSrc ? (
-                /* a rendered clip: play the REAL .mp4 (captions already burned in) */
-                <video key={selRender?.result.render_id || "none"} ref={videoRef} src={renderSrc} controls playsInline onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)}
-                  style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", background: "#000" }} />
-              ) : (
-                /* not rendered yet: the framing placeholder + caption preview */
+            <div style={{ height: "100%", aspectRatio: aspect === "9:16" ? "9/16" : aspect === "1:1" ? "1/1" : aspect === "4:5" ? "4/5" : "16/9", maxHeight: "52vh", borderRadius: 10, overflow: "hidden", position: "relative", border: "1px solid var(--line-str)", background: "#000" }}>
+              {/* Play the real clip: the burned render if there is one, otherwise the reframed cut
+                  (→ raw cut on 404). The caption overlay is live only for the un-burned preview. */}
+              <video key={renderSrc ? selRender?.result.render_id : artifact} ref={videoRef} src={previewSrc} controls playsInline
+                onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)}
+                onTimeUpdate={(e) => setCur(e.currentTarget.currentTime)}
+                onError={() => { if (!renderSrc && artifact === "reframed") setArtifact("clip"); }}
+                style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", background: "#000" }} />
+              {!renderSrc && (
                 <>
-                  <Thumb seed={clip.id} vertical={aspect === "9:16"} kind="" label={false} />
-                  {safe && <div style={{ position: "absolute", inset: "8% 6%", border: "1px dashed rgba(255,255,255,0.3)", borderRadius: 6 }} />}
-                  <div style={{ position: "absolute", left: 0, right: 0, bottom: "16%", textAlign: "center", fontFamily: "var(--font-caption)", fontSize: 18, color: "#fff", textShadow: "0 2px 6px #000", padding: "0 8%", lineHeight: 1.15 }}>
-                    {capWords.map((w, i) => <span key={i} style={{ color: i === 1 ? "var(--caption-hl)" : "#fff" }}>{w} </span>)}
-                  </div>
+                  {safe && <div style={{ position: "absolute", inset: "8% 6%", border: "1px dashed rgba(255,255,255,0.3)", borderRadius: 6, pointerEvents: "none" }} />}
+                  {capLine.length > 0 && (
+                    <div style={{ position: "absolute", left: 0, right: 0, bottom: "15%", textAlign: "center", padding: "0 8%", pointerEvents: "none", fontFamily: "var(--font-caption)", fontSize: 19, lineHeight: 1.2, textShadow: "0 2px 7px #000", WebkitTextStroke: "0.5px rgba(0,0,0,.6)", textTransform: style === "opus" ? "uppercase" : "none" }}>
+                      {capLine.map((w) => <span key={w.idx} style={{ color: w.idx === activeWordIdx ? hl : "#fff", fontWeight: w.idx === activeWordIdx ? 800 : 600 }}>{w.w} </span>)}
+                    </div>
+                  )}
                 </>
               )}
-              <div className="badge" style={{ position: "absolute", top: 8, left: 8 }}>{renderSrc ? "rendered" : "preview"}</div>
+              <div className="badge" style={{ position: "absolute", top: 8, left: 8 }}>{renderSrc ? "rendered" : "live preview"}</div>
             </div>
           </div>
           <div className="row" style={{ gap: 14, padding: "10px 18px", borderTop: "1px solid var(--line)", flex: "none" }}>
             <button className="iconbtn" onClick={togglePlay} style={{ background: "var(--accent)", color: "var(--accent-ink)" }}><Icon name={playing ? "pause" : "play"} size={16} /></button>
-            <span className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)" }}>{renderSrc ? "playing the rendered clip" : "render to preview"}</span>
+            <span className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)" }}>{renderSrc ? "playing the rendered clip" : "live preview · captions overlaid · burned in on Render"}</span>
             <span className="spacer" />
             <label className="row" style={{ gap: 7, fontSize: 12.5, cursor: "pointer" }}><Switch on={safe} onClick={() => setSafe(!safe)} /> Safe zones</label>
           </div>
@@ -195,8 +213,9 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
             )}
             {insp === "Captions" && (
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                <div><span className="field-label">Preset</span><div className="kbar">{["opus", "karaoke", "minimal"].map((p) => <span key={p} className={"chip" + (clip.style === p ? " solid" : "")} style={{ cursor: "pointer" }}>{p}</span>)}</div></div>
-                <div className="card" style={{ padding: 12, textAlign: "center", background: "#0a0b0d" }}><span style={{ fontFamily: "var(--font-caption)", fontSize: 18, color: "#fff" }}>{capWords[0]} <span style={{ color: "var(--caption-hl)" }}>{capWords[1] || ""}</span></span></div>
+                <div><span className="field-label">Preset</span><div className="kbar">{["opus", "karaoke", "minimal"].map((p) => <span key={p} className={"chip" + (style === p ? " solid" : "")} style={{ cursor: "pointer", textTransform: "capitalize" }} onClick={() => setStyle(p)}>{p}</span>)}</div></div>
+                <div className="card" style={{ padding: 12, textAlign: "center", background: "#0a0b0d" }}><span style={{ fontFamily: "var(--font-caption)", fontSize: 18, color: "#fff", textTransform: style === "opus" ? "uppercase" : "none" }}>{capWords[0]} <span style={{ color: hl }}>{capWords[1] || ""}</span></span></div>
+                <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", lineHeight: 1.6 }}>Captions play live over the preview on the left. Render burns this style in; fine-tune size/colors/position in the Caption Studio.</div>
                 <Btn variant="ghost" icon="type" onClick={() => ctx.nav("caption", { id })}>Open Caption Studio →</Btn>
               </div>
             )}

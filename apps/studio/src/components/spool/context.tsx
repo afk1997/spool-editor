@@ -258,7 +258,7 @@ interface SpoolCtx {
   recipes: string[];
   deps: SpoolDep[];
   snapshot: EventsSnapshot | null;
-  nav: (screen: string, params?: { id?: string }) => void;
+  nav: (screen: string, params?: { id?: string; tab?: string }) => void;
   agentOpen: boolean; openAgent: () => void; toggleAgent: () => void; closeAgent: () => void;
   paletteOpen: boolean; openPalette: () => void; closePalette: () => void;
   shortcutsOpen: boolean; openShortcuts: () => void; closeShortcuts: () => void;
@@ -298,10 +298,11 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
     setTimeout(() => setToasts((ts) => ts.filter((x) => x.id !== id)), 4200);
   };
 
-  const nav = (screen: string, params: { id?: string } = {}) => {
+  const nav = (screen: string, params: { id?: string; tab?: string } = {}) => {
     const id = params.id;
+    const q = params.tab ? `?tab=${encodeURIComponent(params.tab)}` : "";
     switch (screen) {
-      case "project": return router.push(id ? `/sources/${id}` : "/library");
+      case "project": return router.push(id ? `/sources/${id}${q}` : "/library");
       case "discovery": return router.push(id ? `/sources/${id}/discovery` : "/library");
       case "editor": return router.push(id ? `/clips/${id}` : "/clips");
       case "reframe": return router.push(id ? `/clips/${id}/reframe` : "/clips");
@@ -341,30 +342,54 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
     if (text) askAgent(text, msg.sourceId); // re-ask with the source context the clarify was raised in
   };
 
-  /** Render selected candidates / clips. `opts` lets a screen (e.g. the Editor) pass its chosen
-   *  aspect/reframe-mode/caption-style/export-preset; the discovery flow uses 9:16/pan/opus/tiktok. */
+  /** Poll a clip job until it leaves the running/queued state, so a dependent next step (caption
+   *  after reframe, export after caption) starts only once its input file is fully written. */
+  const awaitClipJob = async (id?: string): Promise<void> => {
+    if (!id) return;
+    for (let i = 0; i < 600; i++) {
+      const j = await client.getClipJob(id).catch(() => null);
+      if (!j || j.status === "done" || j.status === "error" || j.status === "cancelled") return;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  };
+
+  /** Two paths, by what's passed:
+   *  - Discovery candidates (have source_id + start/end) → CUT + auto-reframe to 9:16 and STOP
+   *    (no burn), then land in the source's Clips tab to review. Nothing renders yet — you check
+   *    each clip first (the user-requested flow).
+   *  - An existing clip (the Editor's Render, id only) → caption (chosen style) + export, and go
+   *    to the Render Queue to watch it. Reframe first if the Editor changed the format. */
   const makeClipsFrom = (
     sel: { source_id?: string; start?: number; end?: number; id?: string; title?: string }[],
     opts: { aspect?: string; mode?: string; style?: string; preset?: string } = {},
   ) => {
     const aspect = opts.aspect ?? "9:16", mode = opts.mode ?? "pan", style = opts.style ?? "opus", preset = opts.preset ?? "tiktok";
-    let started = 0;
-    for (const c of sel) {
-      if (c.source_id && c.start != null && c.end != null) {
-        client.renderPipeline(c.source_id, { start: c.start, end: c.end, aspect, mode, style, preset }).catch(() => {});
-        started++;
-      } else if (c.id) {
-        // existing clip: apply the chosen format (reframe) before exporting so the Editor's
-        // pickers actually take effect, instead of re-exporting with no params.
-        const ran = opts.aspect || opts.mode
-          ? client.reframe(c.id, { aspect, mode }).then(() => client.render(c.id!, { preset }))
-          : client.render(c.id, { preset });
-        ran.catch(() => {});
-        started++;
-      }
+    const fresh = sel.filter((c) => c.source_id && c.start != null && c.end != null);
+    const existing = sel.filter((c) => c.id && !(c.source_id && c.start != null && c.end != null));
+
+    if (fresh.length) {
+      for (const c of fresh)
+        client.renderPipeline(c.source_id!, { start: c.start!, end: c.end!, aspect, mode, stop_after: "reframe" }).catch(() => {});
+      pushToast({ icon: "scissors", tone: "info", title: `Cutting ${fresh.length} clip${fresh.length > 1 ? "s" : ""}`,
+        body: "Auto-reframing to 9:16 — review each in the Clips tab, then render when you're happy." });
+      nav("project", { id: fresh[0].source_id!, tab: "Clips" });
+      return;
     }
-    if (!started) { pushToast({ icon: "alert", tone: "warn", title: "Nothing to render", body: "No clip or moment range to act on." }); return; }
-    pushToast({ icon: "film", tone: "info", title: `Rendering ${started} clip${started > 1 ? "s" : ""}`, body: "Track progress in the Render Queue" });
+    if (!existing.length) { pushToast({ icon: "alert", tone: "warn", title: "Nothing to render", body: "No clip or moment range to act on." }); return; }
+    for (const c of existing) {
+      // Burn the chosen caption style, then export — reframe first if the Editor changed the
+      // format. These are separate engine jobs that mutate the same files in sequence, so each
+      // MUST finish before the next starts (otherwise caption reads a half-written reframe →
+      // "moov atom not found"). Await each job's completion; the user watches it in the Queue.
+      void (async () => {
+        try {
+          if (opts.aspect || opts.mode) await awaitClipJob((await client.reframe(c.id!, { aspect, mode }))?.id);
+          await awaitClipJob((await client.caption(c.id!, { style }))?.id);
+          await client.render(c.id!, { preset });
+        } catch { /* surfaced as an errored job in the queue */ }
+      })();
+    }
+    pushToast({ icon: "film", tone: "info", title: `Rendering ${existing.length} clip${existing.length > 1 ? "s" : ""}`, body: "Burning captions + exporting — track it in the Render Queue" });
     setAgentOpen(true);
     nav("queue");
   };

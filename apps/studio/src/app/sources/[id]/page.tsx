@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { useSpool, buildTranscript, mapCandidates } from "@/components/spool/context";
 import { useEngineQuery, useLive } from "@/lib/engine-context";
 import { ClipCard } from "@/components/spool/cards";
@@ -15,7 +15,8 @@ export default function ProjectScreen() {
   const ctx = useSpool();
   const { snapshot } = useLive();
   const id = String(useParams().id);
-  const [tab, setTab] = useState("Overview");
+  // Seed the tab from ?tab= so "Make clips" can land you straight on the Clips tab to review.
+  const [tab, setTab] = useState(useSearchParams().get("tab") || "Overview");
 
   const s = ctx.sources.find((x) => x.id === id);
   const doc = useEngineQuery((c) => (s?.transcriptId ? c.getTranscriptDoc(s.transcriptId) : Promise.resolve(undefined)), [s?.transcriptId]);
