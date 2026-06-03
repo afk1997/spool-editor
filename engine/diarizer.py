@@ -280,6 +280,33 @@ def _cluster(embeddings, k: int):
     return list(clf.fit_predict(embeddings))
 
 
+# Two cluster centroids closer than this in cosine distance are treated as the SAME
+# speaker. Within-speaker cosine distance on Resemblyzer embeddings is typically 0.05-0.25;
+# between-speaker is typically 0.40-0.70. Tuned for Resemblyzer + clean speech; lower (0.20)
+# tolerates more within-speaker variation but lets a borderline second speaker slip through,
+# higher (0.30) is stricter. Both auto-K paths share it. Verified on real clips: "Me at the
+# zoo" (1 narrator) tops out at 0.243 cosine between its two tidiest sub-clusters → k=1; the
+# Karpathy×Zhan interview (2 speakers) sits at 0.302 → k=2.
+MIN_CENTROID_DIST = 0.25
+
+
+def _min_centroid_cosine_distance(embeddings, labels) -> float:
+    """Smallest cosine distance between any pair of cluster centroids (0.0 = identical
+    direction, 1.0 = orthogonal). The tightest pair is the most likely same-speaker split,
+    so this is the discriminator for "did clustering split one speaker or find a new one?"."""
+    import numpy as np
+    labels = np.asarray(labels)
+    centroids = [embeddings[labels == c].mean(axis=0)
+                 for c in sorted(set(labels.tolist())) if (labels == c).any()]
+    if len(centroids) < 2:
+        return float("inf")
+    centroids = np.asarray(centroids)
+    normed = centroids / np.maximum(np.linalg.norm(centroids, axis=1, keepdims=True), 1e-9)
+    cos_sim = normed @ normed.T
+    np.fill_diagonal(cos_sim, -np.inf)          # ignore self-similarity
+    return float(1.0 - cos_sim.max())           # 1 − (max off-diagonal similarity)
+
+
 def _auto_k(embeddings, max_k: int = 4) -> int:
     """Choose k between 1 and max_k by inter-cluster centroid distance.
 
@@ -307,12 +334,6 @@ def _auto_k(embeddings, max_k: int = 4) -> int:
     if n < 4:
         return 1
     upper = min(max_k, n)
-
-    # Two centroids closer than this in cosine distance are treated as the
-    # same speaker. Tuned for Resemblyzer + clean speech; lower threshold
-    # (0.20) tolerates more within-speaker variation but lets a borderline
-    # second speaker slip through; higher (0.30) is stricter.
-    MIN_CENTROID_DIST = 0.25
 
     best_k = 1
     for k in range(2, upper + 1):
@@ -461,41 +482,43 @@ def _cluster_partials(embeddings, k: int):
 
 
 def _auto_k_partials(embeddings, max_k: int = 4) -> int:
-    """Choose k for partial embeddings via silhouette + cluster-share guard.
+    """Choose k for partial embeddings by inter-speaker centroid distance.
 
-    Pick the k in 2..max_k that maximizes silhouette score, but reject
-    any k where the smallest cluster is < 5% of the partials — that's
-    a sliver from a single speaker, not a real second voice. Falls
-    back to k=1 if the best silhouette doesn't clear a small structure
-    threshold (0.10).
+    A silhouette score only measures how *tidy* clusters are — it can't tell one speaker's
+    phonetic sub-clusters (tidy, but close together) from two real speakers (tidy, and far
+    apart). On a monologue it over-counts: "Me at the zoo" (one narrator) split into two
+    clean clusters only 0.243 cosine apart at silhouette 0.216 → the old gate reported 2.
+
+    Instead, gate on the SAME within/between-speaker boundary the long-utterance path uses
+    (``_auto_k`` / ``MIN_CENTROID_DIST``): two cluster centroids closer than the threshold
+    are the same speaker. Walk k upward (Ward on partials → balanced clusters) and accept a
+    k only while every centroid pair stays ≥ the threshold AND no cluster is a <5% sliver;
+    stop at the first k that fails, since higher k only splits finer (closer, smaller).
+
+    Verified on real clips: zoo (1 speaker) → k=1, Karpathy interview (2) → k=2.
+    < 10 partials → k=1 (not enough data to trust a split).
     """
     try:
         import numpy as np
         from sklearn.cluster import AgglomerativeClustering
-        from sklearn.metrics import silhouette_score
     except Exception as e:
         raise DiarizationUnavailable(f"scikit-learn not installed: {e}") from e
     n = len(embeddings)
     if n < 10:
         return 1
-    upper = min(max_k, n - 1)  # silhouette needs k < n
+    upper = min(max_k, n - 1)
     best_k = 1
-    best_sil = -1.0
     for k in range(2, upper + 1):
         labels = AgglomerativeClustering(
             n_clusters=k, metric="euclidean", linkage="ward",
         ).fit_predict(embeddings)
         _, counts = np.unique(labels, return_counts=True)
         if counts.min() < 0.05 * n:
-            continue
-        try:
-            sil = float(silhouette_score(embeddings, labels, metric="euclidean"))
-        except Exception:
-            continue
-        if sil > best_sil:
-            best_sil = sil
-            best_k = k
-    return best_k if best_sil >= 0.10 else 1
+            break  # a <5% sliver isn't a distinct speaker; higher k only slivers more
+        if _min_centroid_cosine_distance(embeddings, labels) < MIN_CENTROID_DIST:
+            break  # tightest centroid pair is within-speaker close — k-1 was the answer
+        best_k = k
+    return best_k
 
 
 def _within_cluster_dist(embeddings, labels) -> float:

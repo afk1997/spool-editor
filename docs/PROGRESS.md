@@ -439,12 +439,20 @@ accurate**. These are *two different things* — diagnose before fixing:
     whenever silero-vad is installed (measure that it helps before changing — it's a sub-500 ms,
     compounding effect, dwarfed by the keyframe offset just fixed). This session runs diar=on, so
     realignment is applied in the repro.
-- **Diarization accuracy** (separate, real goal): `engine/diarizer.py` (resemblyzer embeddings + VAD)
-  → speaker count + turn boundaries, fused with ROI in `clip/reframe.py` and surfaced as the
-  speaker-attributed transcript lines. Reframe speaker-following is now face-tracking (less reliant on
-  diar), so diarization mainly affects transcript speaker labels + the active-speaker fusion. Improve:
-  VAD tightness, embedding clustering, min-turn smoothing; measure speaker_count vs ground truth on a
-  known 2-speaker clip.
+- **✅ Diarization accuracy — over-count FIXED + proven on real media (this session).** Diagnosed
+  against hard ground truth: **"Me at the zoo"** (one narrator → truth **1**) was diarized as **2
+  speakers / 3 (overlapping) turns**; the **Karpathy × Stephanie Zhan** interview (truth **2**) was
+  correct. Root cause: `_auto_k_partials` (the v3 partial-embedding k-picker) gated on a **silhouette ≥
+  0.10** score — a cluster-*tidiness* metric that can't tell one speaker's phonetic sub-clusters from
+  two real speakers. Measured at k=2: zoo silhouette 0.216 (→ over-counts) but inter-centroid cosine
+  distance only **0.243**; Karpathy 0.302. **Fix:** gate on **inter-centroid cosine distance ≥ 0.25**
+  (`MIN_CENTROID_DIST`) — the same within/between-speaker boundary the long-utterance `_auto_k` already
+  uses (within-speaker 0.05–0.25, between 0.40–0.70); promoted to a shared module constant +
+  `_min_centroid_cosine_distance` helper. **Measured after the fix:** zoo → **1 speaker / 1 turn**
+  (the overlapping-turns artifact also gone), Karpathy → **2 speakers / 29 turns**, both `correct`.
+  **Harness:** `scripts/diarization_eval.py` (speaker_count + turns vs ground truth). VAD looked tight
+  on these clips (no change); min-turn smoothing untouched (the over-count was pure k-selection). Engine
+  **679 tests** green (+2 `_auto_k_partials` guards: close-subclusters→1, well-separated→2). Commit below.
 
 Same discipline as the shipped slices: TDD the engine, verify on real media (re-import
 `jNQXAC9IVRw`, transcribe, clip, check caption timing against audio), measure, commit each verified

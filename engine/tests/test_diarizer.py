@@ -266,6 +266,55 @@ def test_diarize_returns_empty_when_no_speech(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# auto-K speaker counting — the monologue over-count guard
+# ---------------------------------------------------------------------------
+
+def _blob(direction, n, sigma, seed):
+    """``n`` embedding vectors scattered (``sigma``) around a unit ``direction``."""
+    import numpy as np
+    rng = np.random.RandomState(seed)
+    d = np.array(direction, float)
+    d /= np.linalg.norm(d)
+    return d + rng.normal(0, sigma, size=(n, len(d)))
+
+
+def test_auto_k_partials_treats_close_subclusters_as_one_speaker():
+    """One speaker's phonetic sub-clusters separate cleanly (high silhouette) yet sit CLOSE
+    in centroid distance (below the ~0.25 within/between-speaker boundary). auto-K must
+    return 1, not 2.
+
+    This is the monologue over-count regression: a silhouette-only gate sees two tidy
+    clusters and reports two speakers — e.g. "Me at the zoo" (one narrator) came back as 2.
+    Real partials for that clip: centroid distance 0.243 at k=2, silhouette 0.216.
+    """
+    pytest.importorskip("sklearn")
+    import math
+    import numpy as np
+    d = _fresh_diarizer()
+    a = math.radians(35)  # centroids ~0.18 cosine apart = within-speaker phonetic variation
+    embs = np.vstack([
+        _blob([1, 0, 0, 0], 40, 0.05, 1),
+        _blob([math.cos(a), math.sin(a), 0, 0], 40, 0.05, 2),
+    ])
+    assert d._auto_k_partials(embs) == 1
+
+
+def test_auto_k_partials_detects_two_well_separated_speakers():
+    """Two real speakers' embeddings are far apart (> 0.25 centroid distance) — auto-K → 2.
+    Guards against the fix over-correcting into always-1 (real Karpathy interview: 0.302)."""
+    pytest.importorskip("sklearn")
+    import math
+    import numpy as np
+    d = _fresh_diarizer()
+    b = math.radians(60)  # centroids ~0.5 cosine apart = distinct speakers
+    embs = np.vstack([
+        _blob([1, 0, 0, 0], 40, 0.05, 3),
+        _blob([math.cos(b), math.sin(b), 0, 0], 40, 0.05, 4),
+    ])
+    assert d._auto_k_partials(embs) == 2
+
+
+# ---------------------------------------------------------------------------
 # Encoder caching (audit #12): the heavy ``VoiceEncoder`` should be built
 # at most once per process — not per diarization job.
 # ---------------------------------------------------------------------------
