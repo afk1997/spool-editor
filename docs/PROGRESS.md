@@ -53,6 +53,27 @@
 >   moves them) — measurement noise, not regression. TDD: +3 `test_diarizer` (`vad_available` ignores
 >   flag / false when silero missing / not gated on resemblyzer) + 2 `test_transcribe_pipeline`
 >   (realign runs with diar OFF when VAD present; skipped when VAD absent). Engine **687** green. Commit below.
+> - **✅ C — diarization accuracy: built a labelled benchmark, evaluated every candidate, MEASURED →
+>   retain the current pipeline (no candidate safely wins).** New `scripts/diarization_bench.py` — a
+>   labelled multi-clip benchmark scoring speaker **count** + **turn-boundary error** + **frame-level
+>   label accuracy** (best-permutation, =1−DER no-overlap) on REAL clips (zoo=1, interview=2, count GT)
+>   and SYNTHETIC clips concatenated from two genuinely-different real voices (zoo narrator + the
+>   interview's confidently-single-speaker long runs) so turn boundaries are EXACT by construction —
+>   ground truth without manual labelling. **Baseline:** real count **2/2**; synth mean frame-acc
+>   **0.808**, at forced true k=2 **0.843**. Candidates, all rejected on the benchmark: **(1) SpeechBrain
+>   ECAPA-TDNN embedder** (eval harness `scripts/_ecapa_embed.py`, monkeypatched in via `--encoder ecapa`)
+>   — at matched k=2 frame-acc **0.833 vs resemblyzer 0.843** (tied/marginally worse), and as a drop-in it
+>   over-counts every clip (the clustering gates are tuned to resemblyzer's distance distribution); **no
+>   accuracy win** for a heavy dep + 80 MB model + a CPU batch-size cliff (batch>8 → 480 ms/window). **(2)
+>   auto-k centroid threshold** — the synthetic *false* k=3 (0.313) sits ABOVE the real interview's *true*
+>   k=2 (0.302), so the over-count signal and the real-speaker signal OVERLAP: no scalar `MIN_CENTROID_DIST`
+>   fixes the over-count without making real 2-speaker clips under-count to 1 (a worse error). **(3)
+>   label-smoothing window** — frame-acc is flat across window 1/3/5/9 (no effect on short turns). **Outcome
+>   (plan: "don't swap/change unless it measurably wins"):** keep resemblyzer + the current clustering —
+>   it's correct on real clips and no change safely improves it; the gate did its job (prevented a heavy
+>   dep + a fragile threshold regression). SpeechBrain uninstalled (eval-only, never added to
+>   `requirements.txt`). Benchmark + ECAPA harness kept as reproducible acceptance tooling. Engine **687**
+>   green (no engine code changed). Commit below.
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,
