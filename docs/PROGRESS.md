@@ -21,8 +21,13 @@
 > live-engine render. **(2) diarization** — a monologue ("Me at the zoo") was over-counted as 2
 > speakers; switched the partial-embedding k-picker to the inter-centroid cosine-distance gate →
 > zoo **1**, Karpathy×Zhan interview **2** (both correct). New harnesses `scripts/caption_sync_eval.py`
-> + `scripts/diarization_eval.py`. Engine **679 tests** + studio typecheck/lint/12 vitest/build +
-> **e2e (47.3s)** all green. Commits `e0b96f4` (cut) · `5fbf836` (diar).
+> + `scripts/diarization_eval.py`. **(3) reframe crash on long clips** (found via user report) — the
+> face-track crop expression built one nested `if()` per keyframe, so a long clip's ~100+ keyframes
+> overflowed ffmpeg's expression parser → a **0-byte reframe**, which also blanked the clip's
+> start/end so the editor showed the whole transcript from 0:00 (wrong captions). Pre-existing (the
+> old `-c copy` cut crashed identically); fixed by per-param keyframe reduction + a hard cap. Engine
+> **682 tests** + studio typecheck/lint/12 vitest/build + **e2e (51.2s)** green. Commits `e0b96f4`
+> (cut) · `5fbf836` (diar) · `<face-track>`.
 > **▶ NEXT:** manual testing (engine+studio left running on :8899/:3000), then Phase 3 (glass-box
 > ranking · watch-folder · recipes). Open follow-up: decouple VAD word-realignment from the
 > `TROVE_DIARIZATION` flag (measure first) — see "Next session" notes near the bottom.
@@ -463,11 +468,30 @@ accurate**. These are *two different things* — diagnose before fixing:
   **Harness:** `scripts/diarization_eval.py` (speaker_count + turns vs ground truth). VAD looked tight
   on these clips (no change); min-turn smoothing untouched (the over-count was pure k-selection). Engine
   **679 tests** green (+2 `_auto_k_partials` guards: close-subclusters→1, well-separated→2). Commit below.
+- **✅ Reframe crash on long clips — FIXED (user-reported; pre-existing, NOT from the cut/diar work).**
+  A clip ~23 min into the Karpathy interview ([1410.31, 1451.35]) showed intro captions and a broken
+  reframe. Root cause: `face_track._expr` built **one nested `if(lt(t,…),…)` per keyframe**, and a 41 s
+  clip has ~104 keyframes → the crop expression overflowed ffmpeg's expression parser (`Missing )` /
+  `too many args`) → `reframed.mp4` came out **0 bytes**. The "wrong captions" were a *downstream
+  effect*: the reframe raising made the pipeline job error **before** setting `job.result`, so the
+  studio clip had no `start`/`end` → the editor sliced the transcript from 0:00 (`lo = clip.start ?? 0`)
+  → it showed the intro. **Proven pre-existing:** an old-style `-c copy` cut reframes-fail identically
+  (the frame-accurate cut is correct — `clip.mp4` true-start 1410.31 s, the audio matches). **Fix:**
+  `face_track._reduce_points` — per-param, shape-preserving keyframe reduction (drop points collinear
+  within ~1.5 px, always keep endpoints + `snap` cuts) + a hard cap (`_MAX_KEYFRAMES=50`, ffmpeg
+  rejects ~80–100 nested lerps), applied inside `_expr`. **Verified on the real failing clip:** 104
+  keyframes → 7 (w) / 49 (x) `if()`; the real `pipeline_target` on that exact window now yields a valid
+  **13.4 MB / 41.04 s / 1080×1920** reframe AND `job.result` with `start`/`end` (so the editor slices the
+  right window). +3 `test_face_track` guards (bounded expr, renders through real ffmpeg, reduction
+  keeps endpoints/snaps). Engine **682** green, e2e (51.2s) green. **Follow-up (noted):** harden the
+  studio so a clip with missing `start`/`end` doesn't silently fall back to the whole transcript.
 
 Same discipline as the shipped slices: TDD the engine, verify on real media (re-import
 `jNQXAC9IVRw`, transcribe, clip, check caption timing against audio), measure, commit each verified
 slice, keep this file updated, suites + e2e green. **Reframe quality stack (YuNet face-tracking) is
-DONE — don't redo it.** Then Phase 3 after more manual testing.
+DONE** — the long-clip crop-expression overflow is now fixed too (see the ✅ bullet above); the
+remaining reframe work is *framing quality* on wide/audience shots, not correctness. Then Phase 3
+after more manual testing.
 
 ## What's verified now
 

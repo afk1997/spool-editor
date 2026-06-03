@@ -80,3 +80,49 @@ def test_crop_exprs_builds_four_expressions():
     assert "100.0" in x and "300.0" in x        # x interpolates
     assert "10.0" in y and "1067.0" in h
     assert "if(lt(t,2.000)" in x                # a time interval boundary
+
+
+def _long_pan_timeline(n=400):
+    """A long clip's worth of face-track keyframes with a continuous (non-collinear) pan —
+    the shape that, one nested-if per keyframe, overflows ffmpeg's expression parser."""
+    import math
+    return [(round(i * 0.2, 3), 600 + 300 * math.sin(i / 12), 0.0, 473.3, 841.5, False)
+            for i in range(n)]
+
+
+def test_crop_exprs_bounded_for_long_clip():
+    """A long clip has many keyframes; each crop expression must stay under a safe nesting
+    budget regardless of length. Regression: ~100+ nested if() lerps overflowed ffmpeg's
+    expression parser ('Missing )' / 'too many args') → the crop filter failed → 0-byte reframe.
+    """
+    for e in crop_exprs(_long_pan_timeline(400)):
+        assert e.count("if(") <= 50, f"crop expression has {e.count('if(')} nested ifs (too many)"
+
+
+def test_crop_exprs_render_through_real_ffmpeg_on_long_clip():
+    """The true regression: the long-clip crop expression must be accepted by real ffmpeg's
+    expression evaluator (the unit bound above is the proxy; this proves it end to end)."""
+    import shutil
+    import subprocess
+    import pytest
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("needs ffmpeg")
+    w, h, x, y = crop_exprs(_long_pan_timeline(400))
+    vf = f"crop=w='{w}':h='{h}':x='{x}':y='{y}',scale=1080:1920,setsar=1"
+    r = subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi",
+         "-i", "color=c=black:s=1920x1080:r=10:d=0.5", "-vf", vf, "-t", "0.5", "-f", "null", "-"],
+        capture_output=True, text=True)
+    assert r.returncode == 0, f"ffmpeg rejected the crop expression:\n{r.stderr[:400]}"
+
+
+def test_reduce_points_keeps_endpoints_snaps_and_collapses_collinear():
+    """Keyframe reduction is shape-preserving: a linear pan collapses to a handful of points,
+    while the first/last keyframe and every hard-cut (snap) boundary survive."""
+    from clip.face_track import _reduce_points
+    pts = [(round(i * 0.2, 3), 100.0 + 5 * i, 0.0, 400.0, 700.0, i == 20) for i in range(40)]
+    red = _reduce_points(pts, 1)   # param index 1 = x (a perfectly linear ramp here)
+    ts = [p[0] for p in red]
+    assert red[0] == pts[0] and red[-1] == pts[-1]   # endpoints preserved
+    assert pts[20][0] in ts                           # the snap (hard cut) boundary kept
+    assert len(red) < 12                              # collinear ramp collapses, not 40 points

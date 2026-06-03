@@ -90,11 +90,56 @@ def smooth_track(points, *, deadzone: float = 0.012, alpha: float = 0.35):
     return out
 
 
+# Each crop param becomes one nested-if expression — one `if()` per kept keyframe. ffmpeg's
+# expression parser rejects a crop expression past ~80-100 nested if() lerps ("Missing )" /
+# "too many args"), which on a long clip silently produced a 0-byte reframe. Keep each param's
+# keyframe count safely under that; reduction is per-param, so a static dimension (w/h) costs
+# almost nothing while a panning one (x/y) spends the budget where the motion is.
+_MAX_KEYFRAMES = 50
+
+
+def _reduce_points(points, vi: int, *, tol: float = 1.5):
+    """Drop keyframes redundant for param ``vi`` so its nested-if expression stays small.
+
+    Shape-preserving: a point is dropped only when its value lies (within ``tol`` px) on the
+    straight line between the last kept point and the next one — lossless for flat/linear runs
+    (a per-shot-constant zoom or a steady pan). Endpoints and every hard-cut ``snap`` boundary
+    (index-5 flag, and the point right before it) are always kept. If a continuously-curving pan
+    still exceeds ``_MAX_KEYFRAMES``, the remaining (non-forced) points are uniformly decimated to
+    the budget — a graceful quality floor that guarantees the expression always parses."""
+    n = len(points)
+    if n <= 2:
+        return list(points)
+    kept = [0]
+    for i in range(1, n - 1):
+        if points[i][5] or points[i + 1][5]:      # a hard cut here or next → keep the boundary
+            kept.append(i)
+            continue
+        p, nxt = points[kept[-1]], points[i + 1]
+        span = nxt[0] - p[0]
+        proj = p[vi] + (nxt[vi] - p[vi]) * ((points[i][0] - p[0]) / span) if span > 1e-9 else p[vi]
+        if abs(points[i][vi] - proj) > tol:        # deviates from the line → a real control point
+            kept.append(i)
+    kept.append(n - 1)
+
+    if len(kept) > _MAX_KEYFRAMES:
+        forced = {kept[0], kept[-1]} | {i for i in kept if points[i][5]}
+        free = [i for i in kept if i not in forced]
+        budget = max(0, _MAX_KEYFRAMES - len(forced))
+        if budget < len(free):
+            step = len(free) / budget
+            free = [free[min(len(free) - 1, int(k * step))] for k in range(budget)]
+        kept = sorted(forced.union(free))
+    return [points[i] for i in kept]
+
+
 def _expr(points, vi: int) -> str:
     """Nested-if ffmpeg expression (function of ``t``) over a control-point param: lerp within a
-    shot, step at a ``snap`` (the point's index-5 flag)."""
+    shot, step at a ``snap`` (the point's index-5 flag). Keyframes are reduced per-param first so
+    the expression can't overflow ffmpeg's parser on a long clip (see ``_reduce_points``)."""
     if not points:
         return "0"
+    points = _reduce_points(points, vi)
     if len(points) == 1:
         return f"{points[0][vi]:.1f}"
     expr = f"{points[-1][vi]:.1f}"
