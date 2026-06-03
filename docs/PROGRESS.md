@@ -4,7 +4,11 @@
 > `Spool_Engineering-Spec.md` (§5 roadmap, §6 front-end standards). Status legend:
 > ✅ done & verified · 🟡 in progress · ◻️ not started.
 >
-> **Last updated:** 2026-06-03 · **Phase 0 — ✅ · Phase 1 — ✅ · Phase 2 — 🟡 IN PROGRESS** (S7 reframe + S8 caption + transcript editing + S9 brand kits + library search + S6 editor timeline done & verified; **all 4 done-whens met**).
+> **Last updated:** 2026-06-03 · **Phase 0 — ✅ · Phase 1 — ✅ · Phase 2 — ✅ COMPLETE** (all 4 spec
+> done-whens + all 8 work-items: S7 reframe · S8 caption · transcript editing · S9 brand kits · library
+> search · S6 editor timeline · **Settings config writes** · **perf/virtualization** + an explicit, shipped
+> **FTS5** decision (additive trigram index). Engine **665 tests** + studio typecheck/lint/12 vitest/build
+> + Playwright e2e all green).
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,
@@ -81,7 +85,7 @@ graph TD
       C4["spool.css verbatim demo CSS = single source of truth; Tailwind dropped"]:::done
       C5["e2e: URL → 9:16 clip (Playwright) — green ~49s · diar-on reframe verified"]:::done
     end
-    P2["Phase 2 — Studios + editor (timeline, ROI editor, caption studio, brand kits, SQLite FTS5)"]:::wip
+    P2["Phase 2 — Studios + editor (timeline, ROI editor, caption studio, brand kits, settings, perf, FTS5)"]:::done
     P3["Phase 3 — Discovery + automation (glass-box ranking, watch-folder, recipes)"]:::todo
     P4["Phase 4 — Publish + analyze"]:::todo
 
@@ -284,13 +288,18 @@ editing its transcript · full-text search transcripts across the library.
   *snap* lanes are a further refinement; trim-by-range already works via the transcript
   cut-from-selection.) Commit: `db2f4b1`.
 
-**Phase-2 milestone (2026-06-03):** all four spec §5 done-whens hold — fix an ROI box AND a
+**Phase 2 COMPLETE (2026-06-03).** All four spec §5 done-whens hold — fix an ROI box AND a
 caption style by hand → re-render (S7+S8); apply a brand kit across clips (S9); cut a clip by
-editing its transcript (S4); full-text search transcripts across the library (⌘K). 6 of the
-prompt's 8 work-items shipped + verified (S6 editor · S7 reframe · S8 caption · transcript
-editing · S9 brand kits · library search). **Remaining (non-gating):** Settings config writes
-+ list virtualization/lazy-load perf; the SQLite-FTS5 store migration is deferred per §7.2.
-Every slice: engine TDD + studio screenshot-vs-demo, suites + e2e green, committed.
+editing its transcript (S4); full-text search transcripts across the library (⌘K). **All 8
+work-items shipped + verified:** S6 editor · S7 reframe · S8 caption · transcript editing · S9
+brand kits · library search · **Settings config writes** (real hot + restart-labelled controls,
+none fake; demo-07-matched; + a CORS PATCH/DELETE fix found live) · **perf/virtualization**
+(windowed transcript + `content-visibility` grids/queue) · plus an explicit **FTS5** call —
+shipped the additive trigram index (job-store migration rejected per §7.2). Engine **665 tests**
++ studio typecheck/lint/12 vitest/build + Playwright e2e all green. Every slice: engine TDD +
+studio screenshot-vs-demo, suites + e2e green, committed (`8b67362` · `756c7d8` · `3b951ad` ·
+`bdb8d58` · `04b4331` · `bd84ae1`).
+### Phase-2 slices delivered this session — Settings · FTS5 · perf
 ### Remaining Phase-2 work — for the next session
 
 Same discipline as the shipped slices: **extend additively** (suites stay green), **TDD the
@@ -298,7 +307,13 @@ engine**, **screenshot-match the demo**, **zero dummy** (wire it or an honest st
 each verified slice**, update this file. Reuse the proven seams (`brand_kits.py` store pattern,
 `_validate_*` helpers, the `clipArtifactUrl`/`editWord` client style, `scripts/shot*.mjs`).
 
-- [ ] **6 · Settings config writes (Settings screen, demo 07).** Replace the remaining honest
+- [x] **6 · Settings config writes (Settings screen, demo 07) — DONE** (`8b67362` engine ·
+  `3b951ad` UI · `756c7d8` CORS PATCH/DELETE fix found live). Shipped exactly as planned below;
+  every row is a real control (Models Seg=set-active hot · Hardware concurrency slider=restart +
+  Fast/Quality Seg=hot · MCP transport Seg=restart · General preset Seg=hot), none fake; the
+  auto-detected/unbacked demo affordances stay honest read-only; demo-07-matched + verified live
+  (each control persists to `/settings`). The original plan, for the record:
+  Replace the remaining honest
   "Phase 2" rows with real controls. **New engine:** a `settings.py` JSON store (mirror
   `brand_kits.BrandKitStore`, persist under the download dir) + `GET /settings` + `PATCH
   /settings`; wire `app.extensions["trove.settings"]`; **document the routes in the OpenAPI
@@ -345,9 +360,11 @@ each verified slice**, update this file. Reuse the proven seams (`brand_kits.py`
   **rejected** (high-risk, optimization-only — §7.2's "when scale demands"). See the shipped
   bullet under Phase 2 above for the full rationale, tests, and live verification.
 
-**Done-when (remaining):** Settings rows are real controls (hot or honestly restart-labeled,
-none fake); long lists virtualized without visual regression; an explicit, documented call on
-FTS5. Engine + studio suites + e2e stay green; each screen still pixel-matches the demo.
+**Done-when (remaining) — ✅ ALL MET:** Settings rows are real controls (hot or honestly
+restart-labeled, none fake) ✅; long lists virtualized without visual regression ✅; an explicit,
+documented call on FTS5 (shipped the additive trigram index) ✅. Engine (665) + studio suites +
+e2e green; each screen still pixel-matches the demo. **→ Phase 2 is DONE.** Next: Phase 3
+(glass-box ranking · watch-folder · recipes), per spec §5.
 
 ## What's verified now
 
