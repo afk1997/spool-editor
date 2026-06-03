@@ -118,6 +118,15 @@ def _stub_transcribe(monkeypatch, words):
         )
     monkeypatch.setattr(transcriber, "run_transcribe", _fake_run)
 
+    # The worker now probes silero-vad for word-realignment on every
+    # transcribe (decoupled from the diarization flag). Short-circuit it to
+    # "no speech regions" by default so pipeline tests never push the FAKEWAV
+    # through real librosa — same spirit as stubbing extract_audio above.
+    # Tests exercising realignment/diarization override _vad_speech_chunks
+    # (and vad_available/available) AFTER calling this helper.
+    import diarizer
+    monkeypatch.setattr(diarizer, "_vad_speech_chunks", lambda _p: [])
+
 
 def _wait(transcribe_manager, tjid, timeout=10.0):
     import time
@@ -212,6 +221,9 @@ def test_pipeline_diarization_off_skips_diarize(tmp_path, monkeypatch):
     diarize_called = []
     import diarizer
     monkeypatch.setattr(diarizer, "available", lambda: False)
+    # VAD unavailable here too, so this test stays purely about the diarize
+    # gate (word-realignment is exercised by the dedicated tests below).
+    monkeypatch.setattr(diarizer, "vad_available", lambda: False)
     monkeypatch.setattr(diarizer, "diarize",
                          lambda *, audio_path: diarize_called.append(audio_path) or [])
 
@@ -235,6 +247,100 @@ def test_pipeline_diarization_off_skips_diarize(tmp_path, monkeypatch):
     base = os.path.splitext(parent.file_path)[0]
     payload = json.loads(Path(base + ".words.json").read_text())
     assert all(s.get("speaker") is None for s in payload["segments"])
+
+
+# ---------------------------------------------------------------------------
+# VAD word-realignment is decoupled from the diarization flag: it runs
+# whenever silero-vad is available, even with speaker labelling OFF.
+# ---------------------------------------------------------------------------
+
+def test_pipeline_realign_runs_when_vad_available_even_with_diarization_off(
+        tmp_path, monkeypatch):
+    """Caption-timing realignment must run whenever silero-vad is available,
+    independent of the TROVE_DIARIZATION (speaker-labelling) feature flag.
+
+    Speaker diarization stays OFF (``available()`` False) but VAD is present
+    (``vad_available()`` True): ``realign_words_to_vad`` is called, ``diarize``
+    is not, and no speaker labels are written."""
+    a, tm, dl = _flask_app(tmp_path, monkeypatch)
+    jm = a.extensions["trove.jobs"]
+    parent = _media_job(jm, dl)
+
+    _stub_transcribe(monkeypatch, [
+        {"w": "hello", "start": 0.0, "end": 0.5},
+        {"w": "world", "start": 0.6, "end": 1.0},
+    ])
+
+    import diarizer
+    monkeypatch.setattr(diarizer, "available", lambda: False)       # speaker labelling off
+    monkeypatch.setattr(diarizer, "vad_available", lambda: True)    # but VAD present
+    monkeypatch.setattr(diarizer, "_vad_speech_chunks",
+                        lambda _p: [{"start": 0.0, "end": 1.0}])
+
+    realign_calls = []
+    _real_realign = transcriber.realign_words_to_vad
+    def _spy_realign(result, vad_chunks):
+        realign_calls.append(vad_chunks)
+        return _real_realign(result, vad_chunks)
+    monkeypatch.setattr(transcriber, "realign_words_to_vad", _spy_realign)
+
+    diarize_calls = []
+    monkeypatch.setattr(diarizer, "diarize",
+                        lambda *, audio_path: diarize_calls.append(audio_path) or [])
+
+    monkeypatch.setattr(models_store, "get_active_path", lambda: tmp_path / "fake.bin")
+
+    with a.test_client() as c:
+        rv = c.post(f"/api/v1/jobs/{parent.id}/transcribe")
+        assert rv.status_code == 201
+
+    tjs = [t for t in tm.snapshot_jobs() if t.parent_job_id == parent.id]
+    tj = _wait(tm, tjs[0].id)
+    assert tj.status == transcribe_jobs.TranscribeStatus.DONE, \
+        f"expected DONE, got {tj.status} ({tj.error_category}: {tj.error_message})"
+
+    # Realignment ran (VAD available) ...
+    assert realign_calls == [[{"start": 0.0, "end": 1.0}]], \
+        "realign_words_to_vad must run when vad_available() is True"
+    # ... but speaker diarization did NOT (flag/deps off).
+    assert diarize_calls == [], "diarize must not run when available() is False"
+    assert tj.diarization_status is None
+    assert tj.speaker_count is None
+    base = os.path.splitext(parent.file_path)[0]
+    payload = json.loads(Path(base + ".words.json").read_text())
+    assert all(s.get("speaker") is None for s in payload["segments"])
+
+
+def test_pipeline_realign_skipped_when_vad_unavailable(tmp_path, monkeypatch):
+    """No silero-vad → no realignment attempt, and no VAD probe at all."""
+    a, tm, dl = _flask_app(tmp_path, monkeypatch)
+    jm = a.extensions["trove.jobs"]
+    parent = _media_job(jm, dl)
+
+    _stub_transcribe(monkeypatch, [{"w": "hi", "start": 0.0, "end": 0.5}])
+
+    import diarizer
+    monkeypatch.setattr(diarizer, "available", lambda: False)
+    monkeypatch.setattr(diarizer, "vad_available", lambda: False)
+
+    vad_calls = []
+    monkeypatch.setattr(diarizer, "_vad_speech_chunks",
+                        lambda _p: vad_calls.append(_p) or [])
+    realign_calls = []
+    monkeypatch.setattr(transcriber, "realign_words_to_vad",
+                        lambda result, vad: realign_calls.append(vad))
+
+    monkeypatch.setattr(models_store, "get_active_path", lambda: tmp_path / "fake.bin")
+
+    with a.test_client() as c:
+        rv = c.post(f"/api/v1/jobs/{parent.id}/transcribe")
+        assert rv.status_code == 201
+
+    tjs = [t for t in tm.snapshot_jobs() if t.parent_job_id == parent.id]
+    tj = _wait(tm, tjs[0].id)
+    assert tj.status == transcribe_jobs.TranscribeStatus.DONE
+    assert vad_calls == [], "must not probe VAD when vad_available() is False"
+    assert realign_calls == [], "must not realign when VAD is unavailable"
 
 
 # ---------------------------------------------------------------------------

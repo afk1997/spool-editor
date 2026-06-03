@@ -318,18 +318,23 @@ def create_app() -> Flask:
                     tj.error_message = result.error
                     return
 
-                # 2.5 Diarize + word-realignment (best-effort; failure NEVER
-                # kills the transcribe). Only runs when TROVE_DIARIZATION=on
-                # AND the optional deps are installed.
+                # 2.5 VAD word-realignment + speaker diarization. Two
+                # INDEPENDENT best-effort steps (neither ever kills the
+                # transcribe):
                 #
-                # Word realignment: silero-vad's speech regions are used as
-                # ground truth to fix whisper.cpp's drift after silences
-                # (without DTW, whisper places words ~0.3-0.5s too early
-                # after each pause and the error compounds across the clip).
-                # We get the VAD chunks once and reuse them: realignment
-                # first, then diarization. Diarization re-derives its own
-                # VAD internally (deliberate — it operates on speech regions
-                # in the original timeline).
+                # (a) Word-realignment — silero-vad's speech regions fix
+                #     whisper.cpp's drift after silences (without DTW, whisper
+                #     places words ~0.3-0.5s too early after each pause and the
+                #     error compounds across the clip). This is a CAPTION-TIMING
+                #     fix and must NOT depend on the speaker-label feature flag,
+                #     so it runs whenever silero-vad is installed
+                #     (``vad_available()`` — ignores TROVE_DIARIZATION).
+                #
+                # (b) Speaker diarization (labelling) — stays gated behind the
+                #     TROVE_DIARIZATION flag + its heavier deps (``available()``).
+                #     It re-derives its own VAD internally (deliberate — it
+                #     operates on speech regions in the original timeline), so
+                #     the two steps don't share state.
                 #
                 # Diarization outcome on the TranscribeJob:
                 #   None     → not attempted (feature off / deps missing)
@@ -338,11 +343,18 @@ def create_app() -> Flask:
                 #   failed   → exception during diarize; reason in diarization_error
                 try:
                     import diarizer
-                    if diarizer.available():
+                    if diarizer.vad_available():
                         try:
                             vad_regions = diarizer._vad_speech_chunks(wav_path)
                             if vad_regions:
                                 transcriber.realign_words_to_vad(result, vad_regions)
+                        except Exception as e:
+                            # Realignment is a pure timing refinement — a failure
+                            # leaves whisper's original timestamps and never
+                            # touches the diarization outcome below.
+                            app.logger.warning("VAD word-realignment failed: %s", e)
+                    if diarizer.available():
+                        try:
                             chunks = diarizer.diarize(audio_path=wav_path)
                             if chunks:
                                 transcriber.apply_speakers(result, chunks)

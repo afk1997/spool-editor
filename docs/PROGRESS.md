@@ -30,14 +30,29 @@
 > (cut) · `5fbf836` (diar) · `9a3ec79` (face-track). **Framing/active-speaker re-verified** on a real
 > back-and-forth (Karpathy↔Zhan): the pan follows the talker through camera cuts incl. a wide two-shot
 > (100% face-present, centered) — measurement only, no code change.
-> **▶ NEXT — a post-Phase-2 *quality pass*, then Phase 3.** Kaivan scoped it (2026-06-03): see
-> **`docs/IMPROVEMENTS-PLAN.md`**. **In:** (A) decouple VAD realignment from the `TROVE_DIARIZATION`
-> flag · (B) fuse audio diarization into the auto-pan active-speaker pick · (C) lift diarization
-> accuracy · (D) caption craft (speaker color / line-breaks / emphasis) · (E) richer moment-finding
-> signals + feedback re-rank (**no local LLM** — keep the codex bridge) · (F) perf + a real-render
-> editor preview. **Deferred to after Phase 3 unless something underperforms:** per-stage failure
-> surfacing + Retry · disk↔store reconciliation / no-redownload · widened e2e + quality gate.
-> Engine+studio left running on :8899/:3000 for manual testing.
+> **▶ NOW — a post-Phase-2 *quality pass*, then Phase 3.** Kaivan scoped it (2026-06-03): see
+> **`docs/IMPROVEMENTS-PLAN.md`**; recommended order A → C → B → D → F → E. **In:** (A) decouple VAD
+> realignment from the `TROVE_DIARIZATION` flag · (B) fuse audio diarization into the auto-pan
+> active-speaker pick · (C) lift diarization accuracy · (D) caption craft (speaker color / line-breaks
+> / emphasis) · (E) richer moment-finding signals + feedback re-rank (**no local LLM** — keep the codex
+> bridge) · (F) perf + a real-render editor preview. **Deferred to after Phase 3 unless something
+> underperforms:** per-stage failure surfacing + Retry · disk↔store reconciliation / no-redownload ·
+> widened e2e + quality gate. Engine+studio left running on :8899/:3000 for manual testing.
+> **Quality-pass progress:**
+> - **✅ A — VAD word-realignment decoupled from the diarization flag + MEASURED to help.** New
+>   `diarizer.vad_available()` (silero-vad + librosa + torch present, **ignoring** `TROVE_DIARIZATION`);
+>   the transcribe worker now runs `transcriber.realign_words_to_vad` whenever VAD is available — even
+>   with speaker-labelling off — while diarization stays flag-gated (`available()`). So caption-timing
+>   accuracy no longer depends on the speaker-label feature flag. **Measured** with a new dedicated probe
+>   `scripts/realign_eval.py` (real whisper → real silero-vad → real realign; drift scored against an
+>   **independent** RMS-energy onset, NOT silero-vad, to avoid circularity; verdict scoped to genuine
+>   post-silence words, the actual symptom): on a conversational interview segment, the 8 post-silence
+>   words went from mean **−224 ms** caption-ahead-of-audio to **−50 ms** (improvement **+173 ms**); the
+>   zoo monologue's one post-silence word **−520 → −36 ms**. Every genuine post-silence word improved;
+>   the only non-improvements are mid-stream continuous-speech words (no defined onset; realign barely
+>   moves them) — measurement noise, not regression. TDD: +3 `test_diarizer` (`vad_available` ignores
+>   flag / false when silero missing / not gated on resemblyzer) + 2 `test_transcribe_pipeline`
+>   (realign runs with diar OFF when VAD present; skipped when VAD absent). Engine **687** green. Commit below.
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,

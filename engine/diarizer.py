@@ -104,6 +104,33 @@ def available() -> bool:
     return True
 
 
+def vad_available() -> bool:
+    """True iff silero-vad word-realignment can run — deps present, IGNORING
+    the ``TROVE_DIARIZATION`` flag.
+
+    Word-realignment (``transcriber.realign_words_to_vad``: snapping
+    whisper.cpp's post-silence word drift to silero-vad speech regions)
+    improves *caption timing* and is independent of whether speaker
+    *labelling* (diarization) is enabled. It needs only silero-vad +
+    librosa + torch — NOT resemblyzer/scikit-learn (the speaker-embedding
+    + clustering stack) — so it can and should run whenever those light
+    deps are installed, even with the diarization feature flag off.
+
+    Deliberately does NOT consult ``_flag_enabled()``: caption-timing
+    accuracy must not depend on the speaker-label feature flag.
+    """
+    try:
+        import torch  # noqa: F401
+        import librosa  # noqa: F401
+        from silero_vad import (  # noqa: F401
+            load_silero_vad,
+            get_speech_timestamps,
+        )
+    except Exception:
+        return False
+    return True
+
+
 def diarize(*, audio_path: str,
             expected_speakers: int | None = None) -> list[SpeakerChunk]:
     """Run VAD + continuous-window embedding + clustering on a 16k mono WAV.

@@ -59,6 +59,48 @@ def test_diarize_raises_when_flag_off(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# vad_available(): VAD word-realignment must be decoupled from the
+# TROVE_DIARIZATION (speaker-labelling) feature flag. Caption-timing
+# accuracy depends only on silero-vad being installed, not on whether the
+# user turned on speaker diarization.
+# ---------------------------------------------------------------------------
+
+def test_vad_available_ignores_diarization_flag(monkeypatch):
+    """With the diarization flag OFF but silero-vad deps present, speaker
+    labelling is unavailable yet VAD (for word-realignment) is available."""
+    pytest.importorskip("torch")
+    pytest.importorskip("librosa")
+    pytest.importorskip("silero_vad")
+    monkeypatch.setenv("TROVE_DIARIZATION", "off")
+    d = _fresh_diarizer()
+    # Speaker diarization is gated off by the flag...
+    assert d.available() is False
+    # ...but VAD word-realignment does not depend on that flag.
+    assert d.vad_available() is True
+
+
+def test_vad_available_false_when_silero_missing(monkeypatch):
+    """No silero-vad → no VAD realignment, regardless of the flag."""
+    monkeypatch.setenv("TROVE_DIARIZATION", "on")
+    d = _fresh_diarizer()
+    monkeypatch.setitem(sys.modules, "silero_vad", None)
+    assert d.vad_available() is False
+
+
+def test_vad_available_does_not_require_resemblyzer(monkeypatch):
+    """Word-realignment needs only silero-vad + librosa + torch, NOT the
+    resemblyzer speaker-embedding encoder. VAD stays available when the
+    heavier diarization-only dep is absent."""
+    pytest.importorskip("torch")
+    pytest.importorskip("librosa")
+    pytest.importorskip("silero_vad")
+    monkeypatch.setenv("TROVE_DIARIZATION", "on")
+    d = _fresh_diarizer()
+    monkeypatch.setitem(sys.modules, "resemblyzer", None)
+    assert d.vad_available() is True
+
+
+# ---------------------------------------------------------------------------
 # Clustering tests (no heavy deps required if sklearn is available)
 # ---------------------------------------------------------------------------
 
