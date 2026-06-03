@@ -385,6 +385,17 @@ Dogfooding turned up real flow/honesty bugs — all fixed + verified, suites + e
   timeline trimmed to the clip window; the Captions preset is wired; **Render** burns the style +
   exports, with reframe→caption→export AWAITED step-by-step (fixed a race that read a half-written
   reframe → "moov atom not found"). e2e rewritten to the new flow.
+- **`2a9fef8` + `28f4ceb` editor reframe controls** — the aspect picker (16:9/1:1/4:5) now re-frames
+  the live preview (baked 9:16 = the real pan; other aspects = the cut center-cropped live), and the
+  Pan/Split/Center mode buttons drive the preview (pan=reframed, center=center-crop, split=cut + a
+  "stacks on Render" hint). They were always real on Render — the editor just didn't reflect them.
+- **`9d541f8` per-shot face-tracking reframe** — pan auto-followed two FIXED ROI boxes (a two-shot
+  heuristic, no face detection), so on single-camera/cutting footage it missed the speaker and read
+  as centered. New `clip/face_track.py` (OpenCV): scene-cut detection → upper-frame-biased dominant
+  face per shot → smoothed crop-center that lerps within a shot, snaps at cuts; `reframe.render(pan)`
+  builds the crop-x from it (falls back to the 2-ROI pan when no faces / no OpenCV). Auto-pan only;
+  manual ROIs/edited tracks unchanged. Verified on the real talk: speaker shots now lock tightly to
+  the speaker's face and track across cuts. Adds opencv-python-headless; +`tests/test_face_track.py`.
 
 ## What's verified now
 
