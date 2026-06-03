@@ -114,7 +114,47 @@ def crop_exprs(points):
     return _expr(points, 3), _expr(points, 4), _expr(points, 1), _expr(points, 2)
 
 
+def cluster_by_x(faces, frame_w: int, tol: float = 0.12):
+    """Group per-frame face samples ``(t, cx, cy, w, h, patch)`` into *people* by x-proximity
+    (within ``tol`` of the frame width), so a shot's faces become one cluster per person across
+    time. Used to pick the active speaker among several people."""
+    clusters = []  # {"cx": running mean (normalized), "members": [...]}
+    for f in sorted(faces, key=lambda f: f[0]):
+        cxn = f[1] / frame_w
+        best = next((c for c in clusters if abs(c["cx"] - cxn) <= tol), None)
+        if best is None:
+            clusters.append({"cx": cxn, "members": [f]})
+        else:
+            best["members"].append(f)
+            best["cx"] = sum(m[1] for m in best["members"]) / len(best["members"]) / frame_w
+    return [c["members"] for c in clusters]
+
+
+def mouth_motion(patches) -> float:
+    """A person's lip activity = mean absolute frame-to-frame difference of their mouth patches
+    (each a flat list of gray values). Higher ⇒ more talking. <2 frames ⇒ 0."""
+    if len(patches) < 2:
+        return 0.0
+    total, n = 0.0, 0
+    for a, b in zip(patches, patches[1:]):
+        if a and len(a) == len(b):
+            total += sum(abs(x - y) for x, y in zip(a, b)) / len(a)
+            n += 1
+    return total / n if n else 0.0
+
+
 # ---- I/O (verified on real media) -----------------------------------
+
+def _mouth_patch(cv2, gray, fx: float, fy: float, fw: float, fh: float):
+    """A tiny 16×8 grayscale patch of a face's mouth region (lower-middle of the bbox), flattened
+    — its frame-to-frame change is the active-speaker (lip-motion) signal."""
+    H, W = gray.shape[:2]
+    x0, x1 = int(max(0, fx + 0.28 * fw)), int(min(W, fx + 0.72 * fw))
+    y0, y1 = int(max(0, fy + 0.58 * fh)), int(min(H, fy + 0.90 * fh))
+    if x1 <= x0 or y1 <= y0:
+        return []
+    return cv2.resize(gray[y0:y1, x0:x1], (16, 8)).flatten().astype(int).tolist()
+
 
 def scene_cuts(clip_path: str, duration: float, threshold: float = 0.3):
     """Cut timestamps (seconds, strictly inside the clip) via ffmpeg scene detection."""
@@ -180,9 +220,12 @@ def track(clip_path: str, duration: float, src_w: int, src_h: int, out_w: int, o
                 det = cv2.FaceDetectorYN.create(_MODEL, "", (w, h), score_threshold=0.6)
             det.setInputSize((w, h))
             _, faces = det.detect(img)
-            fl = ([] if faces is None
-                  else [(float(f[0] + f[2] / 2), float(f[1] + f[3] / 2), float(f[2]), float(f[3]), float(f[-1]))
-                        for f in faces])
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            fl = []  # (cx, cy, w, h, score, mouth_patch)
+            for f in (faces if faces is not None else []):
+                fx, fy, fw, fh = float(f[0]), float(f[1]), float(f[2]), float(f[3])
+                fl.append((fx + fw / 2, fy + fh / 2, fw, fh, float(f[-1]),
+                           _mouth_patch(cv2, gray, fx, fy, fw, fh)))
             dets.append((round((i + 0.5) * step, 3), fl, w, h))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -196,32 +239,45 @@ def track(clip_path: str, duration: float, src_w: int, src_h: int, out_w: int, o
         shot = [d for d in dets if s <= d[0] < e]
         if not shot:
             continue
-        # per-frame face pick (stable within the shot), then a single per-shot zoom (median size)
-        prev_cx = None
-        picks = []  # (t, fcx, fcy, fh) | (t, None, None, None)
-        for (t, fl, w, h) in shot:
-            p = pick_face(fl, w, h, prev_cx) if fl else None
-            if p:
-                prev_cx = p[0] / w
-                picks.append((t, p[0], p[1], p[3]))
-            else:
-                picks.append((t, None, None, None))
-        face_hs = [p[3] for p in picks if p[1] is not None]
-        if not face_hs:
-            continue  # no face in this shot — leave to the 2-ROI fallback / centered hold
-        found_any = True
         w0, h0 = shot[0][2], shot[0][3]
+        # All face samples in the shot → cluster into people, then follow the one TALKING (most
+        # mouth motion) when it's a clear winner; else the most prominent upper face. One person per
+        # shot → that person (= the camera's subject), so single-face shots behave as before.
+        all_faces = [(t, cx, cy, fw, fh, patch)
+                     for (t, fl, _w, _h) in shot for (cx, cy, fw, fh, _sc, patch) in fl]
+        if not all_faces:
+            continue
+        clusters = cluster_by_x(all_faces, w0)
+        scored = [{
+            "members": c,
+            "motion": mouth_motion([m[5] for m in sorted(c, key=lambda m: m[0])]),
+            "area": statistics.median([m[3] * m[4] for m in c]),
+            "cy": statistics.median([m[2] / h0 for m in c]),
+        } for c in clusters]
+        upper = [c for c in scored if c["cy"] <= _AUDIENCE_CY] or scored
+        if len(upper) >= 2:
+            by_motion = sorted(upper, key=lambda c: c["motion"], reverse=True)
+            talker = (by_motion[0] if by_motion[0]["motion"] > 1.25 * by_motion[1]["motion"] and by_motion[0]["motion"] > 0
+                      else max(upper, key=lambda c: c["area"]))
+        else:
+            talker = upper[0]
+        members = {round(m[0], 3): m for m in talker["members"]}  # talker face per sampled time
+        face_hs = [m[4] for m in talker["members"]]
+        if not face_hs:
+            continue
+        found_any = True
         _, _, crop_w, crop_h = frame_rect(w0 / 2, h0 / 2, statistics.median(face_hs), w0, h0, out_w, out_h)
         emitted = False
         last_x = last_y = None
-        for (t, fcx, fcy, fh) in picks:
-            if fcx is None:
+        for (t, _fl, _w, _h) in shot:
+            m = members.get(round(t, 3))
+            if m is None:
                 if last_x is None:
-                    continue  # leading no-face frames in the shot
+                    continue  # leading frames before the talker appears
                 x, y = last_x, last_y
             else:
-                x = max(0.0, min(w0 - crop_w, fcx - crop_w / 2))
-                y = max(0.0, min(h0 - crop_h, fcy - crop_h * _Y_THIRD))
+                x = max(0.0, min(w0 - crop_w, m[1] - crop_w / 2))
+                y = max(0.0, min(h0 - crop_h, m[2] - crop_h * _Y_THIRD))
                 last_x, last_y = x, y
             snap = (not emitted) and bool(points)  # snap at the cut into this shot
             points.append((round(t, 3), round(x, 1), round(y, 1), crop_w, crop_h, snap))

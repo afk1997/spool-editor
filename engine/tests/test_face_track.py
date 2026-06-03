@@ -3,7 +3,26 @@ face, framing it (adaptive zoom + rule-of-thirds), temporal smoothing, and build
 crop expressions. The OpenCV (YuNet) + ffmpeg I/O is verified on real media + the quality harness."""
 from __future__ import annotations
 
-from clip.face_track import pick_face, frame_rect, smooth_track, crop_exprs
+from clip.face_track import pick_face, frame_rect, smooth_track, crop_exprs, cluster_by_x, mouth_motion
+
+
+def test_cluster_by_x_groups_two_people_and_merges_one():
+    W = 1920
+    # faces tuple: (t, cx, cy, w, h, patch)
+    left = [(0.0, 200, 300, 100, 100, []), (0.4, 210, 300, 100, 100, [])]
+    right = [(0.0, 1500, 300, 100, 100, []), (0.4, 1490, 300, 100, 100, [])]
+    clusters = cluster_by_x(left + right, W)
+    assert len(clusters) == 2
+    one = cluster_by_x(left + [(0.4, 230, 300, 100, 100, [])], W)
+    assert len(one) == 1   # all near each other → a single person
+
+
+def test_mouth_motion_higher_for_moving_lips():
+    still = [[10, 10, 10, 10]] * 5                       # unchanging mouth patch → no motion
+    talking = [[10, 50, 10, 50], [50, 10, 50, 10]] * 3    # alternating → lots of motion
+    assert mouth_motion(talking) > mouth_motion(still)
+    assert mouth_motion(still) == 0.0
+    assert mouth_motion([[1, 2, 3]]) == 0.0              # <2 frames → 0
 
 
 def test_pick_face_prefers_upper_speaker_over_foreground_audience():
