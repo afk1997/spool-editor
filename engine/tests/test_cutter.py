@@ -29,7 +29,7 @@ class _FakePopen:
         self.returncode = -9
 
 
-def test_cut_invokes_ffmpeg_stream_copy(monkeypatch, tmp_path):
+def test_cut_invokes_ffmpeg_accurate_reencode(monkeypatch, tmp_path):
     captured = {}
 
     def fake_popen(argv, **kw):
@@ -49,9 +49,13 @@ def test_cut_invokes_ffmpeg_stream_copy(monkeypatch, tmp_path):
     assert out.exists()
     argv = captured["argv"]
     assert argv[0] == "ffmpeg"
-    assert "-c" in argv and "copy" in argv          # stream copy
-    assert "-ss" in argv and "10.000" in argv        # input seek to start
-    assert "-t" in argv and "15.500" in argv         # duration = end - start
+    # Frame-accurate trim, NOT a keyframe-aligned stream-copy: the video is re-encoded so
+    # the clip begins exactly at `start` (a `-c copy` would start up to a GOP early and
+    # desync every caption). See tests/test_caption_sync.py for the behavioral proof.
+    assert "-c:v" in argv and "libx264" in argv      # re-encode the video (frame-accurate)
+    assert "copy" not in argv                          # never a stream-copy
+    assert "-ss" in argv and "10.000" in argv          # fast input seek to start
+    assert "-t" in argv and "15.500" in argv           # duration = end - start
     assert str(src) in argv and str(out) in argv
 
 

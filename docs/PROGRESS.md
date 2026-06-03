@@ -418,21 +418,27 @@ Dogfooding turned up real flow/honesty bugs — all fixed + verified, suites + e
 Reported live: **captions feel out of sync with the audio**, and **diarization could be more
 accurate**. These are *two different things* — diagnose before fixing:
 
-- **Caption sync is driven by WORD timestamps + the clip window, NOT speaker diarization.** Captions
-  come from `words.json` (whisper.cpp word times), sliced to the clip `[start,end]` and re-based to 0
-  by `clip/captioner.py`, then burned (libass) onto the reframed cut.
-  - **Prime suspect:** the cut is **lossless `ffmpeg -c copy`** (`clip/cutter.py`), which is
-    **keyframe-aligned** — input-seek lands on the nearest keyframe, so the cut clip's *actual* first
-    frame ≠ the requested `start`. But the captioner re-bases word times assuming the clip starts
-    exactly at `start` → a constant offset = desync. **Verify:** ffprobe the cut clip's real
-    start/first-PTS vs `start`; if they differ, that's the drift. Fix options: accurate seek
-    (`-ss` *after* `-i`, or a re-encode for the captioned path), or compute the cut's true start and
-    re-base captions to it, or burn captions against the source timeline then cut.
-  - **Second suspect:** VAD word-realignment (`transcriber.realign_words_to_vad` + silero-vad) that
-    fixes whisper's post-silence drift — confirm it's applied + accurate; and the base whisper word
-    timestamps (model/params).
-  - **Verify with a metric, like the reframe harness:** burn captions on a known clip, then check the
-    active-word time vs the audio (or vs the word's true time) — drift in ms.
+- **✅ Caption↔audio sync — FIXED + proven on real media (this session).** Root cause (confirmed by
+  measurement, not theory): the cut was a **lossless `ffmpeg -c copy`** (`clip/cutter.py`) =
+  **keyframe-aligned**, so input-seek landed on the nearest *prior* keyframe and the clip began up to a
+  whole GOP early; the captioner re-bases word times to the *requested* `start`, so that preroll became
+  a **constant** caption-ahead-of-audio offset (and a clip that started before the chosen moment). On
+  "Me at the zoo" (keyframes only at 0/5.4/11.2s) a clip cut at `start=8.0` truly began at **5.388s**
+  (xcorr) → **−2.612 s** desync, and the clip ran 9.62 s instead of 7.0 s. **Fix:** make `cut`
+  frame-accurate — fast input-seek to the keyframe **then re-encode** (`-c:v libx264 -crf 18 …`), which
+  decodes the preroll and re-emits from `start` exactly. The "lossless" copy never survived anyway
+  (reframe re-encodes the clip immediately downstream). **Harness:** `scripts/caption_sync_eval.py`
+  (xcorr the rendered clip's audio vs the source → caption drift in ms) + a real-ffmpeg regression
+  `tests/test_caption_sync.py`. **Measured after the fix:** cut / reframe / caption-burn / **exported**
+  drift = **0.0 ms** at every stage on the full production chain; per-word ASS-time vs true-audio-time
+  = 0.0 ms. Engine **677 tests** green. Commit below.
+  - **Second suspect (still open, lower priority):** VAD word-realignment
+    (`transcriber.realign_words_to_vad`, fixes whisper's compounding post-silence drift) is gated behind
+    `diarizer.available()` in `app.py` — i.e. it only runs when **`TROVE_DIARIZATION=on`**. Caption
+    accuracy shouldn't depend on the speaker-label feature flag; consider decoupling so realignment runs
+    whenever silero-vad is installed (measure that it helps before changing — it's a sub-500 ms,
+    compounding effect, dwarfed by the keyframe offset just fixed). This session runs diar=on, so
+    realignment is applied in the repro.
 - **Diarization accuracy** (separate, real goal): `engine/diarizer.py` (resemblyzer embeddings + VAD)
   → speaker count + turn boundaries, fused with ROI in `clip/reframe.py` and surfaced as the
   speaker-attributed transcript lines. Reframe speaker-following is now face-tracking (less reliant on

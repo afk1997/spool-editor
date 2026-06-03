@@ -1,10 +1,13 @@
-"""Lossless trim (spec §5 P1 / §4 ``clip.cut``).
+"""Frame-accurate trim (spec §5 P1 / §4 ``clip.cut``).
 
-A clip is an in/out range on a source. The cut is an instant stream-copy
-(``ffmpeg -c copy``) so it costs ~nothing; re-encode only happens later in reframe.
-Stream-copy seeks to the nearest keyframe at/before ``start`` (you can't cut mid-GOP
-without re-encoding), so a clip may begin a fraction early — frame-accurate trimming
-is the timeline editor's job (P2). This is the deterministic primitive under it.
+A clip is an in/out range on a source. The cut fast-seeks to the keyframe at/before
+``start`` then re-encodes, decoding the preroll and re-emitting from ``start`` exactly, so
+the clip begins on the requested frame — not up to a GOP early, as a ``-c copy`` stream-copy
+would. That precision is load-bearing: the captioner re-bases word times to ``start``, so a
+clip that began at the prior keyframe would desync every caption by that offset (and start
+before the chosen moment). The clip is re-encoded again by reframe downstream, so the old
+stream-copy's "lossless" win never survived into the rendered clip anyway. This is the
+deterministic primitive the timeline editor builds on.
 """
 from __future__ import annotations
 
@@ -39,11 +42,17 @@ def cut(
 
     argv = [
         "ffmpeg", "-y",
-        "-ss", f"{start:.3f}",                 # input seek — fast, keyframe-aligned
+        "-ss", f"{start:.3f}",                 # fast input seek to the nearest prior keyframe
         "-i", source_path,
         "-t", f"{duration:.3f}",
-        "-c", "copy",                          # stream copy — lossless + instant
-        "-avoid_negative_ts", "make_zero",     # re-base timestamps so the clip starts at 0
+        # Re-encode (don't stream-copy): a stream-copy can only begin on a keyframe, so the
+        # clip would start up to a GOP early — and the captioner re-bases word times to the
+        # *requested* start, so that preroll shows up as a constant caption↔audio desync (and a
+        # clip that begins before the chosen moment). Decoding from the keyframe and re-emitting
+        # from `start` makes the cut frame-accurate. The clip is re-encoded by reframe downstream
+        # anyway, so the old "lossless" copy bought nothing the rendered clip kept.
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-c:a", "aac", "-b:a", "192k",
         out_path,
     ]
     _ffmpeg.run(
@@ -70,7 +79,7 @@ def cut_spans(
     transcript editing: deleting words removes their time spans, and what's left is
     stitched back together. ``spans`` is ``[(start, end), …]`` in source seconds.
 
-    Unlike ``cut`` (lossless stream-copy of one range), this re-encodes via a
+    Unlike ``cut`` (a single re-encoded range), this stitches several kept ranges via a
     trim/concat filtergraph so the joins are frame-accurate. Raises ``ValueError`` if
     no positive-length span is given.
     """

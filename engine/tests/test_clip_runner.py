@@ -253,12 +253,12 @@ def test_cut_ripple_cuts_when_words_deleted(runner, monkeypatch):
     assert seen["spans"] == [(2.0, 5.0), (6.0, 12.0)]
 
 
-def test_cut_lossless_when_no_deletions(runner, monkeypatch):
+def test_cut_single_range_when_no_deletions(runner, monkeypatch):
     _words_file(runner)  # words list is empty → no deletions
     seen = {}
     _patch(monkeypatch, "cutter", "cut",
            lambda s, a, b, out, **k: (seen.update(rng=(a, b)), Path(out).parent.mkdir(parents=True, exist_ok=True), Path(out).write_bytes(b"C"))[-1] or out)
-    _patch(monkeypatch, "cutter", "cut_spans", lambda *a, **k: pytest.fail("no deletions → lossless single-range cut"))
+    _patch(monkeypatch, "cutter", "cut_spans", lambda *a, **k: pytest.fail("no deletions → single-range cut, not a ripple concat"))
     runner.cut_target(source_id="src1", clip_id="clipS", params={"start": 2.0, "end": 12.0})(_job("cut", source_id="src1"))
     assert seen["rng"] == (2.0, 12.0)
 
