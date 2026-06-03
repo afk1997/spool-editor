@@ -61,13 +61,13 @@ export default function ProjectScreen() {
 
       {tab === "Overview" && (
         transcribing ? (
-          <div>
-            <div className="card" style={{ padding: 18, marginBottom: 20 }}>
-              <div className="row" style={{ gap: 10, marginBottom: 12 }}><Icon name="type" size={16} style={{ color: "var(--info)" }} /><b>Transcribing…</b><span className="spacer" /><span className="mono" style={{ color: "var(--text-dim)" }}>{s.prog}%</span></div>
-              <Progress value={s.prog ?? 0} tone="info" striped />
-              <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", marginTop: 10 }}>whisper · on-device · partial transcript streams below</div>
-            </div>
-            <TranscriptView lines={lines} speakers={speakers} tid={s.transcriptId} sourceId={s.id} onEdited={doc.reload} />
+          <div className="card" style={{ padding: 18, marginBottom: 20 }}>
+            <div className="row" style={{ gap: 10, marginBottom: 12 }}><Icon name="type" size={16} style={{ color: "var(--info)" }} /><b>Transcribing…</b><span className="spacer" /><span className="mono" style={{ color: "var(--text-dim)" }}>{s.prog}%</span></div>
+            <Progress value={s.prog ?? 0} tone="info" striped />
+            {/* whisper.cpp writes words.json once it finishes (no streaming partials), so the
+                word-level transcript lands in the Transcript tab on completion — say that
+                honestly rather than promise a stream that never arrives. */}
+            <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", marginTop: 10 }}>whisper · on-device · the word-level transcript opens in the Transcript tab when it finishes</div>
           </div>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 24 }}>
