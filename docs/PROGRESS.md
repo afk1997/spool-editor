@@ -396,6 +396,15 @@ Dogfooding turned up real flow/honesty bugs — all fixed + verified, suites + e
   builds the crop-x from it (falls back to the 2-ROI pan when no faces / no OpenCV). Auto-pan only;
   manual ROIs/edited tracks unchanged. Verified on the real talk: speaker shots now lock tightly to
   the speaker's face and track across cuts. Adds opencv-python-headless; +`tests/test_face_track.py`.
+- **`a125484` + `3d8cce3` reframe QUALITY stack** (push to "extremely well", measured by a harness
+  `scripts/reframe_eval.py`): detector Haar→**YuNet** (profiles/angles, confidence; model vendored
+  at `clip/models/`); **adaptive zoom** (face fills a target fraction, zoom floor so wide faces
+  aren't blurred) + **rule-of-thirds** vertical placement; **per-shot constant zoom** (median face
+  size → no pulsing) + EMA/dead-zone pan + cut-snap (stabilization); **active-speaker** (cluster
+  faces per shot, follow the one with the most mouth-region motion when it's a clear winner, else
+  the most prominent upper face — single-face shots unchanged). Measured on the real talk:
+  center_dx 0.119→0.08, eyes on the upper third (y≈0.38), face-present 100%; close shots framed
+  head-and-shoulders. ffmpeg crop w/h/x/y all vary over time. Pure logic TDD'd; suite 676 green.
 
 ## What's verified now
 
