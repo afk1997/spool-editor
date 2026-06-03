@@ -72,6 +72,11 @@ export default function CaptionScreen() {
   const [allcaps, setAllcaps] = useState(PRESETS.opus.allcaps);
   const [position, setPosition] = useState(PRESETS.opus.position);
   const [wpl, setWpl] = useState(PRESETS.opus.words);
+  // Caption craft (item D) — additive engine options; off by default. The engine applies
+  // speaker color only when the clip window actually has 2+ diarized speakers (else a no-op).
+  const [colorSpeakers, setColorSpeakers] = useState(false);
+  const [emphasis, setEmphasis] = useState(false);
+  const [balanceLines, setBalanceLines] = useState(false);
 
   const applyPreset = (p: string) => {
     const c = PRESETS[p]; if (!c) return;
@@ -117,7 +122,7 @@ export default function CaptionScreen() {
   };
 
   const burn = () => {
-    ctx.client.caption(id, { style: preset, overrides: { size, outline, words: wpl, fill, highlight, position, allcaps, weight, font } })
+    ctx.client.caption(id, { style: preset, overrides: { size, outline, words: wpl, fill, highlight, position, allcaps, weight, font }, color_speakers: colorSpeakers, emphasis, balance_lines: balanceLines })
       .then(() => ctx.client.render(id, { preset: clip?.platform || "tiktok" }).catch(() => {}))
       .catch(() => {});
     ctx.pushToast({ icon: "zap", tone: "info", title: "Burning captions", body: `${preset} · custom style · track it in the queue` });
@@ -182,6 +187,22 @@ export default function CaptionScreen() {
 
           <Slider label="Position" value={position} min={4} max={60} step={1} fmt={(v) => `${v}%`} onChange={setPosition} />
           <Slider label="Words / line" value={wpl} min={1} max={8} step={1} fmt={(v) => `${v}`} onChange={setWpl} />
+
+          <div style={{ borderTop: "1px solid var(--line)", paddingTop: 14 }}>
+            <div className="eyebrow" style={{ marginBottom: 10 }}>Caption craft</div>
+            <div className="row" style={{ marginBottom: 10 }}>
+              <div><div style={{ fontSize: 12.5 }}>Speaker colors</div><div className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)" }}>tint each word by who&apos;s talking · 2+ speakers</div></div>
+              <span className="spacer" /><Switch on={colorSpeakers} onClick={() => setColorSpeakers((v) => !v)} />
+            </div>
+            <div className="row" style={{ marginBottom: 10 }}>
+              <div><div style={{ fontSize: 12.5 }}>Keyword emphasis</div><div className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)" }}>scale up acronyms / shouted words</div></div>
+              <span className="spacer" /><Switch on={emphasis} onClick={() => setEmphasis((v) => !v)} />
+            </div>
+            <div className="row">
+              <div><div style={{ fontSize: 12.5 }}>Balance lines</div><div className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)" }}>no 1-word orphan lines</div></div>
+              <span className="spacer" /><Switch on={balanceLines} onClick={() => setBalanceLines((v) => !v)} />
+            </div>
+          </div>
         </div>
       </div>
     </div>

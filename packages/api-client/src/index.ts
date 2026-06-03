@@ -303,7 +303,7 @@ export class SpoolApiClient {
   reframe(clipId: string, p: ReframeParams = {}): Promise<ClipJobView> {
     return this.post(`/clips/${encodeURIComponent(clipId)}/reframe`, p);
   }
-  caption(clipId: string, p: { style?: string; overrides?: CaptionOverrides; watermark?: string; lower_third?: string } = {}): Promise<ClipJobView> {
+  caption(clipId: string, p: { style?: string; overrides?: CaptionOverrides; watermark?: string; lower_third?: string; color_speakers?: boolean; emphasis?: boolean; balance_lines?: boolean } = {}): Promise<ClipJobView> {
     return this.post(`/clips/${encodeURIComponent(clipId)}/captions`, p);
   }
   render(clipId: string, p: { preset?: string; fast?: boolean } = {}): Promise<ClipJobView> {

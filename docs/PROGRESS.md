@@ -105,7 +105,10 @@
 >   interview window [140,180] S2 now renders gold. TDD: +6 (`build_chunks` balance; color on flat-word +
 >   real segment formats; single-speaker no-op; emphasis scales only keywords; off-by-default carries no
 >   color/scale tags). `caption_sync_eval`: captions add **0 drift** (captioned == cut, default path
->   unchanged). Engine **701** green. Studio S8 toggles + commit below.
+>   unchanged). Engine **701** green. **Studio S8** wired: a "Caption craft" section with three real
+>   toggles (Speaker colors / Keyword emphasis / Balance lines) → `client.caption(…, {color_speakers,
+>   emphasis, balance_lines})` → the real burn (no fake controls). typecheck 9/9 · lint · 12 vitest ·
+>   build · e2e (46.0s) green. Two commits below (engine · studio).
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,
