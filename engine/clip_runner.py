@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 
 import transcript_io
-from clip import captioner, cutter, exporter, moments, reframe
+from clip import captioner, cutter, exporter, face_track, moments, reframe
 
 
 def _scale_roi(roi: dict, width: int, height: int) -> dict:
@@ -234,9 +234,19 @@ class ClipRunner:
             )
         (d / "track.json").write_text(json.dumps(track))
         out = str(d / "reframed.mp4")
+        mode = params.get("mode", "pan")
+        # Auto pan (no manual ROIs, no hand-edited track) → follow the real speaker's face through
+        # cuts via per-shot face tracking. Manual ROIs / edited tracks keep the diar⊕ROI 2-ROI pan.
+        face_timeline = None
+        if mode == "pan" and not rois and not edited and face_track.available():
+            dur = float(meta.get("end", 0) or 0) - float(meta.get("start", 0) or 0)
+            ft = face_track.face_timeline(clip_path, dur, cancel_check=lambda: job._cancel_flag)
+            face_timeline = ft or None
+            track["face_track"] = bool(face_timeline)  # surfaced in track.json for inspection
+            (d / "track.json").write_text(json.dumps(track))
         reframe.render(clip_path, track, aspect=params.get("aspect", "9:16"),
-                       mode=params.get("mode", "pan"), crop_margin=float(params.get("crop_margin", 0.0)),
-                       out_path=out, **self._hooks(job))
+                       mode=mode, crop_margin=float(params.get("crop_margin", 0.0)),
+                       out_path=out, face_timeline=face_timeline, **self._hooks(job))
         return {"reframed_path": out, "track": track}
 
     def _do_caption(self, job, *, clip_id: str, params: dict) -> dict:

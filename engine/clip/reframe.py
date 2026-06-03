@@ -236,13 +236,15 @@ def render(
     mode: str = "pan",
     crop_margin: float = 0.0,
     out_path: str,
+    face_timeline=None,
     cancel_check=None,
     register_proc=None,
     timeout: int | None = None,
 ) -> str:
     """Render the reframed clip. ``mode`` ∈ {pan, split, center}; ``aspect`` ∈
-    {9:16, 16:9, 1:1, 4:5}. ``pan`` builds the hard-cut crop-x expression via the
-    vendored ``pan_expr`` from ``track``; ``split`` stacks both ROIs; ``center`` is a
+    {9:16, 16:9, 1:1, 4:5}. ``pan`` follows the speaker: with a ``face_timeline`` (per-shot face
+    tracking) the crop-x follows the detected face; otherwise it hard-cuts between the two ROIs
+    via the vendored ``pan_expr`` from ``track``. ``split`` stacks both ROIs; ``center`` is a
     centered crop. Returns ``out_path``."""
     if aspect not in _ASPECTS:
         raise ValueError(f"unknown aspect {aspect!r}; expected one of {list(_ASPECTS)}")
@@ -259,8 +261,12 @@ def render(
             "-map", "[vout]", "-map", "0:a?", "-c:a", "copy", out_path,
         ]
     else:
-        vf = _pan_vf(track, src_w, src_h, out_w, out_h, crop_margin) if mode == "pan" \
-            else _center_vf(src_w, src_h, out_w, out_h)
+        if mode == "pan" and face_timeline:
+            vf = _face_pan_vf(face_timeline, src_w, src_h, out_w, out_h)
+        elif mode == "pan":
+            vf = _pan_vf(track, src_w, src_h, out_w, out_h, crop_margin)
+        else:
+            vf = _center_vf(src_w, src_h, out_w, out_h)
         argv = base + ["-vf", vf, "-c:a", "copy", out_path]
 
     _ffmpeg.run(
@@ -294,6 +300,18 @@ def _pan_vf(track: dict, src_w: int, src_h: int, out_w: int, out_h: int, crop_ma
     right_x = left_edge(track["roiR"])
     expr = _run_pan_expr(segments, left_x, right_x)
     return f"crop={strip_w}:{strip_h}:x='{expr}':y={y0},scale={out_w}:{out_h}"
+
+
+def _face_pan_vf(face_timeline, src_w: int, src_h: int, out_w: int, out_h: int) -> str:
+    """A target-aspect strip whose x follows the speaker's face over time (per-shot face tracking):
+    lerp within a shot, snap at each cut. Same crop/scale shape as the ROI pan, with a face-driven
+    x expression."""
+    from clip import face_track
+    crop_w = min(src_w, round(src_h * out_w / out_h))
+    crop_h = min(src_h, round(crop_w * out_h / out_w))
+    y0 = (src_h - crop_h) // 2
+    expr = face_track.crop_x_expr(face_timeline, src_w, crop_w)
+    return f"crop={crop_w}:{crop_h}:x='{expr}':y={y0},scale={out_w}:{out_h}"
 
 
 def _center_vf(src_w: int, src_h: int, out_w: int, out_h: int) -> str:
