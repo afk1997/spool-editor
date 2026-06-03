@@ -135,6 +135,25 @@
 >   downscales + ultrafast; default unchanged). Engine **706** · studio typecheck/lint/12 vitest/build/e2e
 >   (47.0 s) green. **→ Item F complete** (F.1 encodes · F.3 preview; F.2 merge deferred w/ rationale).
 >   Commit below.
+> - **✅ E (signals only — ranking deferred to Phase 3 per Kaivan) — richer NON-text glass-box signals on
+>   every candidate, no local LLM.** New `clip/signals.py`: named, explainable, **non-LLM** extractors —
+>   `text_signals` (is_question / exclamation / numbers / intensity-lexicon / filler_ratio / word_rate),
+>   `audio_energy` (ffmpeg volumedetect → mean/max/**dynamic_db**; a big spread ≈ a laugh/emphasis peak),
+>   `scene_density` (ffmpeg scene-cuts per second). `signals.annotate` attaches a per-candidate `features`
+>   dict (text always; audio+scene when media is present, best-effort), wired into
+>   `clip_runner.find_moments_target` so every candidate carries the signals through the moments API.
+>   Codex bridge unchanged (still the only egress; these run locally). **Coordinated with Phase 3:**
+>   `moments.rank` stays the Phase-3 stub — this lands the *signals* the glass-box ranking + render/export
+>   feedback re-rank will score on, so no double-build. TDD: +9 `test_signals` (text deterministic; ffmpeg
+>   parsing mocked; annotate text-always / media-opt-in / window-slice). **Verified live:** a fresh
+>   `find_moments` candidate carries `features{text,audio,scene_density}` (e.g. a question window reads
+>   is_question + low filler vs a dense answer's higher filler/word_rate). Engine **715** + studio e2e
+>   (47.1 s) green. Commit below.
+>
+> **▶ Quality pass COMPLETE** (A·C·B·D·F·E). F.2 (reframe+caption merge) and E's ranking/feedback surface
+> are the only deliberately-deferred pieces (documented above; E's ranking lands with Phase 3). Engine
+> **715** tests · studio typecheck/lint/12 vitest/build · Playwright e2e — all green. Next: manual testing
+> on :8899/:3000, then **Phase 3** (glass-box ranking — consumes E's signals · watch-folder · recipes).
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,

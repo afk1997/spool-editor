@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 
 import transcript_io
-from clip import captioner, cutter, exporter, face_track, moments, reframe
+from clip import captioner, cutter, exporter, face_track, moments, reframe, signals
 
 
 def _scale_roi(roi: dict, width: int, height: int) -> dict:
@@ -309,7 +309,7 @@ class ClipRunner:
 
     def find_moments_target(self, *, source_id: str, params: dict):
         def _work(job):
-            _, words_path = self.source_paths(source_id)
+            media_path, words_path = self.source_paths(source_id)
             cands = moments.find_moments(
                 words_path,
                 mode=params.get("mode", "funny"),
@@ -317,6 +317,14 @@ class ClipRunner:
                 transcript_window=params.get("window"),
                 source_id=source_id,
             )
+            # Attach glass-box NON-text signals (Q&A/sentiment/pace + audio energy + scene density)
+            # to each candidate so the Phase-3 ranking can score on visible inputs. Best-effort —
+            # a signal failure never affects the candidates the model already returned.
+            try:
+                words = (transcript_io.load(words_path).get("words") if words_path else None) or None
+                signals.annotate(cands, words=words, media_path=media_path)
+            except Exception:
+                pass  # signals are additive glass-box extras; never fail moment-finding over them
             job.result = {"candidates": cands, "count": len(cands),
                           "mode": params.get("mode", "funny")}
         return _work
