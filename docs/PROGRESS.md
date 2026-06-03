@@ -14,8 +14,18 @@
 > tab; editor plays the real clip with live synced captions; Render burns) · editor aspect/Pan-Split-Center
 > live preview · **per-shot face-tracking reframe quality stack** (YuNet + adaptive zoom + rule-of-thirds +
 > stabilization + active-speaker + a measurement harness). Details in "Post-Phase-2 UX fixes" below.
-> **▶ NEXT (new session, before Phase 3):** caption↔audio sync + diarization accuracy — see
-> "Next session — caption sync + diarization" near the bottom. Then Phase 3 after more manual testing.
+> **Accuracy pass (this session) — ✅ done + proven on real media:** **(1) caption↔audio sync** — the
+> cut was a keyframe-aligned `-c copy`, so clips began up to a GOP early and every caption was that
+> constant offset ahead of the audio (measured −2.6s on a zoo clip, −5.48s on the e2e clip); made the
+> cut frame-accurate (fast-seek + re-encode) → **0 ms drift** through cut→reframe→caption→export on the
+> live-engine render. **(2) diarization** — a monologue ("Me at the zoo") was over-counted as 2
+> speakers; switched the partial-embedding k-picker to the inter-centroid cosine-distance gate →
+> zoo **1**, Karpathy×Zhan interview **2** (both correct). New harnesses `scripts/caption_sync_eval.py`
+> + `scripts/diarization_eval.py`. Engine **679 tests** + studio typecheck/lint/12 vitest/build +
+> **e2e (47.3s)** all green. Commits `e0b96f4` (cut) · `5fbf836` (diar).
+> **▶ NEXT:** manual testing (engine+studio left running on :8899/:3000), then Phase 3 (glass-box
+> ranking · watch-folder · recipes). Open follow-up: decouple VAD word-realignment from the
+> `TROVE_DIARIZATION` flag (measure first) — see "Next session" notes near the bottom.
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,
