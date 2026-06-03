@@ -239,9 +239,16 @@ class ClipRunner:
         # cuts via per-shot face tracking. Manual ROIs / edited tracks keep the diar⊕ROI 2-ROI pan.
         face_timeline = None
         if mode == "pan" and not rois and not edited and face_track.available():
-            dur = float(meta.get("end", 0) or 0) - float(meta.get("start", 0) or 0)
-            ft = face_track.face_timeline(clip_path, dur, cancel_check=lambda: job._cancel_flag)
-            face_timeline = ft or None
+            # Best-effort: any failure (probe/decode/detect) falls back to the diar⊕ROI 2-ROI pan.
+            try:
+                dur = float(meta.get("end", 0) or 0) - float(meta.get("start", 0) or 0)
+                src_w, src_h = reframe.probe_dimensions(clip_path)
+                out_w, out_h = reframe.aspect_dims(params.get("aspect", "9:16"))
+                ft = face_track.track(clip_path, dur, src_w, src_h, out_w, out_h,
+                                      cancel_check=lambda: job._cancel_flag)
+                face_timeline = ft or None
+            except Exception:
+                face_timeline = None
             track["face_track"] = bool(face_timeline)  # surfaced in track.json for inspection
             (d / "track.json").write_text(json.dumps(track))
         reframe.render(clip_path, track, aspect=params.get("aspect", "9:16"),

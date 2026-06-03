@@ -17,6 +17,9 @@ downloads/
 
 # Whisper model cache (downloaded at runtime by setup wizard)
 models/
+# …but DO vendor the tiny face-detection model used by the reframe (clip/models/*.onnx)
+!clip/models/
+!clip/models/*.onnx
 
 # Paste-buffer artifacts dropped into the chat by the IDE
 attached_assets/Pasted-*.txt

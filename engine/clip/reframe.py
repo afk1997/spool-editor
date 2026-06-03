@@ -302,16 +302,17 @@ def _pan_vf(track: dict, src_w: int, src_h: int, out_w: int, out_h: int, crop_ma
     return f"crop={strip_w}:{strip_h}:x='{expr}':y={y0},scale={out_w}:{out_h}"
 
 
+def aspect_dims(aspect: str) -> tuple[int, int]:
+    """Target (width, height) for an aspect key — used by the face-tracking reframe."""
+    return _ASPECTS[aspect]
+
+
 def _face_pan_vf(face_timeline, src_w: int, src_h: int, out_w: int, out_h: int) -> str:
-    """A target-aspect strip whose x follows the speaker's face over time (per-shot face tracking):
-    lerp within a shot, snap at each cut. Same crop/scale shape as the ROI pan, with a face-driven
-    x expression."""
+    """Crop that follows the speaker's face with adaptive zoom + rule-of-thirds framing: w/h/x/y
+    all vary over time (per-shot framing + stabilization from face_track), then scale to aspect."""
     from clip import face_track
-    crop_w = min(src_w, round(src_h * out_w / out_h))
-    crop_h = min(src_h, round(crop_w * out_h / out_w))
-    y0 = (src_h - crop_h) // 2
-    expr = face_track.crop_x_expr(face_timeline, src_w, crop_w)
-    return f"crop={crop_w}:{crop_h}:x='{expr}':y={y0},scale={out_w}:{out_h}"
+    w_e, h_e, x_e, y_e = face_track.crop_exprs(face_timeline)
+    return f"crop=w='{w_e}':h='{h_e}':x='{x_e}':y='{y_e}',scale={out_w}:{out_h},setsar=1"
 
 
 def _center_vf(src_w: int, src_h: int, out_w: int, out_h: int) -> str:
