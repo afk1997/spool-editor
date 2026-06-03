@@ -366,6 +366,26 @@ documented call on FTS5 (shipped the additive trigram index) ✅. Engine (665) +
 e2e green; each screen still pixel-matches the demo. **→ Phase 2 is DONE.** Next: Phase 3
 (glass-box ranking · watch-folder · recipes), per spec §5.
 
+### Post-Phase-2 UX fixes (live-feedback, this session)
+
+Dogfooding turned up real flow/honesty bugs — all fixed + verified, suites + e2e stay green:
+- **`756c7d8` CORS** — preflight allowed only GET/POST/OPTIONS, so every PATCH/DELETE (settings,
+  brand kits) silently failed from the browser. Added PATCH+DELETE.
+- **`49e2b5b` honest transcribing state** — the Project Overview promised "partial transcript
+  streams below" + rendered an always-empty transcript while transcribing, but whisper writes
+  words.json only on completion (no streaming). Replaced with honest copy, dropped the empty area.
+- **`e00405a` Discovery mode tabs** — tabs RE-SCANNED (skeleton wipe) instead of filtering, and
+  only the latest scan's candidates were kept, so switching tabs lost everything. Now: tabs filter
+  instantly (no re-scan), candidates ACCUMULATE across scans (deduped), "Scan all modes" finds
+  every mode, and "Merge next" (a dead button) is wired (extends a clip to the next moment's end).
+- **`89d6837` + `bb35fdb` cut→review→render flow** — "Make clips" used to fire the full pipeline and
+  jump to the Queue (auto-rendering before review). Now it CUTS + auto-reframes to 9:16 and STOPS
+  (engine `stop_after='reframe'`), landing on the source's Clips tab. The **Editor plays the real
+  reframed clip with live captions overlaid + synced to the playhead** (active word highlighted),
+  timeline trimmed to the clip window; the Captions preset is wired; **Render** burns the style +
+  exports, with reframe→caption→export AWAITED step-by-step (fixed a race that read a half-written
+  reframe → "moov atom not found"). e2e rewritten to the new flow.
+
 ## What's verified now
 
 - `pnpm install` → 6 workspace projects, 354 packages, clean.
