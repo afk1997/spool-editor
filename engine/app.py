@@ -15,6 +15,7 @@ import transcript_io
 import clip_jobs
 import brand_kits
 import settings as settings_store_mod
+import transcript_index as transcript_index_mod
 import clip_runner
 import time as _time
 from util import sanitize_filename
@@ -67,6 +68,12 @@ def create_app() -> Flask:
     effective_max_workers = int(_settings_ov.get("max_workers", MAX_WORKERS))
     effective_clip_workers = int(_settings_ov.get("clip_workers", os.environ.get("TROVE_CLIP_WORKERS", "2")))
     app.extensions["trove.settings"] = settings_store
+
+    # FTS5 (trigram) transcript index — an additive accelerator for /transcripts/search (spec
+    # §7.2). The in-memory word-scan stays the source of truth; this only narrows which
+    # transcripts it must open. Inert (full-scan fallback) if FTS5/trigram isn't available.
+    transcript_index = transcript_index_mod.TranscriptIndex(download_dir / "transcript_index.sqlite3")
+    app.extensions["trove.transcript_index"] = transcript_index
 
     job_manager = JobManager(
         max_workers=effective_max_workers,
@@ -356,6 +363,9 @@ def create_app() -> Flask:
                 transcriber.write_artifacts(result, base_no_ext)
                 tj.duration_seconds = result.duration
                 tj.language_detected = result.language
+                # Index the finished transcript for the FTS5 search accelerator (best-effort).
+                transcript_index_mod.index_words_file(
+                    transcript_index, tj.id, base_no_ext + ".words.json")
             finally:
                 # Always remove the temp WAV — even on cancel/error/exception.
                 # The success path used to clean it up, but cancel/error early-

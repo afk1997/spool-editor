@@ -245,7 +245,7 @@ The demo is full of hard-coded sample data (fake projects like "Ep.42 — Why Lo
 
 ### 7.2 Open decisions / flags
 1. **Flask now vs FastAPI later** — recommend keep Flask (don't rewrite working, tested code).
-2. **JSON job store now vs SQLite** — recommend JSON in P0/P1; SQLite (FTS5) in P2 when search/scale demand it.
+2. **JSON job store now vs SQLite** — recommend JSON in P0/P1; SQLite (FTS5) in P2 when search/scale demand it. **DECIDED (P2):** shipped the *additive* form — an FTS5 **trigram** transcript index (`engine/transcript_index.py`) that accelerates `/transcripts/search` as a candidate filter over the existing word-scan (full-scan fallback ⇒ no user-facing change). The **job store stays JSON** (the whole-store migration is high-risk, optimization-only, and not yet warranted by scale).
 3. **whisper.cpp standard** (drop `openai-whisper`) — recommend yes.
 4. **Diarization default off** (heavy PyTorch dep), one-click enable — recommend yes.
 5. **Repo strategy** — fold trove into the Spool monorepo (simplest for solo/local-first) vs. internal package dep.

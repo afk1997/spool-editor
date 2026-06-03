@@ -96,6 +96,27 @@ def load(path: str) -> dict:
     return data
 
 
+def flat_text(words) -> tuple[str, list[int]]:
+    """Space-joined text of the non-deleted words, plus a per-char → word-position map.
+
+    The single definition shared by ``/transcripts/search`` (which needs the char map to turn
+    a match offset back into start/end timestamps) and the FTS5 index (which indexes just the
+    flat string), so the index's candidate filter matches exactly what the scan searches.
+    """
+    chunks: list[str] = []
+    char_to_widx: list[int] = []
+    for i, w in enumerate(words or []):
+        if w.get("deleted"):
+            continue
+        text = w.get("w") or ""
+        if chunks:
+            chunks.append(" ")
+            char_to_widx.append(i)
+        chunks.append(text)
+        char_to_widx.extend([i] * len(text))
+    return "".join(chunks), char_to_widx
+
+
 def migrate(path: str) -> bool:
     """Persist any pending migration / backfill for ``path`` on disk.
 

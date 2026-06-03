@@ -764,6 +764,23 @@ def test_search_returns_matches_with_snippet(client, tmp_path):
     assert m["start_seconds"] == pytest.approx(0.5)
 
 
+def test_search_stays_correct_after_a_word_edit(client, tmp_path):
+    """The FTS5 candidate filter must never go stale: editing a word to introduce a new term,
+    then searching it, must still find the transcript (the word-edit re-indexes it). Without the
+    re-index the stale filter would wrongly skip it — a false negative. Also confirms an edited-
+    away term stops matching (substring semantics preserved end-to-end)."""
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())  # "Hello machine learning"
+    # First search populates the index for t1 (lazy backfill).
+    assert c.get("/api/v1/transcripts/search?q=machine").get_json()["returned"] == 1
+    # Introduce a brand-new term via an edit — this re-indexes t1.
+    assert c.post("/api/v1/transcripts/t1/words/2", json={"op": "set_text", "w": "elephants"}).status_code == 200
+    # The new term is found (mid-token substring too) and the old term is gone.
+    found = c.get("/api/v1/transcripts/search?q=elephant").get_json()
+    assert found["returned"] == 1 and found["matches"][0]["transcript_id"] == "t1"
+    assert c.get("/api/v1/transcripts/search?q=learning").get_json()["returned"] == 0
+
+
 # ---- chunked transcript read ---------------------------------------
 
 def _seed_done_transcript(app, tmp_path, *, body_text: str | None = None,

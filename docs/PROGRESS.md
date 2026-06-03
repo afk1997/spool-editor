@@ -255,12 +255,22 @@ editing its transcript · full-text search transcripts across the library.
   studio typecheck/lint/12-unit/build + e2e green; live probe — searching "elephant" returns
   matches across the 3 transcribed sources. **→ done-when #4 met** (full-text search across
   the library).
-  - ⏳ **SQLite (FTS5) store migration — deliberately deferred** (spec §7.2: "JSON now;
-    SQLite when search/scale demand it"). The search is already correct + library-wide
-    (always reads the current words.json, so it reflects edits/deletes with no index to keep
-    in sync); FTS5 is a *scale* optimization (faster filtering over a large library) with no
-    user-facing change, and migrating the atomic JSON job store is a high-risk core change.
-    Revisit when a library outgrows the in-memory scan. **Done-when #4 does not depend on it.**
+  - [x] **SQLite (FTS5) — DECIDED + shipped the *additive* path** (spec §7.2). New
+    `transcript_index.py`: an FTS5 **trigram** table (`transcript_id → lowercased flat text`)
+    that only *narrows which transcripts the existing word-scan must open*. The in-memory scan
+    stays the source of truth (always reads current `words.json` → snippet + timing). Trigram
+    MATCH returns a **superset** of substring hits (≥3 chars → zero false negatives; false
+    positives filtered by the scan), so the result is **byte-identical to before — no
+    user-facing change**, just faster. Correctness never depends on the index: short needles /
+    no-FTS / query errors → `None` = "scan everything"; an unindexed transcript is always
+    scanned (and lazily backfilled). Kept fresh at transcript-done + the word-edit endpoint
+    (re-index avoids a stale false negative). Wired `app.extensions["trove.transcript_index"]`;
+    storage report excludes the index DB. **Rejected:** migrating the whole atomic JSON **job**
+    store (high-risk, optimization-only, no user-facing change — §7.2's "when scale demands").
+    **Verified:** +13 tests (`test_transcript_index.py` substring-superset/short-needle/special-
+    char/persist + a search-after-edit regression in `test_api_v1.py`); full suite 665 green;
+    live — "elephant"/"lepha"(mid-token)/"el"(2-char fallback) all return correct matches, index
+    backfills, candidate filter active (8/8). Commit: see below.
 - [x] **Editor timeline (S6)** — the "Timeline — Phase 2" note is replaced by a real
   word-level timeline + version control, studio-only (reuses the engine from slices 1–3/5).
   Per clip: a **word strip** from the transcript sliced to the clip window — click a word to
@@ -317,13 +327,13 @@ each verified slice**, update this file. Reuse the proven seams (`brand_kits.py`
   sizes); `next/dynamic` only what's eagerly shared. Honor LCP<2s / CLS<0.1 / 60fps scrub;
   animate transform/opacity; respect `prefers-reduced-motion`.
 
-- [ ] **7b · SQLite (FTS5) — decide explicitly.** `/transcripts/search` is already correct +
-  library-wide (in-memory scan, always reads current `words.json`); the ⌘K search UI ships.
-  Per spec §7.2 this is **deferred** (JSON until scale demands). If you do it, prefer the
-  *additive* path: an FTS5 **transcript** index (index on transcript-done + on the word-edit
-  endpoint; the search endpoint queries FTS5 to pick candidate transcripts, then the existing
-  word-scan extracts snippet+timing). **Avoid** migrating the whole atomic JSON **job** store
-  (high-risk, optimization-only, no user-facing change) unless scale truly demands it.
+- [x] **7b · SQLite (FTS5) — DECIDED: shipped the additive transcript index.** Took the
+  additive path (NOT the job-store migration): `transcript_index.py` (FTS5 **trigram** table)
+  is a candidate *filter* over the existing word-scan, with a full-scan fallback so results are
+  unchanged (no user-facing change) and correctness never depends on the index. Indexed on
+  transcript-done + word-edit; lazily backfilled. The whole-job-store migration stays
+  **rejected** (high-risk, optimization-only — §7.2's "when scale demands"). See the shipped
+  bullet under Phase 2 above for the full rationale, tests, and live verification.
 
 **Done-when (remaining):** Settings rows are real controls (hot or honestly restart-labeled,
 none fake); long lists virtualized without visual regression; an explicit, documented call on

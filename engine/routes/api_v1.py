@@ -379,6 +379,10 @@ def _settings():
     return current_app.extensions["trove.settings"]
 
 
+def _txidx():
+    return current_app.extensions.get("trove.transcript_index")
+
+
 def _actions():
     return current_app.extensions["trove.actions"]
 
@@ -1001,8 +1005,17 @@ def search_transcripts():
 
     needle = q.lower()
     matches = []
+    # FTS5 (trigram) candidate filter — purely additive. `candidates` is a *superset* of the
+    # transcripts that may contain `needle` (or None = "can't help, scan everything"). We only
+    # skip a transcript that is BOTH indexed AND not a candidate (so it definitely can't match);
+    # anything unindexed is always scanned, so a missing/lagging index can never drop a hit.
+    idx = _txidx()
+    candidates = idx.search_candidates(needle) if idx is not None else None
+    indexed = idx.indexed_ids() if idx is not None else set()
     for tj in _tm().snapshot_jobs():
         if tj.status != transcribe_jobs.TranscribeStatus.DONE:
+            continue
+        if candidates is not None and tj.id in indexed and tj.id not in candidates:
             continue
         parent = _jm().get(tj.parent_job_id)
         if parent is None or not parent.file_path:
@@ -1015,21 +1028,14 @@ def search_transcripts():
         except Exception:
             continue
         words = data.get("words") or []
-        # Build a flat text + a per-char index → word map so we can
-        # convert string-match offsets back to word ranges (and from
-        # there, to start/end timestamps for deep-linking).
-        chunks = []
-        char_to_widx = []
-        for i, w in enumerate(words):
-            if w.get("deleted"):
-                continue
-            text = w.get("w") or ""
-            if chunks:
-                chunks.append(" ")
-                char_to_widx.append(i)
-            chunks.append(text)
-            char_to_widx.extend([i] * len(text))
-        flat = "".join(chunks)
+        # Flat text + per-char → word-position map (shared builder), so a string-match offset
+        # converts back to the word range and thence to start/end timestamps for deep-linking.
+        flat, char_to_widx = transcript_io.flat_text(words)
+        # Self-healing backfill: index any DONE transcript we had to scan because it wasn't yet
+        # indexed (pre-existing library, or completed before this feature) — so the next search
+        # can skip it. Best-effort; the store swallows its own errors.
+        if idx is not None and tj.id not in indexed:
+            idx.index(tj.id, flat)
         if not flat:
             continue
         flat_lower = flat.lower()
@@ -1175,6 +1181,12 @@ def edit_transcript_word(tid, idx):
         return jsonify({"error": "bad_word_op", "detail": str(e)}), 400
     transcript_io.save(path, data)
     transcript_io.regenerate_artifacts(data, os.path.splitext(parent.file_path)[0])
+    # Re-index the edited transcript so the FTS5 search accelerator can't go stale: an insert
+    # could otherwise leave a now-matching transcript un-indexed → wrongly filtered out.
+    idx = _txidx()
+    if idx is not None:
+        flat, _ = transcript_io.flat_text(data.get("words") or [])
+        idx.index(tid, flat)
     return jsonify({"tid": tid, "word": word})
 
 
@@ -1452,8 +1464,11 @@ def storage_info():
         for entry in os.scandir(root):
             if not entry.is_file():
                 continue
-            # Internal bookkeeping files we never want to surface.
-            if entry.name in ("jobs.json", "transcribe_jobs.json", "clip_jobs.json"):
+            # Internal bookkeeping files we never want to surface (job stores, the brand-kit
+            # and settings stores, and the FTS5 search index + its sqlite -wal/-shm sidecars).
+            if entry.name in ("jobs.json", "transcribe_jobs.json", "clip_jobs.json",
+                              "brand_kits.json", "settings.json") \
+                    or entry.name.startswith("transcript_index.sqlite3"):
                 continue
             size = _file_size(entry.path)
             total += size
