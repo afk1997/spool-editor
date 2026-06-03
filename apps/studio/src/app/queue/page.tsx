@@ -56,7 +56,9 @@ export default function QueueScreen() {
 
       <div className="panel" style={{ overflow: "hidden" }}>
         {jobs.map((j, idx) => (
-          <div key={j.id}>
+          // Off-screen queue rows skip render/layout (native windowing for a long queue);
+          // contain-intrinsic-size reserves a collapsed row's height (auto remembers expanded).
+          <div key={j.id} style={{ contentVisibility: "auto", containIntrinsicSize: "auto 58px" }}>
             <div className="row" style={{ padding: "13px 16px", gap: 14, borderBottom: idx < jobs.length - 1 ? "1px solid var(--line-2)" : "none", background: j.err ? "var(--err-soft)" : "transparent" }}>
               <div style={{ width: 30, height: 30, borderRadius: 8, background: "var(--bg-3)", display: "grid", placeItems: "center", flex: "none", color: j.status === "failed" ? "var(--err)" : "var(--accent)" }}><Icon name={typeIcon[j.type] || "film"} size={15} /></div>
               <div style={{ width: 72, flex: "none", borderRadius: 7, overflow: "hidden" }}><Thumb seed={j.src} kind="" label={false} /></div>

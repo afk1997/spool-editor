@@ -318,14 +318,24 @@ each verified slice**, update this file. Reuse the proven seams (`brand_kits.py`
   - **UI:** wire the Settings sections (Models / Hardware "Concurrency & mode" / MCP
     "Config-from-UI" / General defaults) to the store; keep the read-only live `/doctor` facts.
 
-- [ ] **8 · Perf (§6.4/§6.7).** **Virtualize long lists** — Transcript words (the big one;
-  can be thousands), then Library/Clips grids + Queue rows. No virtualizer is installed —
-  add one (`@tanstack/react-virtual` or `react-window`) or hand-roll windowing; **keep the
-  demo's look pixel-identical** (don't change spacing/markup, only mount the visible window).
-  **Lazy-load the heavy editor** — App-Router already route-splits each `page.tsx`, so confirm
-  the editor/ROI/caption chunks aren't pulled into shared bundles (check `pnpm build` chunk
-  sizes); `next/dynamic` only what's eagerly shared. Honor LCP<2s / CLS<0.1 / 60fps scrub;
-  animate transform/opacity; respect `prefers-reduced-motion`.
+- [x] **8 · Perf (§6.4/§6.7) — done.** **Virtualized long lists** with the right tool per
+  surface, **demo look unchanged**: (a) **Transcript words** (the big one — a one-hour source is
+  thousands of word-nodes) use **`@tanstack/react-virtual`** *window* virtualization (added dep)
+  via a reusable `components/spool/virtual.tsx` `WindowList` — it scrolls with the page (no inner
+  scroll container, so layout is identical), measures variable line heights, and mounts only the
+  visible window. Gated behind a 60-line threshold so short transcripts render the *exact*
+  original markup (the per-line renderer is shared, so windowed/plain rows are identical).
+  (b) **Library + Clips grids and Queue rows** use **`content-visibility: auto`** +
+  `contain-intrinsic-size` — the browser skips render/layout for off-screen cards/rows (native
+  windowing) with **zero** layout change (right call for responsive/bounded surfaces; JS-windowing
+  a responsive grid would risk the pixel-perfect layout). **Lazy-load:** App-Router route-splits
+  each `page.tsx` (the editor/ROI/caption routes are distinct dynamic routes); the only added dep
+  (`@tanstack/react-virtual`, ~tiny) is imported solely by `virtual.tsx` (transcript view), so
+  nothing heavy leaks into the shared bundle. §6.4 motion bar already met: `WindowList` positions
+  via `transform`; `prefers-reduced-motion: reduce` is honored (spool.css). **Verified live:**
+  the windowed transcript mounts **23 of 80** synthetic lines (only the visible window) with no
+  client errors and looks identical; short transcripts use the plain path (`[data-index]`=0);
+  Library/Clips/Queue screenshots unchanged. typecheck/lint/12 vitest/build + e2e (46.9s) green.
 
 - [x] **7b · SQLite (FTS5) — DECIDED: shipped the additive transcript index.** Took the
   additive path (NOT the job-store migration): `transcript_index.py` (FTS5 **trigram** table)

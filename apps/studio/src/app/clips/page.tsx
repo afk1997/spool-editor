@@ -61,7 +61,9 @@ export default function ClipsScreen() {
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(190px,1fr))", gap: 16 }}>
           {clips.map((c) => (
-            <div key={c.id} style={{ position: "relative" }}>
+            // content-visibility skips render/layout for off-screen cards (native windowing for
+            // a large library) with zero layout change; contain-intrinsic-size reserves space.
+            <div key={c.id} style={{ position: "relative", contentVisibility: "auto", containIntrinsicSize: "auto 360px" }}>
               <div onClick={() => toggle(c.id)} className="checkbox" style={{ position: "absolute", top: 10, left: 10, zIndex: 5, background: sel.includes(c.id) ? "var(--accent)" : "rgba(0,0,0,0.5)", borderColor: sel.includes(c.id) ? "transparent" : "var(--line-str)", color: "var(--accent-ink)", cursor: "pointer" }}>{sel.includes(c.id) && <Icon name="check" size={12} />}</div>
               <ClipCard c={c} />
             </div>

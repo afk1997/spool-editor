@@ -49,7 +49,9 @@ export default function LibraryScreen() {
       {view === "grid" ? (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(255px,1fr))", gap: 16 }}>
           {list.map((s) => (
-            <div key={s.id} style={{ position: "relative" }}>
+            // Native off-screen render-skip for a large library (zero layout change);
+            // contain-intrinsic-size reserves the card's space so scroll height is stable.
+            <div key={s.id} style={{ position: "relative", contentVisibility: "auto", containIntrinsicSize: "auto 230px" }}>
               <div onClick={(e) => { e.stopPropagation(); toggle(s.id); }} className="checkbox" style={{ position: "absolute", top: 10, left: 10, zIndex: 5, background: sel.includes(s.id) ? "var(--accent)" : "rgba(0,0,0,0.5)", borderColor: sel.includes(s.id) ? "transparent" : "var(--line-str)", color: "var(--accent-ink)", cursor: "pointer" }}>{sel.includes(s.id) && <Icon name="check" size={12} />}</div>
               <MediaCard s={s} onOpen={() => ctx.nav("project", { id: s.id })} />
             </div>

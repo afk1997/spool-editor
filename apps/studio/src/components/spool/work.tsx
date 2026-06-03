@@ -3,6 +3,13 @@
 import { useState } from "react";
 import { useSpool, type Candidate, type TranscriptLine, type SpeakerInfo } from "./context";
 import { Btn, Chip, Empty, Icon, Thumb, fmtTC, parseTC } from "@spool/ui";
+import { WindowList } from "./virtual";
+
+// Past this many speaker-lines the transcript windows (only the visible lines mount — a
+// one-hour video is thousands of word-nodes); below it the exact original markup renders, so
+// every transcript the demo + tests show is byte-identical. The windowed path reuses the same
+// per-line renderer, so the rows look the same either way (spec §6.4).
+const LINE_VIRT_THRESHOLD = 60;
 
 /* Shared work-screen components ported 1:1 from the demo (04): CandidateCard, AdjustModal,
  * DiscoveryBody, TranscriptView. Used by both Project (S4) and Discovery (S5).
@@ -192,6 +199,43 @@ export function TranscriptView({ lines, speakers, tid, sourceId, onEdited }: { l
     setSel(null);
   };
 
+  // One speaker-line — rendered verbatim whether the list is windowed or not (so the rows look
+  // identical; only off-screen lines are absent from the DOM when windowed).
+  const renderLine = (line: TranscriptLine) => {
+    const sp = speakers[line.sp] || { name: line.sp, color: "var(--accent)" };
+    const match = q && line.words.toLowerCase().includes(q.toLowerCase());
+    return (
+      <div key={line.id} style={{ display: "flex", gap: 14, padding: "10px 16px", background: match ? "var(--accent-soft)" : "transparent", borderRadius: 8 }}>
+        <div style={{ flex: "none", width: 96, textAlign: "right" }}>
+          <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)" }}>{fmtTC(line.t)}</div>
+          <div style={{ fontSize: 11.5, fontWeight: 600, color: sp.color }}>{sp.name}</div>
+        </div>
+        <div style={{ lineHeight: 1.9, fontSize: 14 }}>
+          {line.tokens.map((tk, i) => {
+            if (editing && editing.idx === tk.idx) {
+              return (
+                <span key={i} style={{ display: "inline-flex", gap: 4, alignItems: "center", verticalAlign: "middle", margin: "0 3px" }}>
+                  <input autoFocus value={editing.text} onChange={(e) => setEditing({ idx: tk.idx, text: e.target.value })}
+                    onKeyDown={(e) => { if (e.key === "Enter" && editing.text.trim()) doOp(tk.idx, "set_text", editing.text.trim()); if (e.key === "Escape") setEditing(null); }}
+                    style={{ font: "inherit", fontSize: 14, padding: "1px 6px", borderRadius: 5, border: "1px solid var(--accent)", background: "var(--bg-1)", color: "var(--text)", width: Math.max(64, editing.text.length * 9) }} />
+                  <button className="btn subtle sm" title="save" style={{ padding: "2px 6px" }} onClick={() => editing.text.trim() && doOp(tk.idx, "set_text", editing.text.trim())}><Icon name="check" size={13} /></button>
+                  <button className="btn subtle sm" title="delete word" style={{ padding: "2px 6px", color: "var(--err, #e5484d)" }} onClick={() => doOp(tk.idx, "delete")}><Icon name="trash" size={13} /></button>
+                </span>
+              );
+            }
+            return (
+              <span key={i}
+                onClick={() => editable && setSel((c) => (!c || c.a !== c.b ? { a: tk.ti, b: tk.ti } : { a: c.a, b: tk.ti }))}
+                onDoubleClick={() => editable && setEditing({ idx: tk.idx, text: tk.w })}
+                title={editable ? "click: select · double-click: edit" : undefined}
+                style={{ cursor: editable ? "pointer" : "default", padding: "1px 2px", borderRadius: 3, background: inSel(tk.ti) ? "var(--accent)" : "transparent", color: inSel(tk.ti) ? "var(--accent-ink)" : "inherit" }}>{tk.w} </span>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div>
       <div className="row" style={{ gap: 10, marginBottom: 16 }}>
@@ -203,40 +247,9 @@ export function TranscriptView({ lines, speakers, tid, sourceId, onEdited }: { l
         <span style={{ fontSize: 12, color: "var(--text-faint)" }}>{editable ? "Click words to select a range · double-click to fix · ✕ to delete" : "Transcribe to edit"}</span>
       </div>
       <div className="panel" style={{ padding: "8px 4px", maxWidth: 760 }}>
-        {lines.map((line) => {
-          const sp = speakers[line.sp] || { name: line.sp, color: "var(--accent)" };
-          const match = q && line.words.toLowerCase().includes(q.toLowerCase());
-          return (
-            <div key={line.id} style={{ display: "flex", gap: 14, padding: "10px 16px", background: match ? "var(--accent-soft)" : "transparent", borderRadius: 8 }}>
-              <div style={{ flex: "none", width: 96, textAlign: "right" }}>
-                <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)" }}>{fmtTC(line.t)}</div>
-                <div style={{ fontSize: 11.5, fontWeight: 600, color: sp.color }}>{sp.name}</div>
-              </div>
-              <div style={{ lineHeight: 1.9, fontSize: 14 }}>
-                {line.tokens.map((tk, i) => {
-                  if (editing && editing.idx === tk.idx) {
-                    return (
-                      <span key={i} style={{ display: "inline-flex", gap: 4, alignItems: "center", verticalAlign: "middle", margin: "0 3px" }}>
-                        <input autoFocus value={editing.text} onChange={(e) => setEditing({ idx: tk.idx, text: e.target.value })}
-                          onKeyDown={(e) => { if (e.key === "Enter" && editing.text.trim()) doOp(tk.idx, "set_text", editing.text.trim()); if (e.key === "Escape") setEditing(null); }}
-                          style={{ font: "inherit", fontSize: 14, padding: "1px 6px", borderRadius: 5, border: "1px solid var(--accent)", background: "var(--bg-1)", color: "var(--text)", width: Math.max(64, editing.text.length * 9) }} />
-                        <button className="btn subtle sm" title="save" style={{ padding: "2px 6px" }} onClick={() => editing.text.trim() && doOp(tk.idx, "set_text", editing.text.trim())}><Icon name="check" size={13} /></button>
-                        <button className="btn subtle sm" title="delete word" style={{ padding: "2px 6px", color: "var(--err, #e5484d)" }} onClick={() => doOp(tk.idx, "delete")}><Icon name="trash" size={13} /></button>
-                      </span>
-                    );
-                  }
-                  return (
-                    <span key={i}
-                      onClick={() => editable && setSel((c) => (!c || c.a !== c.b ? { a: tk.ti, b: tk.ti } : { a: c.a, b: tk.ti }))}
-                      onDoubleClick={() => editable && setEditing({ idx: tk.idx, text: tk.w })}
-                      title={editable ? "click: select · double-click: edit" : undefined}
-                      style={{ cursor: editable ? "pointer" : "default", padding: "1px 2px", borderRadius: 3, background: inSel(tk.ti) ? "var(--accent)" : "transparent", color: inSel(tk.ti) ? "var(--accent-ink)" : "inherit" }}>{tk.w} </span>
-                  );
-                })}
-              </div>
-            </div>
-          );
-        })}
+        {lines.length > LINE_VIRT_THRESHOLD
+          ? <WindowList items={lines} getKey={(l) => l.id} estimateSize={56}>{(line) => renderLine(line)}</WindowList>
+          : lines.map(renderLine)}
       </div>
       {editable && sel && selWords.length > 0 && (
         <div className="row" style={{ position: "sticky", bottom: 16, marginTop: 16, gap: 12, padding: "10px 14px", borderRadius: 12, background: "var(--bg-1)", border: "1px solid var(--line-str)", boxShadow: "0 8px 30px rgba(0,0,0,0.18)", width: "fit-content" }}>
