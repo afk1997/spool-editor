@@ -469,6 +469,106 @@ def _build_server():
         r = _safe(lambda: _client.dismiss_clip_job(job_id))
         return {"ok": True, "job_id": job_id} if r is None else r
 
+    # ---- automation: produce / recipes / watches / brand kits (Phase 3) ----
+    # Same delegation pattern → the agent drives the SAME /api/v1 automation the studio does, so
+    # agent mode and manual mode never diverge (the golden rule, now for the Phase-3 surface too).
+
+    @mcp.tool()
+    def produce_clips(source_id: str, recipe_id: str = "", recipe: dict | None = None) -> dict:
+        """Apply a recipe to a source end-to-end → the review queue: find moments → glass-box rank →
+        take the top N → run a full cut→reframe→caption→export pipeline per moment with the recipe's
+        aspect/reframe/caption/brand-kit/platform. Pass a saved ``recipe_id`` (from ``list_recipes``)
+        OR an inline ``recipe`` dict (content_mode/count/aspect/reframe_mode/caption_preset/platform/
+        fast/weights/brand_kit_id). Returns a produce clip-job; poll ``get_clip_job`` for the fan-out.
+        Clips are NOT published (Phase 4) — they land for review (the honest gate)."""
+        return _safe(lambda: _client.produce(source_id, recipe_id=recipe_id or None, **(recipe or {})))
+
+    @mcp.tool()
+    def list_recipes() -> dict:
+        """List saved recipes (a recipe = the reusable pipeline decisions: content mode + count,
+        ranking weights, render settings). Use a recipe's ``id`` with ``produce_clips``."""
+        return _safe(lambda: _client.list_recipes())
+
+    @mcp.tool()
+    def get_recipe(recipe_id: str) -> dict:
+        """Get one saved recipe by id."""
+        return _safe(lambda: _client.get_recipe(recipe_id))
+
+    @mcp.tool()
+    def create_recipe(recipe: dict) -> dict:
+        """Create a saved recipe. Fields: name, content_mode (funny/insightful/hot-take/story/how-to/
+        q&a), count, aspect (9:16/16:9/1:1/4:5), reframe_mode (pan/split/center), caption_preset
+        (opus/karaoke/minimal), platform (tiktok/reels/shorts/youtube/linkedin/x), fast (bool),
+        brand_kit_id, weights (dict over hook/self_contained/arc/energy/length_fit)."""
+        return _safe(lambda: _client.create_recipe(recipe))
+
+    @mcp.tool()
+    def update_recipe(recipe_id: str, changes: dict) -> dict:
+        """Patch a saved recipe with the changed fields (same fields as create_recipe)."""
+        return _safe(lambda: _client.update_recipe(recipe_id, changes))
+
+    @mcp.tool()
+    def delete_recipe(recipe_id: str) -> dict:
+        """Delete a saved recipe."""
+        r = _safe(lambda: _client.delete_recipe(recipe_id))
+        return {"ok": True, "recipe_id": recipe_id} if r is None else r
+
+    @mcp.tool()
+    def list_watches() -> dict:
+        """List folder/channel/playlist watches (new videos auto-produce ranked clips per a recipe
+        into the review queue). Each shows its seen/pending/producing/produced reconcile state."""
+        return _safe(lambda: _client.list_watches())
+
+    @mcp.tool()
+    def get_watch(watch_id: str) -> dict:
+        """Get one watch by id."""
+        return _safe(lambda: _client.get_watch(watch_id))
+
+    @mcp.tool()
+    def create_watch(watch: dict) -> dict:
+        """Create a watch. Fields: name, kind (folder/channel/playlist), target (a local folder path
+        or a channel/playlist URL), recipe_id (the recipe to produce with), enabled (bool)."""
+        return _safe(lambda: _client.create_watch(watch))
+
+    @mcp.tool()
+    def update_watch(watch_id: str, changes: dict) -> dict:
+        """Patch a watch (name/kind/target/recipe_id/enabled)."""
+        return _safe(lambda: _client.update_watch(watch_id, changes))
+
+    @mcp.tool()
+    def delete_watch(watch_id: str) -> dict:
+        """Delete a watch."""
+        r = _safe(lambda: _client.delete_watch(watch_id))
+        return {"ok": True, "watch_id": watch_id} if r is None else r
+
+    @mcp.tool()
+    def scan_watch(watch_id: str) -> dict:
+        """Reconcile a watch now: detect new videos → ingest → produce per its recipe once
+        transcribed. Returns this tick's ingested / producing / produced source ids."""
+        return _safe(lambda: _client.scan_watch(watch_id))
+
+    @mcp.tool()
+    def list_brand_kits() -> dict:
+        """List brand kits (a reusable look: caption preset + overrides + watermark + lower-third)."""
+        return _safe(lambda: _client.list_brand_kits())
+
+    @mcp.tool()
+    def create_brand_kit(kit: dict) -> dict:
+        """Create a brand kit. Fields: name, palette (list of hex), caption_preset, caption_overrides
+        (dict), watermark (str), lower_third (str), fonts. Reference its id from a recipe's brand_kit_id."""
+        return _safe(lambda: _client.create_brand_kit(kit))
+
+    @mcp.tool()
+    def update_brand_kit(kit_id: str, changes: dict) -> dict:
+        """Patch a brand kit (same fields as create_brand_kit)."""
+        return _safe(lambda: _client.update_brand_kit(kit_id, changes))
+
+    @mcp.tool()
+    def delete_brand_kit(kit_id: str) -> dict:
+        """Delete a brand kit."""
+        r = _safe(lambda: _client.delete_brand_kit(kit_id))
+        return {"ok": True, "kit_id": kit_id} if r is None else r
+
     # ---- resources --------------------------------------------------
     # Resources let the agent surface live application state to the user
     # without spending tool-call budget on plain reads.
@@ -523,6 +623,18 @@ def _build_server():
         or the produced render's id + output path."""
         import json as _json
         return _json.dumps(_safe(lambda: _client.get_clip_job(job_id)), indent=2)
+
+    @mcp.resource("spool://recipes")
+    def recipes_resource() -> str:
+        """All saved recipes — the reusable pipelines that drive produce + watch automation."""
+        import json as _json
+        return _json.dumps(_safe(lambda: _client.list_recipes()), indent=2)
+
+    @mcp.resource("spool://watches")
+    def watches_resource() -> str:
+        """All folder/channel/playlist watches + their reconcile state."""
+        import json as _json
+        return _json.dumps(_safe(lambda: _client.list_watches()), indent=2)
 
     return mcp
 

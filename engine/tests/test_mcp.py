@@ -113,10 +113,20 @@ async def _drive_mcp(port: int) -> dict:
             out["reframe_bad"] = await call(
                 "reframe_clip", {"clip_id": "nope", "aspect": "9:16", "mode": "pan"})
 
+            # ---- automation surface (produce / recipes / watches / brand kits) ----
+            out["list_recipes"] = await call("list_recipes")
+            out["list_watches"] = await call("list_watches")
+            out["list_brand_kits"] = await call("list_brand_kits")
+            out["produce_bad"] = await call("produce_clips", {"source_id": "nope"})
+
             jobs_res = await session.read_resource("trove://jobs")
             out["jobs_resource"] = jobs_res.contents[0].text
             clips_res = await session.read_resource("spool://clips")
             out["clips_resource"] = clips_res.contents[0].text
+            recipes_res = await session.read_resource("spool://recipes")
+            out["recipes_resource"] = recipes_res.contents[0].text
+            watches_res = await session.read_resource("spool://watches")
+            out["watches_resource"] = watches_res.contents[0].text
 
             # Read the alias and the legacy text resource for the same
             # bogus tid; both should produce identical (error) payloads
@@ -153,6 +163,11 @@ def test_mcp_end_to_end(tmp_path):
         "find_moments", "rank_candidates", "cut_clip", "reframe_clip", "caption_clip",
         "render_clip", "render_pipeline",
         "list_clip_jobs", "get_clip_job", "cancel_clip_job", "dismiss_clip_job",
+        # automation surface (Phase 3 — parity with the studio)
+        "produce_clips",
+        "list_recipes", "get_recipe", "create_recipe", "update_recipe", "delete_recipe",
+        "list_watches", "get_watch", "create_watch", "update_watch", "delete_watch", "scan_watch",
+        "list_brand_kits", "create_brand_kit", "update_brand_kit", "delete_brand_kit",
     }
     assert set(result["tool_names"]) == expected_tools, result["tool_names"]
     assert "trove://transcript/{tid}" in result["templates"]
@@ -201,6 +216,16 @@ def test_mcp_end_to_end(tmp_path):
     assert result["moments_bad"]["error"] == "source_not_ready"
     assert result["reframe_bad"]["error"] == "clip_not_found"
     assert "clip_jobs" in json.loads(result["clips_resource"])
+
+    # Automation surface: list reads return the stores; produce on a bad source errs cleanly;
+    # the recipes/watches resources surface live state — full parity with the studio.
+    assert "recipes" in result["list_recipes"]
+    assert "watches" in result["list_watches"]
+    assert "brand_kits" in result["list_brand_kits"]
+    assert isinstance(result["produce_bad"], dict) and "error" in result["produce_bad"]
+    assert "Traceback" not in str(result["produce_bad"])
+    assert "recipes" in json.loads(result["recipes_resource"])
+    assert "watches" in json.loads(result["watches_resource"])
 
 
 async def _drive_elicit(port: int) -> tuple[int, dict]:
