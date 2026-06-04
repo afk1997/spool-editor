@@ -9,9 +9,9 @@ import { Btn, Icon } from "@spool/ui";
 
 /* Recipes (Phase 3) — a saved end-to-end pipeline: the reusable decisions (content mode + count,
  * optional ranking weights, and the render settings) that drive render.pipeline. Persisted via the
- * engine's /recipes store; "Run on a project" kicks off a recipe-configured discovery pass. The
- * unattended drop-a-video→auto-clips→review flow is the watch-folder step. Zero dummy — every
- * control writes the real recipe / calls the real engine. */
+ * engine's /recipes store; "Run on a project" applies the recipe end-to-end (find → rank → top-N →
+ * render pipeline per moment) → ranked clips in the review queue. The unattended drop-a-video→
+ * auto-clips→review flow is the watch-folder step. Zero dummy — every control calls the real engine. */
 
 const CONTENT_MODES = ["funny", "insightful", "hot-take", "story", "how-to", "q&a"];
 const ASPECTS = ["9:16", "16:9", "1:1", "4:5"];
@@ -88,13 +88,15 @@ export default function RecipesScreen() {
     ctx.client.deleteRecipe(sel).then(() => { newRecipe(); recipesQ.reload(); ctx.pushToast({ icon: "trash", tone: "info", title: "Recipe deleted" }); }).catch(() => {});
   };
 
-  // Run a recipe on a project: a recipe-configured discovery pass (mode + count). The found
-  // moments arrive RANKED (the recipe's weights apply on the Discovery reweight panel); review
-  // there and "Make clips" renders with the recipe's settings.
+  // Run a recipe on a project: apply it END-TO-END — find → glass-box rank → top-N → a render
+  // pipeline per moment with the recipe's aspect/reframe/caption/brand-kit/platform → the review
+  // queue (the same /produce the watch's "Scan now" runs). A saved recipe runs by id (provenance);
+  // an unsaved draft runs inline so all its settings still ride along.
   const run = () => {
     if (!runSrc) return;
-    ctx.client.findMoments(runSrc, { mode: f.content_mode, count: f.count })
-      .then(() => { ctx.pushToast({ icon: "wand", tone: "info", title: `Running “${f.name || "recipe"}”`, body: `Finding ${f.count} ${f.content_mode} moments — review them on Discovery.` }); router.push(`/sources/${runSrc}/discovery`); })
+    const body = sel ? { recipe_id: sel } : toRecipe(f);
+    ctx.client.produce(runSrc, body)
+      .then(() => { ctx.pushToast({ icon: "wand", tone: "info", title: `Running “${f.name || "recipe"}”`, body: `Producing ${f.count} ranked ${f.content_mode} clips — they'll land in the review queue.` }); router.push(`/queue`); })
       .catch(() => ctx.pushToast({ icon: "alert", tone: "warn", title: "Couldn't run — is the source transcribed?" }));
   };
 
@@ -183,7 +185,7 @@ export default function RecipesScreen() {
               {ctx.sources.filter((s) => s.status !== "transcribing").map((s) => <option key={s.id} value={s.id}>{s.title}</option>)}
             </select>
             <Btn variant="primary" icon="wand" onClick={run} disabled={!runSrc}>Run recipe</Btn>
-            <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", lineHeight: 1.6 }}>Finds {f.count} {f.content_mode} moments and ranks them; review on Discovery, then Make clips renders with this recipe&apos;s settings. Unattended drop-a-video→review is the watch-folder step.</div>
+            <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", lineHeight: 1.6 }}>Produces {f.count} ranked {f.content_mode} clips end-to-end with this recipe&apos;s reframe, captions and platform — they land in the review queue. Unattended drop-a-video→review is the watch-folder step.</div>
           </div>
         </div>
       </div>

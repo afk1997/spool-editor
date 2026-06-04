@@ -344,6 +344,11 @@ export class SpoolApiClient {
   renderPipeline(sourceId: string, p: PipelineParams): Promise<ClipJobView> {
     return this.post(`/sources/${encodeURIComponent(sourceId)}/render`, p);
   }
+  /** Apply a recipe end-to-end to a source (find → glass-box rank → top-N → a render pipeline per
+   *  moment) → the review queue. Pass a saved recipe's `recipe_id`, or inline the recipe fields. */
+  produce(sourceId: string, body: { recipe_id?: string } & Partial<Recipe> = {}): Promise<ClipJobView> {
+    return this.post(`/sources/${encodeURIComponent(sourceId)}/produce`, body);
+  }
   listClipJobs(p: ListParams & { kind?: string } = {}): Promise<ClipJobList> {
     return this.get(`/clip-jobs${qs({ ...p })}`);
   }
