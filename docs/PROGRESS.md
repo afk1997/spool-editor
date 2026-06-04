@@ -166,7 +166,29 @@
 > (optional, not blocking the done-when):** hook-analysis / tighter moment windows (see OPEN FINDING),
 > auto title-description-hashtags, batch render, B-roll & emoji, de-dupe via `audio_align.py`,
 > multi-language; **E's render/export→reweight FEEDBACK loop**; the watch **background poller** is wired
-> (`SPOOL_WATCH_INTERVAL`, opt-in) but only the manual-scan reconcile path is runtime-verified.
+> (`SPOOL_WATCH_INTERVAL`, opt-in) — **now runtime-verified** (see the hardening pass below).
+>
+> **▶▶ HARDENING / QUALITY PASS (2026-06-04, this session) — a skeptic re-derivation of Phases 0–3, not
+> new features.** Confirmed-in-code then fixed, each TDD'd RED→GREEN + live-verified on real media +
+> committed: **G** local-file (watch-folder) imports now HARDLINK via `util.link_or_copy`, not
+> `shutil.copy2` — no disk duplication (live: imported inode == dropped, nlink 1→2) `4b9799e`. **B**
+> channel/playlist watch lists canonical `--print url` (was bare ids passed as `enqueue_download(url=…)`)
+> + resolves real titles via `run_info` (live: real `watch?v=` URLs + a resolved title) `f22ce41`. **E**
+> the watch reconciler no longer marks a source `produced` the instant produce is ENQUEUED (which lost
+> codex failures forever): a new `producing` state tracks the produce job — done→produced, error→bounded
+> retry (3), cancelled→drop — persisted across restarts `977b138`. **C** a recipe's/render's
+> `brand_kit_id` is now applied SERVER-side (ClipRunner resolves the kit → caption look in `_do_caption`,
+> threaded through `produce_target` + `render_pipeline`) — was a no-op everywhere except the studio's
+> client-resolved `/captions`; live: a real render burns `@acme` + `Local First` `78259d9`. **D** the
+> Recipes "Run on a project" now calls the real `/produce` end-to-end (`api-client.produce`;
+> saved→recipe_id, unsaved→inline) → the review queue — was `findMoments`-only, silently dropping
+> aspect/reframe/caption/brand-kit/weights `161b786`. **F + the whole watch automation — VERIFIED live
+> via the poller** (`SPOOL_WATCH_INTERVAL=10`): dropped a real video → poller auto-ingested (no manual
+> scan) → transcribed → `pending`→`producing`→`produced` → a real 9:16 clip with the brand kit burned
+> in; both the folder and the channel/playlist paths confirmed. Engine **761** green · studio
+> typecheck/lint/**20** vitest/build/e2e green. **Remaining hardening:** **A** clip tightness (produced
+> clips must land 10–30 s, not the 88–140 s topic spans of the OPEN FINDING), **H/I** ranking-vs-human
+> validation + making non-text signals discriminate on calm content, and an independent Phase-0–2 audit.
 > - **✅ 1. GLASS-BOX OPPORTUNITY RANKING — done (engine + studio), measured on real media.** Implemented
 >   `clip/moments.py::rank` (was the Phase-3 stub): a **transparent** score `= 100·Σ(factorₖ·normalized-weightₖ)`
 >   over five named, reweightable factors — **hook / self_contained / arc / energy / length_fit**, each
