@@ -120,7 +120,8 @@ export interface Recipe {
 }
 /** A folder/channel/playlist automation (Phase 3) — new videos auto-produce ranked clips per a
  *  recipe into the review queue. The reconciler advances each source seen → pending (awaiting
- *  transcription) → producing (produce job in flight) → produced (that job completed). */
+ *  transcription) → producing (produce job in flight) → produced (that job completed); an item
+ *  whose ingest fails waits in `ingesting` (bounded retries) before reaching `pending`. */
 export interface Watch {
   id: string;
   name: string;
@@ -129,7 +130,8 @@ export interface Watch {
   recipe_id?: string;
   enabled?: boolean;
   seen?: string[];
-  pending?: Record<string, string>;
+  ingesting?: Record<string, number>;   // item key → failed-ingest attempt count (awaiting retry)
+  pending?: Record<string, string>;     // item key → source id (ingested, awaiting transcription)
   producing?: Record<string, { job: string; attempts: number }>;
   produced?: string[];
 }
@@ -408,7 +410,7 @@ export class SpoolApiClient {
   deleteWatch(id: string): Promise<void> {
     return this.request(`/watches/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
-  scanWatch(id: string): Promise<{ ingested: string[]; produced: string[]; pending: Record<string, string>; producing: Record<string, { job: string; attempts: number }> }> {
+  scanWatch(id: string): Promise<{ ingested: string[]; produced: string[]; pending: Record<string, string>; producing: Record<string, { job: string; attempts: number }>; ingesting: Record<string, number> }> {
     return this.post(`/watches/${encodeURIComponent(id)}/scan`, {});
   }
 

@@ -52,10 +52,12 @@ def reconcile_watch(watch: dict, *, list_items, ingest, transcript_done, produce
     state plus this tick's ``ingested`` + ``produced_now`` source ids (for persistence + reporting).
     Disabled watches are a no-op.
 
-    State machine (each source flows seen → pending → producing → produced):
-      - ``pending``   maps an item key → either its source id ``str`` (ingested, awaiting
-        transcription) OR ``{"ingest_attempts": n}`` while an ingest is being retried after a
-        transient failure (kept in ``pending``, not ``seen``, so a later tick re-attempts it).
+    State machine (each source flows seen → pending → producing → produced; an item whose ingest
+    fails waits in ``ingesting`` first):
+      - ``ingesting`` maps an item key → the count of failed ingest attempts so far. The item is
+        retried on later ticks (bounded by ``_MAX_INGEST_ATTEMPTS``) and is deliberately NOT in
+        ``seen`` yet, so a transient failure can't drop it forever.
+      - ``pending``   maps an item key → its source id (ingested, awaiting transcription).
       - ``producing`` maps a source id → ``{"job": <produce job id>, "attempts": n}`` (the recipe
         produce was ENQUEUED; we're waiting on that async job's terminal status).
       - ``produced``  lists source ids whose produce job actually COMPLETED.
@@ -68,49 +70,46 @@ def reconcile_watch(watch: dict, *, list_items, ingest, transcript_done, produce
     later failure was silently never retried.
 
     ``ingest(watch, key)`` returns a truthy source id on success or a falsy value on failure; only a
-    SUCCESSFUL ingest moves an item to ``seen`` — the fix for the old bug where the key was marked
-    seen BEFORE ingest, so a transient ingest failure dropped the item forever."""
+    SUCCESSFUL ingest moves an item to ``seen`` (the fix for the old bug where the key was marked
+    seen BEFORE ingest, so a transient ingest failure dropped the item forever) — a failed ingest
+    accrues in ``ingesting`` and is retried, then abandoned (marked seen) after ``_MAX_INGEST_ATTEMPTS``."""
     if not watch.get("enabled", True):
         # Intentional full no-op while paused: we deliberately do NOT advance, drain, or reconcile a
         # producing/in-flight entry here — pause means pause (a re-enable resumes it next tick).
         # Locked by test_reconcile_disabled_watch_is_a_noop.
         return {"seen": watch.get("seen", []), "pending": watch.get("pending", {}),
                 "produced": watch.get("produced", []), "producing": watch.get("producing", {}),
-                "ingested": [], "produced_now": []}
+                "ingesting": watch.get("ingesting", {}), "ingested": [], "produced_now": []}
     seen = list(watch.get("seen") or [])
     pending = dict(watch.get("pending") or {})
     produced = list(watch.get("produced") or [])
     producing = dict(watch.get("producing") or {})
+    ingesting = dict(watch.get("ingesting") or {})
     ingested, produced_now = [], []
 
-    # 1) detect + ingest new items. Only a SUCCESSFUL ingest (truthy sid) marks the item seen, so a
-    #    transient ingest failure is retried on later ticks instead of dropped forever — but bounded
-    #    by _MAX_INGEST_ATTEMPTS so a permanently-bad item is abandoned (marked seen) after a few
-    #    tries rather than retried in an infinite loop. The retry count rides in ``pending`` as
-    #    ``{"ingest_attempts": n}`` until the ingest succeeds (sid) or we give up (move to seen).
+    # 1) detect + ingest new items. Only a SUCCESSFUL ingest (truthy sid) marks the item seen and
+    #    moves it to ``pending``; a transient failure accrues in ``ingesting`` and is retried on
+    #    later ticks instead of being dropped forever — bounded by _MAX_INGEST_ATTEMPTS so a
+    #    permanently-bad item is abandoned (marked seen) after a few tries, never in an infinite loop.
+    #    (Items already in ``pending`` are also in ``seen``, so the seen check covers them.)
     for key in list_items(watch):
         if key in seen:
             continue
-        prev = pending.get(key)
-        if isinstance(prev, str):
-            continue                                          # already ingested, awaiting transcript
-        attempts = int(prev.get("ingest_attempts", 0)) if isinstance(prev, dict) else 0
         sid = ingest(watch, key)
         if sid:
             seen.append(key)                                  # successful ingest → never re-ingest
             pending[key] = sid
             ingested.append(sid)
-        elif attempts + 1 >= _MAX_INGEST_ATTEMPTS:
+            ingesting.pop(key, None)                          # clear any accrued retry count
+        elif ingesting.get(key, 0) + 1 >= _MAX_INGEST_ATTEMPTS:
             seen.append(key)                                  # give up on a persistently-bad item
-            pending.pop(key, None)                            # (warning logged by the caller)
+            ingesting.pop(key, None)                          # (warning logged by the caller)
         else:
-            pending[key] = {"ingest_attempts": attempts + 1}  # transient failure → retry next tick
+            ingesting[key] = ingesting.get(key, 0) + 1        # transient failure → retry next tick
 
     # 2) pending sources whose transcript is done → ENQUEUE produce (async) and track the job.
     #    Don't mark produced here — that waits on the job's terminal status in step 3.
     for key, sid in list(pending.items()):
-        if not isinstance(sid, str):
-            continue                                          # an ingest-retry marker, not a sid yet
         if sid in produced or sid in producing:
             pending.pop(key, None)
             continue
@@ -137,4 +136,4 @@ def reconcile_watch(watch: dict, *, list_items, ingest, transcript_done, produce
         # else queued / running / None (not yet visible) → still in flight; leave it for next tick.
 
     return {"seen": seen, "pending": pending, "produced": produced, "producing": producing,
-            "ingested": ingested, "produced_now": produced_now}
+            "ingesting": ingesting, "ingested": ingested, "produced_now": produced_now}

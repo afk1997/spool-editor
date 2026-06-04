@@ -60,7 +60,7 @@ export default function WatchesScreen() {
     setBusy(true);
     ctx.client.scanWatch(w.id)
       .then((r) => { watchesQ.reload(); ctx.pushToast({ icon: "eye", tone: "info", title: `Scanned “${w.name}”`,
-        body: `${r.ingested.length} new ingested · ${r.produced.length} produced · ${Object.keys(r.producing).length} producing · ${Object.keys(r.pending).length} transcribing` }); })
+        body: `${r.ingested.length} new ingested · ${r.produced.length} produced · ${Object.keys(r.producing).length} producing · ${Object.keys(r.pending).length} transcribing · ${Object.keys(r.ingesting).length} retrying` }); })
       .catch(() => ctx.pushToast({ icon: "alert", tone: "warn", title: "Scan failed", body: "Is the folder path / URL reachable?" }))
       .finally(() => setBusy(false));
   };

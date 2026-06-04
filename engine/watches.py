@@ -5,7 +5,8 @@ detects NEW videos → ingests them (download + auto-transcribe) → once transc
 (produce) → ranked clips land in the review queue. NOT auto-published (Phase 4) — an honest gate.
 
 JSON-backed, atomic (mirrors recipes.py / brand_kits.py). User fields are CRUD'd via the API; the
-per-watch automation STATE (seen / pending / produced) is advanced by the reconciler via set_state.
+per-watch automation STATE (seen / ingesting / pending / produced / producing) is advanced by the
+reconciler via set_state.
 """
 from __future__ import annotations
 
@@ -51,7 +52,7 @@ class WatchStore:
     def create(self, data: dict) -> dict:
         w = {"id": uuid.uuid4().hex[:10], **_clean(data),
              "enabled": bool(data.get("enabled", True)),
-             "seen": [], "pending": {}, "produced": [], "producing": {}}
+             "seen": [], "ingesting": {}, "pending": {}, "produced": [], "producing": {}}
         self._watches.append(w)
         self._save()
         return dict(w)
@@ -69,12 +70,13 @@ class WatchStore:
                              or ("target" in patch and patch["target"] != w.get("target")))
                 w.update(patch)
                 if repointed:
-                    w["seen"], w["pending"], w["produced"], w["producing"] = [], {}, [], {}
+                    w["seen"], w["ingesting"], w["pending"], w["produced"], w["producing"] = [], {}, {}, [], {}
                 self._save()
                 return dict(w)
         return None
 
-    def set_state(self, watch_id: str, *, seen=None, pending=None, produced=None, producing=None):
+    def set_state(self, watch_id: str, *, seen=None, pending=None, produced=None, producing=None,
+                  ingesting=None):
         """Advance the reconciler-managed state (never touches the user fields)."""
         for w in self._watches:
             if w.get("id") == watch_id:
@@ -86,6 +88,8 @@ class WatchStore:
                     w["produced"] = list(produced)
                 if producing is not None:
                     w["producing"] = dict(producing)
+                if ingesting is not None:
+                    w["ingesting"] = dict(ingesting)
                 self._save()
                 return dict(w)
         return None

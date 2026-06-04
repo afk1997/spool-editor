@@ -711,7 +711,8 @@ def create_app() -> Flask:
                                         transcript_done=_watch_transcript_done, produce=_watch_produce,
                                         produce_status=_watch_produce_status)
             watch_store.set_state(fresh["id"], seen=r["seen"], pending=r["pending"],
-                                  produced=r["produced"], producing=r["producing"])
+                                  produced=r["produced"], producing=r["producing"],
+                                  ingesting=r["ingesting"])
         return r
 
     def _reconcile_watch_by_id(watch_id: str):

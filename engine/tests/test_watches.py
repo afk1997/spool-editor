@@ -49,24 +49,37 @@ def test_set_state_persists_producing_jobs(tmp_path):
     assert reloaded.get(w["id"])["producing"] == {"src1": {"job": "j1", "attempts": 2}}
 
 
+def test_set_state_persists_ingesting_retries(tmp_path):
+    # A transient ingest failure tracks its attempt count in `ingesting` (item key -> n) so the
+    # bounded retry survives an engine restart. create() initializes it; set_state advances it.
+    s = WatchStore(str(tmp_path / "watches.json"))
+    w = s.create({"name": "W", "kind": "folder", "target": "/in", "recipe_id": "r1"})
+    assert w["ingesting"] == {}
+    s.set_state(w["id"], ingesting={"flaky.mp4": 2})
+    reloaded = WatchStore(str(tmp_path / "watches.json"))   # survives a restart
+    assert reloaded.get(w["id"])["ingesting"] == {"flaky.mp4": 2}
+
+
 def test_update_repoint_resets_reconciler_state(tmp_path):
-    # Changing kind OR target to a DIFFERENT value must reset seen/pending/produced/producing —
-    # stale seen keys (esp. folder filenames) would otherwise suppress brand-new items at the new
-    # target. A no-op / name-only PATCH must NOT wipe the history.
+    # Changing kind OR target to a DIFFERENT value must reset seen/ingesting/pending/produced/
+    # producing — stale seen keys (esp. folder filenames) would otherwise suppress brand-new items
+    # at the new target. A no-op / name-only PATCH must NOT wipe the history.
     s = WatchStore(str(tmp_path / "watches.json"))
     w = s.create({"name": "F", "kind": "folder", "target": "/in/a", "recipe_id": "r1"})
-    s.set_state(w["id"], seen=["old.mp4"], pending={"old.mp4": "src1"},
+    s.set_state(w["id"], seen=["old.mp4"], pending={"old.mp4": "src1"}, ingesting={"flaky.mp4": 1},
                 produced=["src1"], producing={"src1": {"job": "j1", "attempts": 1}})
 
     # name-only PATCH keeps the history
     same = s.update(w["id"], {"name": "Renamed"})
     assert same["seen"] == ["old.mp4"] and same["pending"] == {"old.mp4": "src1"}
+    assert same["ingesting"] == {"flaky.mp4": 1}
     assert same["produced"] == ["src1"] and same["producing"] == {"src1": {"job": "j1", "attempts": 1}}
 
     # repointing the target to a new value resets all reconciler state
     moved = s.update(w["id"], {"target": "/in/b"})
     assert moved["target"] == "/in/b"
     assert moved["seen"] == [] and moved["pending"] == {} and moved["produced"] == [] and moved["producing"] == {}
+    assert moved["ingesting"] == {}
 
 
 def test_update_unknown_fields_dropped_and_unknown_id(tmp_path):

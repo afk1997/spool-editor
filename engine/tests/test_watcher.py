@@ -64,11 +64,12 @@ def test_reconcile_retries_a_transient_ingest_failure_instead_of_dropping_it():
         r = reconcile_watch(watch, list_items=lambda w: ["x.mp4"], ingest=ingest,
                             transcript_done=lambda s: False, produce=lambda w, s: None,
                             produce_status=_ok_status)
-        state = {k: r[k] for k in ("seen", "pending", "produced", "producing")}
+        state = {k: r[k] for k in ("seen", "ingesting", "pending", "produced", "producing")}
 
     assert attempts == ["x.mp4", "x.mp4", "x.mp4"]                    # retried each tick, not dropped
     assert r["seen"] == ["x.mp4"]                                     # marked seen only once it landed
     assert r["pending"] == {"x.mp4": "src-x"}                         # now awaiting transcript
+    assert r["ingesting"] == {}                                       # retry count cleared on success
     assert r["ingested"] == ["src-x"]
 
 
@@ -88,11 +89,12 @@ def test_reconcile_gives_up_on_a_persistently_bad_ingest_after_max_attempts():
         r = reconcile_watch(watch, list_items=lambda w: ["bad.mp4"], ingest=ingest,
                             transcript_done=lambda s: False, produce=lambda w, s: None,
                             produce_status=_ok_status)
-        state = {k: r[k] for k in ("seen", "pending", "produced", "producing")}
+        state = {k: r[k] for k in ("seen", "ingesting", "pending", "produced", "producing")}
 
     assert len(attempts) == _MAX_INGEST_ATTEMPTS                      # retried, but bounded
     assert r["seen"] == ["bad.mp4"]                                   # given up → marked seen
-    assert r["pending"] == {}                                         # no lingering retry marker
+    assert r["ingesting"] == {}                                       # retry marker cleared on give-up
+    assert r["pending"] == {}                                         # nothing left dangling
     assert r["ingested"] == []                                        # nothing ever ingested
 
 
