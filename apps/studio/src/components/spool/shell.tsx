@@ -18,6 +18,7 @@ const NAV = [
   { href: "/import", icon: "import", label: "Import" },
   { href: "/library", icon: "film", label: "Library" },
   { href: "/clips", icon: "scissors", label: "Clips" },
+  { href: "/recipes", icon: "wand", label: "Recipes" },
   { href: "/queue", icon: "layers", label: "Queue" },
   { sep: true },
   { href: "/publish", icon: "send", label: "Publish" },

@@ -103,6 +103,21 @@ export interface BrandKit {
   lower_third?: string;
   fonts?: string[];
 }
+/** A saved end-to-end pipeline (Phase 3) — the reusable decisions that drive render.pipeline +
+ *  watch-folder automation (everything except the per-moment start/end). */
+export interface Recipe {
+  id: string;
+  name: string;
+  content_mode?: string;      // funny / insightful / hot-take / story / how-to / q&a (discovery)
+  count?: number;             // how many moments to find
+  aspect?: string;            // 9:16 / 16:9 / 1:1 / 4:5
+  reframe_mode?: string;      // pan / split / center
+  caption_preset?: string;    // opus / karaoke / minimal
+  brand_kit_id?: string;
+  platform?: string;          // tiktok / reels / shorts / youtube / linkedin / x
+  fast?: boolean;
+  weights?: Record<string, number>;   // optional glass-box ranking weights
+}
 /** S8 Caption Studio fine-styling — clamped/validated engine-side, mapped to the real ASS. */
 export interface CaptionOverrides {
   size?: number;
@@ -344,6 +359,20 @@ export class SpoolApiClient {
   }
   deleteBrandKit(id: string): Promise<void> {
     return this.request(`/brand-kits/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  // ── recipes (Phase 3): saved end-to-end pipelines ──
+  listRecipes(): Promise<{ recipes: Recipe[] }> {
+    return this.get("/recipes");
+  }
+  createRecipe(recipe: Partial<Recipe>): Promise<Recipe> {
+    return this.post("/recipes", recipe);
+  }
+  updateRecipe(id: string, recipe: Partial<Recipe>): Promise<Recipe> {
+    return this.bodyMethod("PATCH", `/recipes/${encodeURIComponent(id)}`, recipe);
+  }
+  deleteRecipe(id: string): Promise<void> {
+    return this.request(`/recipes/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
   // ── settings + models (demo 07) ──
