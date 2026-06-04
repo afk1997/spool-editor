@@ -23,11 +23,13 @@ def list_folder_items(folder: str) -> list[str]:
 
 
 def list_playlist_items(url: str, *, limit: int = 30, ytdlp: str = "yt-dlp") -> list[str]:
-    """Video ids on a channel/playlist via a yt-dlp FLAT listing (metadata only, no download),
-    newest-first and capped. Failures (offline / bad URL) degrade to []."""
+    """Canonical video URLs on a channel/playlist via a yt-dlp FLAT listing (metadata only, no
+    download), newest-first and capped. We print ``url`` (the per-entry webpage URL), NOT the bare
+    ``id`` — the reconciler hands each item straight to ``enqueue_download(url=…)`` and a bare id is
+    not a reliable download target across extractors. Failures (offline / bad URL) degrade to []."""
     try:
         out = subprocess.run(
-            [ytdlp, "--flat-playlist", "--print", "id", "--playlist-end", str(int(limit)), url],
+            [ytdlp, "--flat-playlist", "--print", "url", "--playlist-end", str(int(limit)), url],
             capture_output=True, text=True, timeout=90,
         ).stdout
     except Exception:

@@ -3,7 +3,32 @@
 produce once transcribed — is tested without real downloads, jobs, or yt-dlp."""
 from __future__ import annotations
 
-from watcher import reconcile_watch, list_folder_items
+import watcher
+from watcher import reconcile_watch, list_folder_items, list_playlist_items
+
+
+def test_list_playlist_items_returns_canonical_urls_not_bare_ids(monkeypatch):
+    # The reconciler hands each item straight to enqueue_download(url=…), so the listing
+    # must yield canonical webpage URLs — bare ids aren't a reliable download target for
+    # non-YouTube extractors. Simulate a yt-dlp that prints whichever field is requested.
+    captured = {}
+
+    class _Result:
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(argv, **kwargs):
+        field = argv[argv.index("--print") + 1]
+        captured["field"] = field
+        data = {"id": "aaa\nbbb\n",
+                "url": "https://site/watch?v=aaa\nhttps://site/watch?v=bbb\n"}
+        return _Result(data.get(field, ""))
+
+    monkeypatch.setattr(watcher.subprocess, "run", fake_run)
+    items = list_playlist_items("https://site/playlist", limit=10)
+
+    assert captured["field"] == "url"                       # asks yt-dlp for the URL, not the id
+    assert items == ["https://site/watch?v=aaa", "https://site/watch?v=bbb"]
 
 
 def test_reconcile_ingests_only_new_items():

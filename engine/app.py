@@ -6,7 +6,7 @@ from pathlib import Path
 from flask import Flask, jsonify, request
 
 from safety import RateLimiter, attach_cors, attach_security_headers
-from runner import run_download
+from runner import run_download, run_info
 from jobs import JobManager, Job, JobStatus
 import models_store
 import machine
@@ -613,8 +613,21 @@ def create_app() -> Flask:
         try:
             if watch.get("kind") == "folder":
                 return _import_local_file(os.path.join(watch.get("target", ""), key), auto_transcribe=True)
+            # ``key`` is a canonical video URL (watcher.list_playlist_items prints ``url``).
+            # Resolve its real title/thumbnail up front — same as a paste-URL import (the
+            # _start_download path) — so a watched channel/playlist yields sources identical to
+            # manual imports rather than ones titled with a raw URL. Best-effort: fall back to
+            # the URL if the metadata probe fails (offline / 4xx), never blocking the ingest.
+            title, thumbnail = key, ""
+            try:
+                info = run_info(key)
+                if not info.error_category:
+                    title = info.title or key
+                    thumbnail = info.thumbnail or ""
+            except Exception:
+                pass
             return _enqueue_download(url=key, format_choice="video", format_id=None,
-                                     title=key, auto_transcribe=True)
+                                     title=title, thumbnail=thumbnail, auto_transcribe=True)
         except Exception:
             app.logger.warning("watch ingest failed for %r", key, exc_info=True)
             return None
