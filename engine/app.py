@@ -1,7 +1,6 @@
 # app.py
 from __future__ import annotations
 import os
-import shutil
 import threading
 from pathlib import Path
 from flask import Flask, jsonify, request
@@ -23,7 +22,7 @@ import settings as settings_store_mod
 import transcript_index as transcript_index_mod
 import clip_runner
 import time as _time
-from util import sanitize_filename
+from util import link_or_copy, sanitize_filename
 
 
 def _resolve_download_dir() -> Path:
@@ -588,7 +587,10 @@ def create_app() -> Flask:
         def _work(job: Job):
             ext = os.path.splitext(path)[1] or ".mp4"
             dst = DOWNLOAD_DIR / f"{job.id}{ext}"
-            shutil.copy2(path, dst)
+            # Hardlink (not copy) when on the same filesystem so a watched folder of
+            # multi-GB videos isn't duplicated into downloads/ (spec §5 P3). The engine
+            # only reads the source, so the user's original is never mutated.
+            link_or_copy(path, str(dst))
             job.file_path = str(dst)
             job.filename = sanitize_filename(title, ext)
             _try_auto_transcribe(job)

@@ -5,7 +5,9 @@ trap when blueprint modules need them — blueprint modules can't safely
 import from app.py because app.py imports the blueprint registrations.
 """
 from __future__ import annotations
+import os
 import re
+import shutil
 import unicodedata
 
 
@@ -31,6 +33,23 @@ def split_urls(raw: str) -> list[str]:
         seen.add(t)
         out.append(t)
     return out
+
+
+def link_or_copy(src: str, dst: str) -> None:
+    """Materialize ``src`` at ``dst`` without duplicating bytes when possible.
+
+    Importing a local file into the download dir (the watch-folder ingest) used to
+    ``shutil.copy2`` — doubling a multi-GB video on disk. Prefer a **hardlink**: a
+    second directory entry for the same inode, zero extra disk, reads identically,
+    and the engine only ever reads the source (never mutates it in place), so the
+    user's original is safe. Hardlinks are same-filesystem only, so fall back to a
+    full copy on any failure — a different volume (``EXDEV``), an existing ``dst``
+    (``EEXIST``), too many links, or a filesystem that can't hardlink.
+    """
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
 
 
 def sanitize_filename(title: str, ext: str) -> str:
