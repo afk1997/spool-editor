@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from pathlib import Path
 
 import transcript_io
@@ -373,6 +374,46 @@ class ClipRunner:
                 job.result = {"clip_id": clip_id, "render_id": render_id, "output_path": out,
                               "preset": params.get("preset", "tiktok")}
             self._cancellable(job, body)
+        return _work
+
+    def produce_target(self, *, source_id: str, recipe: dict):
+        """Apply a recipe end-to-end (spec §5 Phase 3 / the watch-folder keystone): find_moments
+        (recipe.content_mode, count) → glass-box rank(recipe.weights) → take the top ``count`` →
+        submit a full render pipeline per moment (cut→reframe→caption→export with the recipe's
+        aspect/reframe/caption/platform/fast), each tagged ``auto`` + ``recipe_id`` (+ ``watch_id``)
+        for the review queue. Reuses find_moments + moments.rank + pipeline_target — no new engine.
+        The produced clips are NOT published (Phase 4) — they land for review (honest gate)."""
+        def _work(job):
+            media_path, words_path = self.source_paths(source_id)
+            count = int(recipe.get("count") or 5)
+            self.clip_manager.update_progress(job.id, 10, stage="find")
+            cands = moments.find_moments(words_path, mode=recipe.get("content_mode", "funny"),
+                                         count=count, source_id=source_id)
+            try:
+                words = (transcript_io.load(words_path).get("words") if words_path else None) or None
+                signals.annotate(cands, words=words, media_path=media_path)
+            except Exception:
+                pass  # signals are additive glass-box extras; never fail production over them
+            self.clip_manager.update_progress(job.id, 40, stage="rank")
+            ranked = moments.rank(cands, weights=recipe.get("weights"))[:count]
+            submitted = []
+            for c in ranked:
+                clip_id, render_id = uuid.uuid4().hex[:10], uuid.uuid4().hex[:10]
+                params = {"start": c["start"], "end": c["end"],
+                          "aspect": recipe.get("aspect", "9:16"), "mode": recipe.get("reframe_mode", "pan"),
+                          "style": recipe.get("caption_preset", "opus"), "preset": recipe.get("platform", "tiktok"),
+                          "recipe_id": recipe.get("id"), "auto": True}
+                if recipe.get("fast") is not None:
+                    params["fast"] = bool(recipe["fast"])
+                if recipe.get("watch_id"):
+                    params["watch_id"] = recipe["watch_id"]
+                jid = self.clip_manager.submit(
+                    kind="pipeline", source_id=source_id, clip_id=clip_id, params=params,
+                    target=self.pipeline_target(source_id=source_id, clip_id=clip_id,
+                                                render_id=render_id, params=params))
+                submitted.append(jid)
+            job.result = {"recipe_id": recipe.get("id"), "count": len(submitted),
+                          "clip_jobs": submitted, "candidates": ranked}
         return _work
 
     def pipeline_target(self, *, source_id: str, clip_id: str, render_id: str, params: dict):

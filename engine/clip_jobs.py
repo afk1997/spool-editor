@@ -35,7 +35,7 @@ class ClipStatus(str, enum.Enum):
 
 
 # The clip-engine operations, one per engine module (+ the chained pipeline).
-CLIP_KINDS = {"moments", "cut", "reframe", "caption", "export", "pipeline"}
+CLIP_KINDS = {"moments", "cut", "reframe", "caption", "export", "pipeline", "produce"}
 
 
 @dataclass

@@ -30,9 +30,14 @@ class _FakeJM:
 class _FakeCM:
     def __init__(self):
         self.progress = []
+        self.submitted = []   # records produce_target's fan-out (no pipeline actually runs)
 
     def update_progress(self, jid, pct, *, stage=None):
         self.progress.append((pct, stage))
+
+    def submit(self, *, kind, target, source_id=None, clip_id=None, params=None):
+        self.submitted.append({"kind": kind, "source_id": source_id, "clip_id": clip_id, "params": params or {}})
+        return f"job{len(self.submitted)}"
 
 
 class _FakeSettings:
@@ -162,6 +167,30 @@ def test_find_moments_target_honors_weight_overrides(runner, monkeypatch):
 
     w = job.result["candidates"][0]["weights"]
     assert w["energy"] == 1.0 and w["hook"] == 0.0       # the override propagated into rank
+
+
+def test_produce_target_fans_out_ranked_pipelines(runner, monkeypatch):
+    # The watch-folder keystone: apply a recipe end-to-end — find_moments → rank(recipe.weights)
+    # → take the top `count` → submit a full render pipeline per moment with the recipe's settings.
+    _words_file(runner)
+
+    def fake_find(words_path, **kw):
+        return [{"start": float(i * 20), "end": float(i * 20 + 18), "title": f"m{i}", "rationale": "",
+                 "mode": kw["mode"], "signals": (["hook", "punchline"] if i == 2 else [])} for i in range(4)]
+
+    _patch(monkeypatch, "moments", "find_moments", fake_find)
+    recipe = {"id": "r1", "content_mode": "funny", "count": 2, "aspect": "1:1", "reframe_mode": "center",
+              "caption_preset": "minimal", "platform": "reels", "fast": True, "weights": {"hook": 5}}
+    job = _job("produce", source_id="src1")
+    runner.produce_target(source_id="src1", recipe=recipe)(job)
+
+    subs = runner.clip_manager.submitted
+    assert len(subs) == 2 and all(s["kind"] == "pipeline" for s in subs)   # top `count`=2 pipelines
+    p0 = subs[0]["params"]
+    assert (p0["aspect"], p0["mode"], p0["style"], p0["preset"]) == ("1:1", "center", "minimal", "reels")
+    assert p0["fast"] is True and p0["recipe_id"] == "r1" and p0["auto"] is True   # recipe + provenance
+    assert subs[0]["params"]["start"] == 40.0                              # hooky m2 ranked first (hook weight)
+    assert job.result["count"] == 2 and len(job.result["clip_jobs"]) == 2 and job.result["recipe_id"] == "r1"
 
 
 # ---- reframe ---------------------------------------------------------

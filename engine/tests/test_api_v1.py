@@ -1359,3 +1359,33 @@ def test_pipeline_unknown_recipe_404(client, tmp_path):
     _seed_done_transcript(app, tmp_path, words_data=_editable_words())
     r = c.post("/api/v1/sources/abc/render", json={"start": 0.0, "end": 1.5, "recipe_id": "ghost"})
     assert r.status_code == 404
+
+
+# ---- produce: apply a recipe end-to-end (find→rank→top-N→pipeline) → review queue (Phase 3) ----
+# find_moments is stubbed so the async produce job never reaches the codex bridge in a unit test;
+# the fan-out logic itself is covered synchronously in test_clip_runner.
+
+def test_produce_endpoint_submits_a_produce_job(client, tmp_path, monkeypatch):
+    monkeypatch.setattr("clip.moments.find_moments", lambda *a, **k: [])
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())   # source "abc"
+    rid = c.post("/api/v1/recipes", json={"name": "R", "content_mode": "funny", "count": 3}).get_json()["id"]
+    r = c.post("/api/v1/sources/abc/produce", json={"recipe_id": rid})
+    assert r.status_code == 201 and r.get_json()["kind"] == "produce"
+
+
+def test_produce_endpoint_unknown_recipe_404(client, tmp_path):
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())
+    assert c.post("/api/v1/sources/abc/produce", json={"recipe_id": "ghost"}).status_code == 404
+
+
+def test_produce_endpoint_no_transcript_409(client, tmp_path, monkeypatch):
+    monkeypatch.setattr("clip.moments.find_moments", lambda *a, **k: [])
+    app, c = client
+    dd = app.extensions["trove.download_dir"]
+    (dd / "novx.mp4").write_bytes(b"x")
+    app.extensions["trove.jobs"]._jobs["novx"] = Job(id="novx", url="u", title="t",
+                                                     status=JobStatus.DONE, file_path=str(dd / "novx.mp4"))
+    rid = c.post("/api/v1/recipes", json={"name": "R"}).get_json()["id"]
+    assert c.post("/api/v1/sources/novx/produce", json={"recipe_id": rid}).status_code == 409

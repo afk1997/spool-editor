@@ -1611,6 +1611,34 @@ def _sanitize_rank_weights(raw):
     return out or None
 
 
+@api_v1_bp.post("/sources/<source_id>/produce")
+@token_required
+def produce_clips(source_id):
+    """Apply a recipe to a source end-to-end → the review queue (automated discover.* +
+    render.pipeline). find_moments(recipe.content_mode, count) → glass-box rank(recipe.weights)
+    → the top ``count`` moments each render with the recipe's aspect/reframe/caption/platform,
+    tagged auto + recipe_id. The watch-folder runs this per new video. The clips are NOT
+    published (Phase 4) — they land for review (the honest gate)."""
+    _, words_path, err = _source_or_error(source_id)
+    if err:
+        return err
+    if not words_path or not os.path.exists(words_path):
+        return jsonify({"error": "no_transcript"}), 409
+    data = request.get_json(silent=True) or {}
+    rid = data.get("recipe_id")
+    if rid is not None:
+        recipe = _rc().get(str(rid))
+        if recipe is None:
+            return jsonify({"error": "recipe_not_found"}), 404
+    else:   # an inline recipe (the watch passes a stored recipe_id; ad-hoc callers can inline one)
+        recipe = {k: data[k] for k in ("content_mode", "count", "aspect", "reframe_mode",
+                                       "caption_preset", "platform", "fast", "weights", "brand_kit_id")
+                  if k in data}
+    jid = _cm().submit(kind="produce", source_id=source_id, params={"recipe_id": rid},
+                       target=_cr().produce_target(source_id=source_id, recipe=recipe))
+    return jsonify(_clip_job_view(_cm().get(jid))), 201
+
+
 @api_v1_bp.post("/sources/<source_id>/cut")
 @token_required
 def cut_clip(source_id):
@@ -2129,6 +2157,7 @@ _OPENAPI_DOC = {
             ]}},
         "/sources/{source_id}/moments": {"post": {"summary": "Find clip-worthy moments over the source transcript (LLM)"}},
         "/sources/{source_id}/rank":    {"post": {"summary": "Re-rank candidates with the glass-box opportunity score (named, reweightable factors)"}},
+        "/sources/{source_id}/produce": {"post": {"summary": "Apply a recipe end-to-end (find→rank→top-N→pipeline per moment) → the review queue"}},
         "/sources/{source_id}/cut":     {"post": {"summary": "Cut a clip [start,end] from the source"}},
         "/sources/{source_id}/render":  {"post": {"summary": "One-shot pipeline: cut→reframe→caption→export"}},
         "/clips/{clip_id}/reframe":     {"post": {"summary": "Reframe a clip (diar⊕ROI speaker pan; aspect/mode)"}},

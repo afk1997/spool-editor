@@ -22,7 +22,8 @@ def test_status_enum_values():
 
 
 def test_kinds_cover_the_engine_chain():
-    assert CLIP_KINDS == {"moments", "cut", "reframe", "caption", "export", "pipeline"}
+    # "produce" = the Phase-3 recipe fan-out (find→rank→top-N→pipeline per moment).
+    assert CLIP_KINDS == {"moments", "cut", "reframe", "caption", "export", "pipeline", "produce"}
 
 
 def test_dataclass_defaults():
