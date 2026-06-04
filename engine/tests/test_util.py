@@ -38,18 +38,15 @@ def test_link_or_copy_falls_back_to_copy_across_filesystems(tmp_path, monkeypatc
     assert os.stat(src).st_ino != os.stat(dst).st_ino   # an independent copy, not a link
 
 
-def test_link_or_copy_overwrites_existing_destination(tmp_path, monkeypatch):
-    # The copy fallback path must tolerate a pre-existing dst (os.link would raise
-    # EEXIST) so a re-import never errors out.
+def test_link_or_copy_overwrites_existing_destination(tmp_path):
+    # The copy fallback must tolerate a pre-existing dst — the REAL os.link raises EEXIST when the
+    # destination already exists (no monkeypatch), so a re-import never errors out and copy2
+    # overwrites the stale bytes.
     src = tmp_path / "orig.mp4"
     src.write_bytes(b"new")
     dst = tmp_path / "out.mp4"
-    dst.write_bytes(b"stale")
+    dst.write_bytes(b"stale")   # pre-existing dst → real os.link raises EEXIST
 
-    def _no_hardlink(a, b):
-        raise OSError(18, "Cross-device link")
-
-    monkeypatch.setattr(os, "link", _no_hardlink)
     link_or_copy(str(src), str(dst))
 
-    assert dst.read_bytes() == b"new"
+    assert dst.read_bytes() == b"new"   # copy2 overwrote the stale contents

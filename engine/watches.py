@@ -14,7 +14,6 @@ import os
 import uuid
 
 _FIELDS = ("name", "kind", "target", "recipe_id", "enabled")   # user-editable
-_KINDS = ("folder", "channel", "playlist")
 
 
 def _clean(data: dict) -> dict:
@@ -58,9 +57,19 @@ class WatchStore:
         return dict(w)
 
     def update(self, watch_id: str, data: dict):
+        patch = _clean(data)
         for w in self._watches:
             if w.get("id") == watch_id:
-                w.update(_clean(data))
+                # Repointing a watch (changing kind or target to a DIFFERENT value) must reset the
+                # reconciler state: stale seen keys — esp. folder filenames — would otherwise
+                # suppress brand-new items at the new target. Guard on an actual change so a no-op
+                # or name-only PATCH keeps the history. CLI/MCP go through here too, so all clients
+                # benefit (the API doesn't have to special-case it).
+                repointed = (("kind" in patch and patch["kind"] != w.get("kind"))
+                             or ("target" in patch and patch["target"] != w.get("target")))
+                w.update(patch)
+                if repointed:
+                    w["seen"], w["pending"], w["produced"], w["producing"] = [], {}, [], {}
                 self._save()
                 return dict(w)
         return None

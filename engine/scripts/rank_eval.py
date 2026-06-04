@@ -14,7 +14,7 @@ What it proves (the Phase-3 acceptance, spec §5 / §4 discover.rank / §6 glass
   3. REWEIGHTABLE — re-ranking with an energy-heavy weight vector reorders the list.
 
 Candidates come from the real moment-finder (codex bridge) by default; ``--sample N`` builds
-N deterministic ~18 s transcript windows instead (no LLM — reproducible without codex).
+N deterministic transcript windows (≤18 s each) instead (no LLM — reproducible without codex).
 """
 import argparse
 import copy
@@ -32,7 +32,11 @@ INTERVIEW = os.path.join(DL, "032df8e8e5.mp4")   # Karpathy × Zhan, 2 speakers,
 
 
 def _sample_windows(words_path, n, target=18.0):
-    """N deterministic ~``target``-second windows built from consecutive transcript segments."""
+    """N deterministic ~``target``-second windows built from consecutive transcript segments.
+
+    The window end is clamped to ``start + target`` so a single long transcript segment can't
+    balloon a window to 100–285 s (which it did on long-segment transcripts); short-form clips
+    are what the ranking is meant to score, so we keep these near the target."""
     data = transcript_io.load(words_path)
     segs = [s for s in (data.get("segments") or []) if s.get("start") is not None]
     out, i = [], 0
@@ -41,7 +45,8 @@ def _sample_windows(words_path, n, target=18.0):
         j = i
         while j < len(segs) and float(segs[j]["end"]) - start < target:
             j += 1
-        end = float(segs[min(j, len(segs) - 1)]["end"])
+        seg_end = float(segs[min(j, len(segs) - 1)]["end"])
+        end = min(seg_end, start + target)   # don't massively overshoot the target on a long segment
         out.append({"start": round(start, 2), "end": round(end, 2), "title": f"win@{int(start)}s",
                     "rationale": "", "mode": "sample", "signals": []})
         i = j + 1
@@ -71,7 +76,7 @@ def main():
 
     if args.sample:
         cands = _sample_windows(words_path, args.sample)
-        print(f"candidates: {len(cands)} sampled ~18s windows (no LLM)")
+        print(f"candidates: {len(cands)} sampled windows (≤18s each, no LLM)")
     else:
         print(f"find_moments(mode={args.mode}, count={args.count}) via the codex bridge …")
         cands = moments.find_moments(words_path, mode=args.mode, count=args.count)
@@ -102,7 +107,8 @@ def main():
         f = c["factors"]
         feats = c.get("features", {})
         au = feats.get("audio") or {}
-        a = f'dyn={au.get("dynamic_db","–")} max={au.get("max_db","–")}' if au else "no-audio"
+        a = (f'dyn={au.get("dynamic_db","–")} max={au.get("max_db","–")} rel={au.get("rel_db","–")}'
+             if au else "no-audio")
         sc = feats.get("scene_density")
         print(f'{rank_i:>2}  {_label(c)} {c["score"]:>6}   '
               f'{f["hook"]:>5} {f["self_contained"]:>5} {f["arc"]:>5} {f["energy"]:>5} {f["length_fit"]:>5}   '
@@ -122,7 +128,7 @@ def main():
         c = by_id[cid]
         au = (c.get("features", {}).get("audio") or {})
         print(f"  ↑ promoted {text_o.index(cid)+1}→{full_o.index(cid)+1}: "
-              f'{_label(c)}  dynamic_db={au.get("dynamic_db","–")} '
+              f'{_label(c)}  dynamic_db={au.get("dynamic_db","–")} rel_db={au.get("rel_db","–")} '
               f'scene={c.get("features", {}).get("scene_density","–")}')
 
     print(f"\n=== REWEIGHT (energy=1.0) reorders ===")

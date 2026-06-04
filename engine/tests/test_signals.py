@@ -92,6 +92,23 @@ def test_annotate_attaches_relative_loudness_across_the_set(monkeypatch):
     assert out[2]["features"]["audio"]["rel_db"] == 0.0    # at the baseline
 
 
+def test_annotate_relative_loudness_uses_true_median_for_even_n(monkeypatch):
+    # For an even-N pool (the typical produce set), the baseline is the AVERAGE of the two middle
+    # levels — not the upper-middle element. Levels [-30, -26, -22, -20] sorted → middles -26/-22
+    # → median -24, so rel_db = mean − (-24).
+    levels = {0.0: -30.0, 10.0: -26.0, 20.0: -22.0, 30.0: -20.0}
+    monkeypatch.setattr(signals, "audio_energy",
+                        lambda m, s, e: {"mean_db": levels[s], "max_db": levels[s] + 5, "dynamic_db": 5})
+    monkeypatch.setattr(signals, "scene_density", lambda *a, **k: 0.0)
+    cands = [{"start": 0.0, "end": 5.0}, {"start": 10.0, "end": 15.0},
+             {"start": 20.0, "end": 25.0}, {"start": 30.0, "end": 35.0}]
+    out = signals.annotate(cands, words=[], media_path="m.mp4")
+    assert out[0]["features"]["audio"]["rel_db"] == -6.0   # -30 − (-24)
+    assert out[1]["features"]["audio"]["rel_db"] == -2.0   # -26 − (-24)
+    assert out[2]["features"]["audio"]["rel_db"] == 2.0    # -22 − (-24)
+    assert out[3]["features"]["audio"]["rel_db"] == 4.0    # -20 − (-24)
+
+
 def test_window_text_slices_to_the_candidate_window():
     words = [{"w": "before", "start": 0.0, "end": 0.5},
              {"w": "inside", "start": 2.0, "end": 2.4},

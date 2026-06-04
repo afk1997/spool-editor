@@ -1591,11 +1591,14 @@ def rank_clip_candidates(source_id):
     cands = data.get("candidates")
     if not isinstance(cands, list) or not cands:
         return jsonify({"error": "no_candidates"}), 400
+    # Each element must be a dict — rank() reaches into ``features``/``signals`` and a non-dict
+    # element would raise an AttributeError (an unhandled 500). Reject up front with a clean 400.
+    if not all(isinstance(c, dict) for c in cands):
+        return jsonify({"error": "bad_candidates"}), 400
     from clip import moments as clip_moments
     ranked = clip_moments.rank(cands, weights=_sanitize_rank_weights(data.get("weights")))
     for cand in ranked:
-        if isinstance(cand, dict):
-            cand.setdefault("source_id", source_id)
+        cand.setdefault("source_id", source_id)
     return jsonify({"candidates": ranked, "count": len(ranked),
                     "weights": ranked[0]["weights"]}), 200
 
@@ -1639,6 +1642,12 @@ def produce_clips(source_id):
         recipe = {k: data[k] for k in ("content_mode", "count", "aspect", "reframe_mode",
                                        "caption_preset", "platform", "fast", "weights", "brand_kit_id")
                   if k in data}
+        # Validate up front like /render and /recipes — a bad enum (aspect/reframe/caption/platform)
+        # would otherwise return 201 then fail ASYNC in the render. Stored recipes are already
+        # validated at create/update, so only the inline branch needs this.
+        verr = _validate_recipe(recipe, require_name=False)
+        if verr:
+            return verr
     jid = _cm().submit(kind="produce", source_id=source_id, params={"recipe_id": rid},
                        target=_cr().produce_target(source_id=source_id, recipe=recipe))
     return jsonify(_clip_job_view(_cm().get(jid))), 201

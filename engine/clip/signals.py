@@ -133,7 +133,11 @@ def annotate(candidates: list[dict], *, words: list[dict] | None = None,
     levels = [c["features"]["audio"]["mean_db"] for c in candidates
               if c.get("features", {}).get("audio") and c["features"]["audio"].get("mean_db") is not None]
     if len(levels) >= 2:
-        baseline = sorted(levels)[len(levels) // 2]   # median window level
+        sl = sorted(levels)
+        mid = len(sl) // 2
+        # True median window level: average the two middles for even N (the typical produce pool)
+        # so the baseline isn't biased toward the upper-middle element.
+        baseline = sl[mid] if len(sl) % 2 else (sl[mid - 1] + sl[mid]) / 2.0
         for c in candidates:
             au = c.get("features", {}).get("audio")
             if au and au.get("mean_db") is not None:

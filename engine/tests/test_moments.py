@@ -294,7 +294,14 @@ def test_rank_relative_loudness_discriminates_when_absolute_audio_is_flat():
     assert louder["factors"]["energy"] > quieter["factors"]["energy"]
 
 
-def test_rank_handles_candidate_without_features():
+def test_rank_all_zero_weights_falls_back_to_defaults():
+    # An all-zero weight vector would zero every score (and divide by zero) — rank() must fall back
+    # to DEFAULT_WEIGHTS so the candidate still gets a non-zero score with the normalized defaults.
+    zero = {k: 0 for k in moments.RANK_FACTORS}
+    [c] = moments.rank([_rank_cand(0, 18, cues=["hook"], text="Why does this keep happening?!")],
+                       weights=zero)
+    assert c["weights"] == moments._normalized_weights(None)   # the normalized defaults
+    assert c["score"] > 0
     # signals.annotate is best-effort; a candidate can arrive with no features at all. rank
     # must still score it (length-fit is always computable from start/end) and never raise.
     bare = {"start": 0.0, "end": 18.0, "title": "t", "mode": "funny", "signals": []}

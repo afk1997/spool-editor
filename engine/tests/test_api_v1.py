@@ -1305,6 +1305,16 @@ def test_rank_endpoint_unknown_source_404(client):
     assert c.post("/api/v1/sources/ghost/rank", json={"candidates": []}).status_code == 404
 
 
+def test_rank_endpoint_rejects_non_dict_candidate(client, tmp_path):
+    # A non-dict element would make rank() raise AttributeError → an unhandled 500. The endpoint
+    # must reject it up front with a clean 400 instead.
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())   # source "abc"
+    r = c.post("/api/v1/sources/abc/rank", json={"candidates": [{"start": 0.0, "end": 18.0}, "oops"]})
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "bad_candidates"
+
+
 # ---- recipes (Phase 3): saved end-to-end pipelines that drive render.pipeline ----
 
 def test_recipe_crud(client):
@@ -1389,6 +1399,41 @@ def test_produce_endpoint_no_transcript_409(client, tmp_path, monkeypatch):
                                                      status=JobStatus.DONE, file_path=str(dd / "novx.mp4"))
     rid = c.post("/api/v1/recipes", json={"name": "R"}).get_json()["id"]
     assert c.post("/api/v1/sources/novx/produce", json={"recipe_id": rid}).status_code == 409
+
+
+def test_produce_inline_recipe_rejects_bad_enum(client, tmp_path):
+    # An inline recipe (no recipe_id) must be validated up front like /render and /recipes — a bad
+    # enum returns a clean 400, not a 201 that fails asynchronously in the render.
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())   # source "abc"
+    r = c.post("/api/v1/sources/abc/produce", json={"aspect": "weird"})
+    assert r.status_code == 400 and r.get_json()["error"] == "bad_recipe"
+
+
+def test_produce_inline_recipe_whitelists_keys_into_recipe(client, tmp_path, monkeypatch):
+    # The inline-recipe branch builds the recipe from a whitelist of body keys — assert the
+    # whitelisted (valid) keys reach produce_target and a junk key is dropped.
+    monkeypatch.setattr("clip.moments.find_moments", lambda *a, **k: [])
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())   # source "abc"
+    captured = {}
+    real = app.extensions["trove.clip_runner"].produce_target
+
+    def _capture(*, source_id, recipe):
+        captured["recipe"] = recipe
+        return real(source_id=source_id, recipe=recipe)
+
+    monkeypatch.setattr(app.extensions["trove.clip_runner"], "produce_target", _capture)
+    r = c.post("/api/v1/sources/abc/produce", json={
+        "content_mode": "funny", "count": 3, "aspect": "9:16", "reframe_mode": "pan",
+        "caption_preset": "karaoke", "platform": "tiktok", "fast": True,
+        "weights": {"energy": 2}, "brand_kit_id": "bk1", "junk": "nope"})
+    assert r.status_code == 201
+    rec = captured["recipe"]
+    assert rec == {"content_mode": "funny", "count": 3, "aspect": "9:16", "reframe_mode": "pan",
+                   "caption_preset": "karaoke", "platform": "tiktok", "fast": True,
+                   "weights": {"energy": 2}, "brand_kit_id": "bk1"}
+    assert "junk" not in rec
 
 
 # ---- watches (Phase 3): folder / channel / playlist automations ----
