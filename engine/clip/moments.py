@@ -111,9 +111,31 @@ def find_moments(
     for item in _parse_array(reply):
         cand = _shape(item, mode=mode, clamp_max=clamp_max, source_id=source_id)
         if cand is not None:
-            out.append(cand)
+            out.append(_tighten_to_window(cand, lines))
             if len(out) >= count:
                 break
+    return out
+
+
+# Trim over-long candidates into the short-form sweet spot. The moment-finder occasionally proposes
+# whole-topic spans (40–140 s); a vertical clip wants ~10–30 s. The prompt asks for this, but the
+# trim is the deterministic guarantee (no extra LLM call).
+_TARGET_MAX = 30.0      # cap at the top of the length_fit plateau
+_MIN_CLIP = 10.0        # never trim a clip below this — it needs room to land
+
+
+def _tighten_to_window(cand: dict, lines, *, target_max: float = _TARGET_MAX) -> dict:
+    """Return ``cand`` trimmed into ``[start, ≤ start+target_max]`` when it runs long, else
+    unchanged. Keeps the hook (the start) and ends on the latest clean transcript-line boundary
+    within range (and ≥ ``_MIN_CLIP`` from the start) so the cut lands on a speech beat; falls
+    back to a hard cap at ``start + target_max`` when no boundary fits (one unbroken line)."""
+    start, end = float(cand["start"]), float(cand["end"])
+    if end - start <= target_max:
+        return cand
+    cap = start + target_max
+    boundaries = [le for (_ls, le, _t) in lines if start + _MIN_CLIP <= le <= cap]
+    out = dict(cand)
+    out["end"] = round(max(boundaries) if boundaries else cap, 3)
     return out
 
 
@@ -293,13 +315,16 @@ def _build_prompt(lines: list[tuple[float, float, str]], *, mode: str, count: in
         "What makes a good clip:\n"
         "- It stands alone — a natural entry point in, ending on a beat, no dangling context.\n"
         "- It has a hook in the first ~3 seconds.\n"
-        "- It is roughly 10–25 seconds long (a little longer is fine if the moment needs it)."
+        "- It is 10–30 seconds long. Pick the single tightest self-contained window — NOT a whole "
+        "topic, section, or long back-and-forth. If a passage runs long, choose the most clip-worthy "
+        "10–30 s slice of it (clips longer than ~30 s do not perform as short-form vertical video)."
     )
     transcript = "\n".join(f"[{s:.2f}–{e:.2f}] {t}" for s, e, t in lines)
     prompt = (
         "Transcript (each line is [start–end in seconds] text):\n\n"
         f"{transcript}\n\n"
-        f"Find the {count} best moments. Use the exact timestamps above to choose start and "
+        f"Find the {count} best moments. Each MUST be 10–30 seconds long — prefer several short, "
+        "punchy moments over a few long ones. Use the exact timestamps above to choose start and "
         "end (seconds, as decimals). Give each a short, punchy title and a one-sentence reason.\n\n"
         "Return ONLY a JSON array — no prose, no markdown fences — exactly like:\n"
         '[{"start": 12.3, "end": 30.1, "title": "...", "why": "...", "signals": ["punchline"]}]\n'

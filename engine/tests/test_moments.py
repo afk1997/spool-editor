@@ -96,7 +96,7 @@ def test_find_moments_parses_json_with_preamble_and_trailer(words_json):
 
 def test_find_moments_clamps_and_drops_invalid_ranges(words_json):
     resp = json.dumps([
-        {"start": 5.0, "end": 999.0, "title": "runs past end", "why": "x"},   # clamp end→duration
+        {"start": 50.0, "end": 999.0, "title": "runs past end", "why": "x"},  # clamp end→duration (then 10s, no trim)
         {"start": 30.0, "end": 20.0, "title": "inverted", "why": "x"},        # drop
         {"start": -3.0, "end": 4.0, "title": "negative", "why": "x"},         # drop
     ])
@@ -162,6 +162,43 @@ def test_find_moments_offline_with_default_codex_raises(words_json):
     # before any CLI is touched.
     with pytest.raises(llm.OfflineError):
         moments.find_moments(words_json, provider="codex", env={"SPOOL_OFFLINE": "1"})
+
+
+# ---- clip tightness: produced clips must land in the short-form sweet spot, not topic spans ----
+#
+# The moment-finder occasionally returns long topic-length spans (40–140 s). A deterministic
+# trim pass pulls any over-long candidate into ~10–30 s, keeping the hook (the start) and ending
+# on a clean transcript-line boundary so the clip is genuinely short-form.
+
+def test_find_moments_tightens_overlong_spans(words_json):
+    # The model returns the whole 58 s topic; it must be trimmed into the sweet spot.
+    resp = json.dumps([{"start": 0.0, "end": 58.0, "title": "whole topic", "why": "x", "signals": ["hook"]}])
+    out = moments.find_moments(words_json, provider=_provider(resp))
+    assert out[0]["start"] == 0.0                          # hook (the start) preserved
+    assert out[0]["end"] - out[0]["start"] <= 30.0         # trimmed into the short-form sweet spot
+    assert out[0]["end"] == 27.8                           # last clean line-end within 30 s of the start
+
+
+def test_find_moments_keeps_well_sized_spans(words_json):
+    resp = json.dumps([{"start": 2.0, "end": 24.0, "title": "good clip", "why": "x"}])
+    out = moments.find_moments(words_json, provider=_provider(resp))
+    assert out[0]["start"] == 2.0 and out[0]["end"] == 24.0   # 22 s — already short-form, untouched
+
+
+def test_tighten_to_window_hard_caps_when_no_clean_boundary():
+    # One giant unbroken line and no boundary in range → hard-cap at target_max (still short-form).
+    lines = [(0.0, 200.0, "one massive unbroken line")]
+    c = {"start": 0.0, "end": 200.0, "title": "t"}
+    out = moments._tighten_to_window(c, lines, target_max=30.0)
+    assert out["end"] == 30.0 and out["start"] == 0.0
+
+
+def test_prompt_demands_short_self_contained_windows(words_json):
+    cap = {}
+    moments.find_moments(words_json, provider=_provider(_TWO, cap))
+    blob = ((cap["system"] or "") + cap["prompt"]).lower()
+    assert "10–30" in blob or "10-30" in blob or "30 second" in blob   # a firm short-form target
+    assert "a little longer is fine" not in blob                       # the hedge that invited topic spans is gone
 
 
 # ---- rank: glass-box opportunity score (Phase 3 — spec §5 / §4 discover.rank) ----
