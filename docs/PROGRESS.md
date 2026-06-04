@@ -156,10 +156,17 @@
 > on :8899/:3000, then **Phase 3** (glass-box ranking — consumes E's signals · watch-folder · recipes).
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
 >
-> **▶ PHASE 3 — Discovery + automation (in progress; spec §5).** Order (confirmed): glass-box ranking →
-> recipes → watch-folder, then hook-analysis / auto-metadata / batch / B-roll / de-dupe / multi-language.
-> **Quality-pass item E's ranking + feedback re-rank folded in here** (signals landed last pass; this is
-> where they get scored).
+> **▶ PHASE 3 — Discovery + automation — ✅ core done (the §5 done-when is MET).** Order (confirmed):
+> glass-box ranking → recipes → watch-folder, all ✅. **Done-when MET + verified live:** point at a
+> folder → drop a video → it auto-imports → transcribes → finds + **glass-box ranks** → cuts/reframes/
+> captions per a recipe → a ranked clip lands in the review queue (NOT auto-published); ranking factors
+> are **visible + reweightable** (the Discovery ScoreBar + Reweight panel). 8 commits `ce24c7e`→`b67923f`;
+> engine **751** tests + studio typecheck/lint/18 vitest/build/e2e all green. **Quality-pass item E's
+> ranking folded in here** (signals landed last pass; now scored). **Remaining Phase-3 "as fits" extras
+> (optional, not blocking the done-when):** hook-analysis / tighter moment windows (see OPEN FINDING),
+> auto title-description-hashtags, batch render, B-roll & emoji, de-dupe via `audio_align.py`,
+> multi-language; **E's render/export→reweight FEEDBACK loop**; the watch **background poller** is wired
+> (`SPOOL_WATCH_INTERVAL`, opt-in) but only the manual-scan reconcile path is runtime-verified.
 > - **✅ 1. GLASS-BOX OPPORTUNITY RANKING — done (engine + studio), measured on real media.** Implemented
 >   `clip/moments.py::rank` (was the Phase-3 stub): a **transparent** score `= 100·Σ(factorₖ·normalized-weightₖ)`
 >   over five named, reweightable factors — **hook / self_contained / arc / energy / length_fit**, each
@@ -184,10 +191,29 @@
 >   (engine) · `7710efb` (studio). **OPEN FINDING (for a later slice):** `find_moments` returns 88–140 s topic
 >   spans (all `length_fit=0`), not tight 10–30 s clips — a *moment-finding* tightness issue (→ hook-analysis /
 >   tighter-windows slice), separate from ranking correctness.
-> - ◻️ **2. RECIPES** — saved end-to-end pipeline (mode/count/aspect/caption-preset/brand-kit/platform);
->   `engine/recipes.py` JSON store + CRUD routes (OpenAPI) + a studio screen; drives `render.pipeline`.
-> - ◻️ **3. WATCH-FOLDER + channel/playlist automation** — drop a video → auto download→…→rank→cut→reframe→caption
->   per a recipe → land in a "for review" queue (honest gate, NOT auto-published).
+> - **✅ 2. RECIPES — saved end-to-end pipeline (engine + studio), proven on real media.** New
+>   `engine/recipes.py` JSON store (mirrors brand_kits.py) + GET/POST/PATCH/DELETE `/recipes`
+>   (OpenAPI-documented); a Recipe = content_mode + count + optional ranking `weights` + render
+>   settings (aspect/reframe_mode/caption_preset/brand_kit_id/platform/fast). `render.pipeline` accepts
+>   `recipe_id` (recipe supplies defaults, explicit body wins, recipe_id recorded as provenance).
+>   **Studio:** a `/recipes` rail screen (list/editor/run-on-project) with real controls incl. the 5
+>   ranking-weight sliders; "Run on a project" kicks off a recipe-configured find_moments. TDD: +2
+>   `test_recipes` +5 `test_api_v1`. **Verified live:** a "Square Reels" recipe drove the pipeline on the
+>   interview → a real 1:1 reframe. Commits `1a4f57d` (engine) · `7fb7aef` (studio).
+> - **✅ 3. WATCH-FOLDER + channel/playlist automation (engine + studio), verified end-to-end on real
+>   media.** New `engine/watches.py` (WatchStore: folder/channel/playlist + recipe + enabled +
+>   seen/pending/produced state) + `engine/watcher.py` (`reconcile_watch` tick — detect new → ingest →
+>   produce once transcribed — dependency-injected/pure; `list_folder_items`/`list_playlist_items`).
+>   **`clip_runner.produce_target` + `POST /sources/<id>/produce` (kind "produce")** = the recipe fan-out
+>   (find→rank→top-N→a pipeline per moment, tagged `auto`+`recipe_id`). app.py wires the real
+>   ingest (new `import_local_file` action for folders — reuses the download job machinery + auto-transcribe;
+>   `enqueue_download(auto_transcribe=True)` for URLs) + an opt-in poller (`SPOOL_WATCH_INTERVAL`). API:
+>   `/watches` CRUD + `/watches/<id>/scan` (OpenAPI). **Studio:** a `/watches` rail screen (list/editor +
+>   "Scan now"). TDD: +3 `test_watches` +4 `test_watcher` +5 `test_api_v1` (+1 `produce_target`, +3 produce
+>   endpoint, CLIP_KINDS += "produce"). **Verified live:** dropped a video in a watched folder → scan
+>   imported+auto-transcribed it → scan produced → fanned out a pipeline that COMPLETED as a real 9:16 clip
+>   (auto=True) from the ranked moment "The Elephant Fact…" (59.7). Commits `fb0722b` (produce) · `a137f1a`
+>   (watch engine) · `b67923f` (studio).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,
 > Library, Project/Transcript (S4), Discovery (S5), Reframe (S7), Caption (S8), Editor (S6),
