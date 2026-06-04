@@ -118,6 +118,19 @@ export interface Recipe {
   fast?: boolean;
   weights?: Record<string, number>;   // optional glass-box ranking weights
 }
+/** A folder/channel/playlist automation (Phase 3) — new videos auto-produce ranked clips per a
+ *  recipe into the review queue. `seen`/`pending`/`produced` are the reconciler's progress state. */
+export interface Watch {
+  id: string;
+  name: string;
+  kind: string;               // folder | channel | playlist
+  target: string;             // a local folder path, or a channel/playlist URL
+  recipe_id?: string;
+  enabled?: boolean;
+  seen?: string[];
+  pending?: Record<string, string>;
+  produced?: string[];
+}
 /** S8 Caption Studio fine-styling — clamped/validated engine-side, mapped to the real ASS. */
 export interface CaptionOverrides {
   size?: number;
@@ -373,6 +386,23 @@ export class SpoolApiClient {
   }
   deleteRecipe(id: string): Promise<void> {
     return this.request(`/recipes/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  // ── watches (Phase 3): folder/channel/playlist automations ──
+  listWatches(): Promise<{ watches: Watch[] }> {
+    return this.get("/watches");
+  }
+  createWatch(watch: Partial<Watch>): Promise<Watch> {
+    return this.post("/watches", watch);
+  }
+  updateWatch(id: string, watch: Partial<Watch>): Promise<Watch> {
+    return this.bodyMethod("PATCH", `/watches/${encodeURIComponent(id)}`, watch);
+  }
+  deleteWatch(id: string): Promise<void> {
+    return this.request(`/watches/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+  scanWatch(id: string): Promise<{ ingested: string[]; produced: string[]; pending: Record<string, string> }> {
+    return this.post(`/watches/${encodeURIComponent(id)}/scan`, {});
   }
 
   // ── settings + models (demo 07) ──

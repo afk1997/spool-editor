@@ -19,6 +19,7 @@ const NAV = [
   { href: "/library", icon: "film", label: "Library" },
   { href: "/clips", icon: "scissors", label: "Clips" },
   { href: "/recipes", icon: "wand", label: "Recipes" },
+  { href: "/watches", icon: "eye", label: "Watches" },
   { href: "/queue", icon: "layers", label: "Queue" },
   { sep: true },
   { href: "/publish", icon: "send", label: "Publish" },
