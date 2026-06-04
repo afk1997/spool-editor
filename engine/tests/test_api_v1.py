@@ -1246,3 +1246,60 @@ def test_create_app_applies_persisted_concurrency_at_startup(tmp_path, monkeypat
     application = _app_module.create_app()
     assert application.extensions["trove.clips"].max_workers == 5   # render pool
     assert application.extensions["trove.jobs"].max_workers == 7    # download pool
+
+
+# ---- glass-box re-rank (POST /sources/<id>/rank) ------------------------
+# Stateless re-rank: the client posts the candidates it already holds + the desired weights;
+# the engine re-scores ON the attached features and returns them sorted (MCP/CLI/agent parity —
+# the studio mirrors the same weighted-sum client-side for instant slider feedback).
+
+def _rank_cands():
+    flat = {"start": 0.0, "end": 18.0, "title": "flat", "mode": "funny", "signals": [],
+            "features": {"text": {"is_question": False, "exclamation": False, "intensity": 0.0,
+                                  "filler_ratio": 0.0, "word_rate": 1.0}}}
+    hooky = {"start": 20.0, "end": 38.0, "title": "hooky", "mode": "funny", "signals": ["hook", "punchline"],
+             "features": {"text": {"is_question": True, "exclamation": True, "intensity": 0.0,
+                                   "filler_ratio": 0.0, "word_rate": 1.0}}}
+    return [flat, hooky]
+
+
+def test_rank_endpoint_rescores_and_sorts(client, tmp_path):
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())   # source "abc"
+    r = c.post("/api/v1/sources/abc/rank", json={"candidates": _rank_cands()})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["count"] == 2
+    assert body["candidates"][0]["title"] == "hooky"                    # ranked best-first
+    assert set(body["candidates"][0]["factors"]) == {"hook", "self_contained", "arc", "energy", "length_fit"}
+    assert set(body["weights"]) == {"hook", "self_contained", "arc", "energy", "length_fit"}
+
+
+def test_rank_endpoint_honors_weight_overrides(client, tmp_path):
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())
+    cands = [
+        {"start": 0.0, "end": 18.0, "title": "hooky", "mode": "funny", "signals": ["hook"],
+         "features": {"text": {"is_question": True, "exclamation": True, "intensity": 0.0,
+                               "filler_ratio": 0.0, "word_rate": 1.0}}},
+        {"start": 20.0, "end": 38.0, "title": "loud", "mode": "funny", "signals": [],
+         "features": {"text": {"is_question": False, "exclamation": False, "intensity": 0.0,
+                               "filler_ratio": 0.0, "word_rate": 1.0},
+                      "audio": {"mean_db": -20, "max_db": -1, "dynamic_db": 34}, "scene_density": 2.0}},
+    ]
+    r = c.post("/api/v1/sources/abc/rank", json={"candidates": cands, "weights": {"energy": 1}})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["candidates"][0]["title"] == "loud"                    # energy-weighted → loud wins
+    assert body["weights"]["energy"] == 1.0 and body["weights"]["hook"] == 0.0
+
+
+def test_rank_endpoint_requires_candidates(client, tmp_path):
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())
+    assert c.post("/api/v1/sources/abc/rank", json={}).status_code == 400
+
+
+def test_rank_endpoint_unknown_source_404(client):
+    _, c = client
+    assert c.post("/api/v1/sources/ghost/rank", json={"candidates": []}).status_code == 404

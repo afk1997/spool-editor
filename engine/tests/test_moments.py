@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from clip import llm, moments
+from clip import llm, moments, signals
 
 
 @pytest.fixture()
@@ -162,3 +162,96 @@ def test_find_moments_offline_with_default_codex_raises(words_json):
     # before any CLI is touched.
     with pytest.raises(llm.OfflineError):
         moments.find_moments(words_json, provider="codex", env={"SPOOL_OFFLINE": "1"})
+
+
+# ---- rank: glass-box opportunity score (Phase 3 — spec §5 / §4 discover.rank) ----
+#
+# rank() scores ON the signals already attached by signals.annotate (the candidate's
+# ``features`` dict + the LLM ``signals`` list) — it never re-extracts them. The score is
+# a TRANSPARENT linear combination of five named, reweightable factors, so every point
+# traces to a visible factor (spec §6.6 glass-box rule). No LLM, no media here — pure.
+
+_FACTOR_KEYS = {"hook", "self_contained", "arc", "energy", "length_fit"}
+
+
+def _rank_cand(start, end, *, cues=None, text="", audio=None, scene_density=None):
+    """A candidate shaped like signals.annotate output (features attached)."""
+    feats = {"text": signals.text_signals(text, duration=float(end) - float(start))}
+    if audio is not None:
+        feats["audio"] = audio
+    if scene_density is not None:
+        feats["scene_density"] = scene_density
+    return {"start": float(start), "end": float(end), "title": "t", "rationale": "r",
+            "mode": "funny", "signals": list(cues or []), "features": feats}
+
+
+def test_rank_attaches_named_factors_weights_and_score():
+    [c] = moments.rank([_rank_cand(0, 18, cues=["hook"], text="Why does this keep happening?!")])
+    assert set(c["factors"]) == _FACTOR_KEYS                  # the five named factors
+    assert all(0.0 <= v <= 1.0 for v in c["factors"].values())
+    assert 0.0 <= c["score"] <= 100.0
+    assert set(c["weights"]) == _FACTOR_KEYS                  # a visible weight per factor
+
+
+def test_rank_score_is_transparent_weighted_sum():
+    # score == 100 * Σ(factor · normalized-weight) — no opaque model. This is the contract
+    # the studio's instant-reweight slider mirrors client-side.
+    w = {"hook": 2, "self_contained": 1, "arc": 1, "energy": 1, "length_fit": 1}
+    [c] = moments.rank([_rank_cand(0, 18, cues=["hook"], text="What a story, 3 times!")], weights=w)
+    tot = sum(w.values())
+    expected = 100.0 * sum(c["factors"][k] * (w[k] / tot) for k in c["factors"])
+    assert c["score"] == round(expected, 1)
+
+
+def test_rank_only_energy_weight_isolates_the_energy_factor():
+    # Normalization + isolation: weight only energy → score == 100 * the energy factor.
+    [c] = moments.rank(
+        [_rank_cand(0, 18, text="hello there", audio={"mean_db": -24, "max_db": -2, "dynamic_db": 22})],
+        weights={"energy": 1},
+    )
+    assert c["score"] == round(100.0 * c["factors"]["energy"], 1)
+
+
+def test_rank_sorts_by_score_descending():
+    flat = _rank_cand(0, 4, text="um uh you know like basically")           # weak + bad length
+    strong = _rank_cand(0, 18, cues=["hook", "punchline"], text="Why does this keep happening?!")
+    ranked = moments.rank([flat, strong])
+    assert ranked[0]["start"] == strong["start"]
+    assert ranked[0]["score"] > ranked[1]["score"]
+
+
+def test_rank_factors_are_reweightable_and_change_order():
+    high_energy = _rank_cand(0, 18, text="and then we walked over there",
+                             audio={"mean_db": -20, "max_db": -1, "dynamic_db": 34},
+                             scene_density=2.0)                              # loud/dynamic, no hook
+    high_hook = _rank_cand(0, 18, cues=["hook", "punchline"],
+                           text="Why does this keep happening to me?!")      # hooky, quiet
+    default = moments.rank([high_energy, high_hook])
+    assert default[0]["start"] == high_hook["start"]                        # default leans on hook
+    energy_first = moments.rank([high_energy, high_hook], weights={"energy": 1})
+    assert energy_first[0]["start"] == high_energy["start"]                 # reweight → energy wins
+
+
+def test_rank_length_fit_prefers_short_form_window():
+    fit = lambda dur: moments.rank(
+        [_rank_cand(0, dur, text="a clean self contained thought")])[0]["factors"]["length_fit"]
+    assert fit(18) > fit(4)      # too short to land
+    assert fit(18) > fit(90)     # too long for a short-form clip
+
+
+def test_rank_audio_signals_raise_the_energy_factor():
+    # The Phase-3 differentiator: NON-text signals (audio) feed the score, not text alone.
+    quiet = moments.rank([_rank_cand(0, 18, text="and then we walked over there")])[0]
+    loud = moments.rank([_rank_cand(0, 18, text="and then we walked over there",
+                                    audio={"mean_db": -23, "max_db": -1, "dynamic_db": 30})])[0]
+    assert loud["factors"]["energy"] > quiet["factors"]["energy"]
+
+
+def test_rank_handles_candidate_without_features():
+    # signals.annotate is best-effort; a candidate can arrive with no features at all. rank
+    # must still score it (length-fit is always computable from start/end) and never raise.
+    bare = {"start": 0.0, "end": 18.0, "title": "t", "mode": "funny", "signals": []}
+    [c] = moments.rank([bare])
+    assert set(c["factors"]) == _FACTOR_KEYS
+    assert c["factors"]["length_fit"] > 0.0
+    assert 0.0 <= c["score"] <= 100.0

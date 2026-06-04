@@ -118,9 +118,129 @@ def find_moments(
 
 
 def rank(candidates: list[dict], *, weights: dict[str, float] | None = None) -> list[dict]:
-    """Attach a glass-box opportunity score (hook, self-containedness, arc, energy,
-    length-fit) to each candidate and sort. Factors are visible and reweightable."""
-    raise NotImplementedError("Phase 3 — glass-box ranking (spec §5 Phase 3, §4 discover.rank)")
+    """Attach a glass-box opportunity score to each candidate and sort best-first.
+
+    The score is a **transparent** linear combination of five named, reweightable factors
+    (``hook`` / ``self_contained`` / ``arc`` / ``energy`` / ``length_fit``), each in ``[0, 1]``::
+
+        score = 100 · Σ(factorₖ · normalized-weightₖ)
+
+    so every point traces to a visible factor — never an opaque 0–99 (spec §6.6 glass-box
+    rule). Factors are derived from the signals :func:`clip.signals.annotate` already attached
+    (the candidate's ``features`` dict + the LLM ``signals`` cues); ``rank`` scores **on** them
+    and never re-extracts. ``weights`` overrides :data:`DEFAULT_WEIGHTS` (missing/zero factors
+    drop out; an all-zero vector falls back to the defaults). Each candidate gains ``factors``,
+    ``weights`` (the effective, normalized weights), and ``score``. Mutates + returns the list.
+    """
+    eff = _normalized_weights(weights)
+    for cand in candidates:
+        factors = _candidate_factors(cand)
+        cand["factors"] = factors
+        cand["weights"] = eff
+        cand["score"] = round(100.0 * sum(factors[k] * eff[k] for k in RANK_FACTORS), 1)
+    # stable sort → ties keep the model's best-first order
+    return sorted(candidates, key=lambda c: c["score"], reverse=True)
+
+
+# --- glass-box ranking ---------------------------------------------------
+
+#: The five named factors, in display order. Visible + reweightable (spec §5 Phase 3).
+RANK_FACTORS = ("hook", "self_contained", "arc", "energy", "length_fit")
+
+#: Default factor weights (sum to 1). What makes a short-form clip land: a strong open and a
+#: self-contained thought first, then energy/arc, with length a gentle nudge. The studio
+#: reweight panel and ``discover.rank`` pass a ``weights`` override.
+DEFAULT_WEIGHTS = {
+    "hook": 0.30,
+    "self_contained": 0.25,
+    "energy": 0.20,
+    "arc": 0.15,
+    "length_fit": 0.10,
+}
+
+# LLM ``signals`` cues that imply each factor (case-insensitive substring match). The
+# moment-finder already tags moments with these; ranking reads them as glass-box inputs.
+_HOOK_CUES = ("hook", "punchline", "reaction", "reversal", "question", "quotable",
+              "one-liner", "one liner", "callout", "prediction", "hot-take", "hot take")
+_ARC_CUES = ("reversal", "story", "arc", "payoff", "setup", "tension", "anecdote", "turning")
+_SELF_CUES = ("quotable", "one-liner", "one liner", "self-contained", "self contained",
+              "story", "takeaway", "complete")
+
+
+def _clip01(x: float) -> float:
+    return 0.0 if x < 0 else 1.0 if x > 1 else x
+
+
+def _b(flag) -> float:
+    return 1.0 if flag else 0.0
+
+
+def _has_cue(cues, vocab) -> bool:
+    blob = " ".join(str(s).lower() for s in (cues or []))
+    return any(c in blob for c in vocab)
+
+
+def _audio_term(audio: dict | None) -> float:
+    """Loudness+dynamics → ``[0, 1]``: the spread (``dynamic_db`` — a peak over a quiet bed)
+    plus how close the peak sits to 0 dBFS. Absent audio (text-only candidate) → ``0``."""
+    if not audio:
+        return 0.0
+    dyn = _clip01(float(audio.get("dynamic_db", 0.0)) / 25.0)
+    loud = _clip01((float(audio.get("max_db", -60.0)) + 30.0) / 30.0)   # -30 dB → 0, 0 dB → 1
+    return _clip01(0.6 * dyn + 0.4 * loud)
+
+
+def _length_fit(duration: float) -> float:
+    """Closeness to the short-form sweet spot: plateau 1.0 in ``[12, 30]`` s, linear ramp to
+    0 at ~3 s (too short to land) and ~75 s (too long for a vertical clip)."""
+    d = max(0.0, float(duration))
+    if 12.0 <= d <= 30.0:
+        return 1.0
+    if d < 12.0:
+        return _clip01((d - 3.0) / 9.0)        # 3 s → 0, 12 s → 1
+    return _clip01((75.0 - d) / 45.0)          # 30 s → 1, 75 s → 0
+
+
+def _normalized_weights(weights: dict | None) -> dict:
+    if weights:
+        raw = {k: max(0.0, float(weights.get(k, 0.0))) for k in RANK_FACTORS}
+        total = sum(raw.values())
+    else:
+        raw, total = dict(DEFAULT_WEIGHTS), sum(DEFAULT_WEIGHTS.values())
+    if total <= 0:   # an all-zero vector would zero every score — fall back to defaults
+        raw, total = dict(DEFAULT_WEIGHTS), sum(DEFAULT_WEIGHTS.values())
+    return {k: raw[k] / total for k in RANK_FACTORS}
+
+
+def _candidate_factors(cand: dict) -> dict:
+    """The five named factors in ``[0, 1]`` for one candidate, from its attached signals."""
+    feats = cand.get("features") or {}
+    text = feats.get("text") or {}
+    audio = feats.get("audio")
+    scene = feats.get("scene_density")
+    cues = cand.get("signals") or []
+    duration = max(0.0, float(cand.get("end", 0.0)) - float(cand.get("start", 0.0)))
+
+    intensity = float(text.get("intensity") or 0.0)
+    filler = float(text.get("filler_ratio") or 0.0)
+    wr = text.get("word_rate")
+    word_rate = float(wr) if wr is not None else 0.0
+
+    audio_t = _audio_term(audio)
+    scene_t = _clip01(float(scene) / 0.5) if scene is not None else 0.0
+    intensity_t = _clip01(intensity / 0.15)     # ~1 charged word per 7 → full
+    rate_t = _clip01(word_rate / 3.5)           # ~3.5 words/s ≈ brisk delivery
+    room_t = _clip01(duration / 15.0)           # enough runway for setup→payoff
+
+    factors = {
+        "hook": 0.45 * _b(_has_cue(cues, _HOOK_CUES)) + 0.25 * _b(text.get("is_question"))
+                + 0.15 * _b(text.get("exclamation")) + 0.15 * intensity_t,
+        "self_contained": 0.55 * (1.0 - filler) + 0.45 * _b(_has_cue(cues, _SELF_CUES)),
+        "arc": 0.60 * _b(_has_cue(cues, _ARC_CUES)) + 0.25 * audio_t + 0.15 * room_t,
+        "energy": 0.45 * audio_t + 0.25 * intensity_t + 0.15 * rate_t + 0.15 * scene_t,
+        "length_fit": _length_fit(duration),
+    }
+    return {k: round(_clip01(v), 4) for k, v in factors.items()}
 
 
 # --- transcript → prompt -------------------------------------------------

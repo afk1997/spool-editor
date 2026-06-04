@@ -1563,6 +1563,49 @@ def find_clip_moments(source_id):
     return jsonify(_clip_job_view(_cm().get(jid))), 201
 
 
+@api_v1_bp.post("/sources/<source_id>/rank")
+@token_required
+def rank_clip_candidates(source_id):
+    """Re-rank candidates with the glass-box opportunity score (discover.rank).
+
+    Stateless: the client posts the candidates it holds (each carrying the ``features``
+    that ``signals.annotate`` attached) + optional factor ``weights``; the engine re-scores
+    **on** those signals and returns them sorted best-first. The score is a transparent
+    weighted sum of named factors (hook / self-contained / arc / energy / length-fit), so
+    the studio mirrors it client-side for instant slider feedback while MCP/CLI/agent reach
+    the same path here (spec §4 discover.rank, §6 glass-box rule)."""
+    src, _, err = _source_or_error(source_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    cands = data.get("candidates")
+    if not isinstance(cands, list) or not cands:
+        return jsonify({"error": "no_candidates"}), 400
+    from clip import moments as clip_moments
+    ranked = clip_moments.rank(cands, weights=_sanitize_rank_weights(data.get("weights")))
+    for cand in ranked:
+        if isinstance(cand, dict):
+            cand.setdefault("source_id", source_id)
+    return jsonify({"candidates": ranked, "count": len(ranked),
+                    "weights": ranked[0]["weights"]}), 200
+
+
+def _sanitize_rank_weights(raw):
+    """Coerce a client ``weights`` payload to ``{factor: float}`` (drop unknown/non-numeric
+    keys). ``None`` → the ranker uses its default weights. Guards against a bad value 500ing."""
+    if not isinstance(raw, dict):
+        return None
+    from clip import moments as clip_moments
+    out = {}
+    for k in clip_moments.RANK_FACTORS:
+        if k in raw:
+            try:
+                out[k] = float(raw[k])
+            except (TypeError, ValueError):
+                continue
+    return out or None
+
+
 @api_v1_bp.post("/sources/<source_id>/cut")
 @token_required
 def cut_clip(source_id):
@@ -1993,6 +2036,7 @@ _OPENAPI_DOC = {
                  "description": "Defaults: 4000 chars (txt/srt/vtt) or 50 segments (json). Capped at 64000 / 500."},
             ]}},
         "/sources/{source_id}/moments": {"post": {"summary": "Find clip-worthy moments over the source transcript (LLM)"}},
+        "/sources/{source_id}/rank":    {"post": {"summary": "Re-rank candidates with the glass-box opportunity score (named, reweightable factors)"}},
         "/sources/{source_id}/cut":     {"post": {"summary": "Cut a clip [start,end] from the source"}},
         "/sources/{source_id}/render":  {"post": {"summary": "One-shot pipeline: cut→reframe→caption→export"}},
         "/clips/{clip_id}/reframe":     {"post": {"summary": "Reframe a clip (diar⊕ROI speaker pan; aspect/mode)"}},

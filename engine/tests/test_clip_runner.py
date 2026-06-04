@@ -124,6 +124,46 @@ def test_find_moments_target_records_candidates(runner, monkeypatch):
     assert job.result["count"] == 1 and job.result["candidates"][0]["title"] == "x"
 
 
+def test_find_moments_target_ranks_candidates(runner, monkeypatch):
+    # Candidates arrive pre-ranked with the glass-box score so Discovery shows a real score
+    # immediately (closing the Phase-1 honesty boundary). rank scores on the signals annotate
+    # attached; here the hooky moment must outrank the flat one.
+    _words_file(runner)
+
+    def fake_find(words_path, **kw):
+        return [
+            {"start": 0.0, "end": 18.0, "title": "flat", "rationale": "", "mode": kw["mode"], "signals": []},
+            {"start": 20.0, "end": 38.0, "title": "hooky", "rationale": "", "mode": kw["mode"],
+             "signals": ["hook", "punchline"]},
+        ]
+
+    _patch(monkeypatch, "moments", "find_moments", fake_find)
+    job = _job("moments", source_id="src1")
+    runner.find_moments_target(source_id="src1", params={"mode": "funny", "count": 5})(job)
+
+    cands = job.result["candidates"]
+    assert all({"score", "factors", "weights"} <= set(c) for c in cands)
+    assert set(cands[0]["factors"]) == {"hook", "self_contained", "arc", "energy", "length_fit"}
+    assert cands[0]["title"] == "hooky"                  # sorted best-first
+    assert cands[0]["score"] >= cands[1]["score"]
+    assert job.result["weights"]["hook"] > 0             # effective weights logged (no silent magic)
+
+
+def test_find_moments_target_honors_weight_overrides(runner, monkeypatch):
+    _words_file(runner)
+
+    def fake_find(words_path, **kw):
+        return [{"start": 0.0, "end": 18.0, "title": "x", "rationale": "", "mode": kw["mode"], "signals": []}]
+
+    _patch(monkeypatch, "moments", "find_moments", fake_find)
+    job = _job("moments", source_id="src1")
+    runner.find_moments_target(
+        source_id="src1", params={"mode": "funny", "count": 5, "weights": {"energy": 1}})(job)
+
+    w = job.result["candidates"][0]["weights"]
+    assert w["energy"] == 1.0 and w["hook"] == 0.0       # the override propagated into rank
+
+
 # ---- reframe ---------------------------------------------------------
 
 def _seed_clip(runner, clip_id="clipA", source_id="src1", *, start=2.0, end=12.0, files=("clip.mp4",)):

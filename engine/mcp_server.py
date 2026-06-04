@@ -384,6 +384,18 @@ def _build_server():
         return _safe(lambda: _client.find_moments(source_id, mode=mode, count=count))
 
     @mcp.tool()
+    def rank_candidates(source_id: str, candidates: list[dict],
+                        weights: dict | None = None) -> dict:
+        """Re-rank candidates with the glass-box opportunity score (discover.rank).
+
+        Pass the ``candidates`` from a prior ``find_moments`` (each carrying its ``features``)
+        and optional factor ``weights`` — a dict over ``hook / self_contained / arc / energy /
+        length_fit`` (need not sum to 1). Returns ``{candidates, count, weights}`` re-scored and
+        sorted best-first. The score is a transparent weighted sum of those named factors, so
+        every candidate's ``factors`` + ``score`` explain the ordering (no opaque 0–99)."""
+        return _safe(lambda: _client.rank_candidates(source_id, candidates, weights=weights))
+
+    @mcp.tool()
     def cut_clip(source_id: str, start: float, end: float) -> dict:
         """Cut a clip ``[start, end]`` (seconds) from a source. The clip-job's
         ``result.clip_id`` drives the subsequent reframe/caption/render calls."""

@@ -317,6 +317,18 @@ class TroveClient:
             body["window"] = [float(window[0]), float(window[1])]
         return self.post(f"/api/v1/sources/{source_id}/moments", body=body)
 
+    def rank_candidates(self, source_id: str, candidates: list[dict], *,
+                        weights: dict | None = None) -> dict:
+        """Re-rank candidates with the glass-box opportunity score (discover.rank).
+
+        Stateless: pass the candidates already held (each carrying its ``features``) + optional
+        factor ``weights``; returns ``{candidates, count, weights}`` re-scored + sorted best-first.
+        """
+        body: dict = {"candidates": candidates}
+        if weights is not None:
+            body["weights"] = weights
+        return self.post(f"/api/v1/sources/{source_id}/rank", body=body)
+
     def cut_clip(self, source_id: str, *, start: float, end: float) -> dict:
         return self.post(f"/api/v1/sources/{source_id}/cut", body={"start": start, "end": end})
 

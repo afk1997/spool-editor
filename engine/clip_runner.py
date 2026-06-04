@@ -325,8 +325,14 @@ class ClipRunner:
                 signals.annotate(cands, words=words, media_path=media_path)
             except Exception:
                 pass  # signals are additive glass-box extras; never fail moment-finding over them
+            # Glass-box ranking: a transparent, reweightable opportunity score over those signals
+            # (spec §5 Phase 3, §4 discover.rank). Candidates arrive sorted best-first, each
+            # carrying its named factors + the weights used; the effective weights ride on the
+            # result so the chosen weighting is inspectable (no silent magic — spec §6 glass-box).
+            cands = moments.rank(cands, weights=params.get("weights"))
+            weights = cands[0]["weights"] if cands else moments._normalized_weights(params.get("weights"))
             job.result = {"candidates": cands, "count": len(cands),
-                          "mode": params.get("mode", "funny")}
+                          "mode": params.get("mode", "funny"), "weights": weights}
         return _work
 
     def cut_target(self, *, source_id: str, clip_id: str, params: dict):

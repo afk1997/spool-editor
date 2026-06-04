@@ -58,6 +58,7 @@ MCP_TO_CLI: dict[str, str] = {
     "server_capabilities":     "capabilities",
     # clips (the render queue)
     "find_moments":            "moments",
+    "rank_candidates":         "rank",
     "cut_clip":                "cut",
     "reframe_clip":            "reframe",
     "caption_clip":            "caption",
@@ -797,6 +798,23 @@ def cmd_moments(args) -> int:
     return 0
 
 
+def cmd_rank(args) -> int:
+    """Re-rank candidates (read as JSON from --candidates / a file / stdin) with the
+    glass-box opportunity score. ``--weight factor=value`` (repeatable) overrides the defaults."""
+    raw = sys.stdin.read() if args.candidates in (None, "-") else open(args.candidates, encoding="utf-8").read()
+    parsed = json.loads(raw)
+    cands = parsed.get("candidates", parsed) if isinstance(parsed, dict) else parsed
+    body: dict = {"candidates": cands}
+    if args.weight:
+        try:
+            body["weights"] = {k: float(v) for k, v in (w.split("=", 1) for w in args.weight)}
+        except ValueError:
+            print("error: --weight expects factor=value (e.g. --weight energy=0.4)", file=sys.stderr)
+            return 2
+    _print_json(post(f"/api/v1/sources/{args.source_id}/rank", body))
+    return 0
+
+
 def cmd_cut(args) -> int:
     cj = post(f"/api/v1/sources/{args.source_id}/cut",
               {"start": args.start, "end": args.end})
@@ -1024,6 +1042,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--start", type=float, default=None, help="scope to a window (with --end)")
     s.add_argument("--end", type=float, default=None)
     s.set_defaults(func=cmd_moments)
+
+    s = _sub("rank", help="re-rank candidates (JSON via --candidates/stdin) with the glass-box score")
+    s.add_argument("source_id")
+    s.add_argument("--candidates", default=None,
+                   help="path to a JSON file of candidates (or a {candidates:[…]} object); '-'/omitted = stdin")
+    s.add_argument("--weight", action="append", metavar="FACTOR=VALUE",
+                   help="reweight a factor, e.g. --weight energy=0.4 (repeatable; hook/self_contained/arc/energy/length_fit)")
+    s.set_defaults(func=cmd_rank)
 
     s = _sub("cut", help="cut a clip [start,end] (seconds) from a source")
     s.add_argument("source_id")

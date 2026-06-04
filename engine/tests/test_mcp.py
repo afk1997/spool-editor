@@ -150,7 +150,7 @@ def test_mcp_end_to_end(tmp_path):
         "storage_info",
         "server_capabilities",
         # clip surface
-        "find_moments", "cut_clip", "reframe_clip", "caption_clip",
+        "find_moments", "rank_candidates", "cut_clip", "reframe_clip", "caption_clip",
         "render_clip", "render_pipeline",
         "list_clip_jobs", "get_clip_job", "cancel_clip_job", "dismiss_clip_job",
     }
