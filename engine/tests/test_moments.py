@@ -284,6 +284,16 @@ def test_rank_audio_signals_raise_the_energy_factor():
     assert loud["factors"]["energy"] > quiet["factors"]["energy"]
 
 
+def test_rank_relative_loudness_discriminates_when_absolute_audio_is_flat():
+    # Item I — calm/talking-head content: two moments with IDENTICAL absolute audio but different
+    # loudness RELATIVE to the in-video baseline (rel_db) must score different energy. Absolute dB is
+    # dominated by mic gain; the relative term is what lets the signal discriminate on flat content.
+    base = {"mean_db": -26.0, "max_db": -6.0, "dynamic_db": 20.0}
+    louder = moments.rank([_rank_cand(0, 18, text="x", audio={**base, "rel_db": 3.0})])[0]
+    quieter = moments.rank([_rank_cand(0, 18, text="x", audio={**base, "rel_db": -3.0})])[0]
+    assert louder["factors"]["energy"] > quieter["factors"]["energy"]
+
+
 def test_rank_handles_candidate_without_features():
     # signals.annotate is best-effort; a candidate can arrive with no features at all. rank
     # must still score it (length-fit is always computable from start/end) and never raise.

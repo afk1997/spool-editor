@@ -204,11 +204,19 @@ def _has_cue(cues, vocab) -> bool:
 
 def _audio_term(audio: dict | None) -> float:
     """Loudness+dynamics → ``[0, 1]``: the spread (``dynamic_db`` — a peak over a quiet bed)
-    plus how close the peak sits to 0 dBFS. Absent audio (text-only candidate) → ``0``."""
+    plus how close the peak sits to 0 dBFS. Absent audio (text-only candidate) → ``0``.
+
+    When ``rel_db`` is present (loudness vs the in-video baseline — :func:`signals.annotate`), it
+    drives most of the term: on calm/talking-head content absolute dB is near-flat across moments
+    (mic-gain-dominated), so the relative level is what actually discriminates clip-worthy beats."""
     if not audio:
         return 0.0
     dyn = _clip01(float(audio.get("dynamic_db", 0.0)) / 25.0)
     loud = _clip01((float(audio.get("max_db", -60.0)) + 30.0) / 30.0)   # -30 dB → 0, 0 dB → 1
+    rel = audio.get("rel_db")
+    if rel is not None:
+        rel_t = _clip01((float(rel) + 3.0) / 6.0)   # +3 dB over baseline → 1.0, baseline → 0.5, -3 → 0
+        return _clip01(0.40 * dyn + 0.25 * loud + 0.35 * rel_t)
     return _clip01(0.6 * dyn + 0.4 * loud)
 
 

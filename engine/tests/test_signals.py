@@ -77,6 +77,21 @@ def test_annotate_adds_media_signals_when_media_present(monkeypatch):
     assert out[0]["features"]["scene_density"] == 0.4
 
 
+def test_annotate_attaches_relative_loudness_across_the_set(monkeypatch):
+    # Item I: each window gets rel_db = its mean level minus the set's median — so the ranking can
+    # see in-video loudness variation that an absolute dB (mic-gain-dominated) hides.
+    levels = {0.0: -20.0, 10.0: -26.0, 20.0: -23.0}
+    monkeypatch.setattr(signals, "audio_energy",
+                        lambda m, s, e: {"mean_db": levels[s], "max_db": levels[s] + 5, "dynamic_db": 5})
+    monkeypatch.setattr(signals, "scene_density", lambda *a, **k: 0.0)
+    cands = [{"start": 0.0, "end": 5.0}, {"start": 10.0, "end": 15.0}, {"start": 20.0, "end": 25.0}]
+    out = signals.annotate(cands, words=[], media_path="m.mp4")
+    # median of [-20, -26, -23] is -23 → rel_db = mean − median
+    assert out[0]["features"]["audio"]["rel_db"] == 3.0    # loudest, +3 dB over baseline
+    assert out[1]["features"]["audio"]["rel_db"] == -3.0   # quietest
+    assert out[2]["features"]["audio"]["rel_db"] == 0.0    # at the baseline
+
+
 def test_window_text_slices_to_the_candidate_window():
     words = [{"w": "before", "start": 0.0, "end": 0.5},
              {"w": "inside", "start": 2.0, "end": 2.4},

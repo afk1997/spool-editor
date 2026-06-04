@@ -125,4 +125,17 @@ def annotate(candidates: list[dict], *, words: list[dict] | None = None,
             if sd is not None:
                 feats["scene_density"] = sd
         c["features"] = feats
+
+    # Relative loudness (glass-box; item I — discriminate on calm/talking-head content): how far
+    # each window's level sits above/below the others. Absolute dB is dominated by mic gain and is
+    # near-flat across an interview, so the ranking can't tell moments apart; the in-set baseline
+    # (median window level) surfaces the real in-video variation a loud beat / laugh produces.
+    levels = [c["features"]["audio"]["mean_db"] for c in candidates
+              if c.get("features", {}).get("audio") and c["features"]["audio"].get("mean_db") is not None]
+    if len(levels) >= 2:
+        baseline = sorted(levels)[len(levels) // 2]   # median window level
+        for c in candidates:
+            au = c.get("features", {}).get("audio")
+            if au and au.get("mean_db") is not None:
+                au["rel_db"] = round(float(au["mean_db"]) - baseline, 2)
     return candidates
