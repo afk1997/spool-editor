@@ -1,0 +1,103 @@
+"""Tests for TroveClient's Phase-3 automation methods (produce / recipes / watches / brand kits)
+— the surface that gives the CLI + MCP parity with the studio. Same monkeypatched-urlopen
+discipline as test_trove_client_clips.py: no network, just assert the request the client sends."""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from trove_client import TroveClient
+
+
+class _FakeResp:
+    def __init__(self, status=200, body=b'{"ok": true}', content_type="application/json"):
+        self.status = status
+        self._body = body
+        self.headers = {"Content-Type": content_type}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self, n=-1):
+        if n is None or n < 0:
+            data, self._body = self._body, b""
+            return data
+        data, self._body = self._body[:n], self._body[n:]
+        return data
+
+
+@pytest.fixture
+def captured(monkeypatch):
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        calls.append({"url": req.full_url, "method": req.get_method(), "data": req.data})
+        return _FakeResp()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    return calls
+
+
+def _body(calls):
+    return json.loads(calls[-1]["data"].decode())
+
+
+@pytest.fixture
+def c():
+    return TroveClient(base_url="http://x", token="")
+
+
+def test_produce_with_saved_recipe_id(c, captured):
+    c.produce("src1", recipe_id="r1")
+    assert captured[-1]["url"] == "http://x/api/v1/sources/src1/produce"
+    assert captured[-1]["method"] == "POST"
+    assert _body(captured) == {"recipe_id": "r1"}
+
+
+def test_produce_inline_recipe(c, captured):
+    c.produce("src1", content_mode="funny", count=3, aspect="1:1")
+    assert _body(captured) == {"content_mode": "funny", "count": 3, "aspect": "1:1"}
+
+
+def test_recipes_full_crud(c, captured):
+    c.list_recipes()
+    assert captured[-1]["method"] == "GET" and captured[-1]["url"].endswith("/api/v1/recipes")
+    c.get_recipe("r1")
+    assert captured[-1]["method"] == "GET" and captured[-1]["url"].endswith("/api/v1/recipes/r1")
+    c.create_recipe({"name": "R"})
+    assert captured[-1]["method"] == "POST" and _body(captured) == {"name": "R"}
+    c.update_recipe("r1", {"count": 3})
+    assert captured[-1]["method"] == "PATCH" and captured[-1]["url"].endswith("/api/v1/recipes/r1")
+    assert _body(captured) == {"count": 3}
+    c.delete_recipe("r1")
+    assert captured[-1]["method"] == "DELETE" and captured[-1]["url"].endswith("/api/v1/recipes/r1")
+
+
+def test_watches_full_crud_and_scan(c, captured):
+    c.list_watches()
+    assert captured[-1]["method"] == "GET" and captured[-1]["url"].endswith("/api/v1/watches")
+    c.get_watch("w1")
+    assert captured[-1]["url"].endswith("/api/v1/watches/w1")
+    c.create_watch({"kind": "folder", "target": "/in", "recipe_id": "r1"})
+    assert captured[-1]["method"] == "POST" and _body(captured)["kind"] == "folder"
+    c.update_watch("w1", {"enabled": False})
+    assert captured[-1]["method"] == "PATCH" and _body(captured) == {"enabled": False}
+    c.delete_watch("w1")
+    assert captured[-1]["method"] == "DELETE" and captured[-1]["url"].endswith("/api/v1/watches/w1")
+    c.scan_watch("w1")
+    assert captured[-1]["method"] == "POST" and captured[-1]["url"].endswith("/api/v1/watches/w1/scan")
+
+
+def test_brand_kits_crud(c, captured):
+    c.list_brand_kits()
+    assert captured[-1]["method"] == "GET" and captured[-1]["url"].endswith("/api/v1/brand-kits")
+    c.create_brand_kit({"name": "K", "watermark": "@acme"})
+    assert captured[-1]["method"] == "POST" and _body(captured)["watermark"] == "@acme"
+    c.update_brand_kit("k1", {"watermark": "@x"})
+    assert captured[-1]["method"] == "PATCH" and captured[-1]["url"].endswith("/api/v1/brand-kits/k1")
+    c.delete_brand_kit("k1")
+    assert captured[-1]["method"] == "DELETE" and captured[-1]["url"].endswith("/api/v1/brand-kits/k1")

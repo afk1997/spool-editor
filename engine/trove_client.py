@@ -211,6 +211,12 @@ class TroveClient:
     def post(self, path: str, body: dict | None = None, **kw):
         return self.request("POST", path, body=body, **kw)
 
+    def patch(self, path: str, body: dict | None = None, **kw):
+        return self.request("PATCH", path, body=body, **kw)
+
+    def delete(self, path: str, **kw):
+        return self.request("DELETE", path, **kw)
+
     # ----- jobs (downloads) -------------------------------------------
 
     def list_jobs(self, *, status: str = "", limit: int = 100,
@@ -372,6 +378,38 @@ class TroveClient:
         """Fetch (or stream-save) a produced render .mp4."""
         return self.get(f"/api/v1/clips/{clip_id}/renders/{render_id}/file",
                         stream_to=stream_to)
+
+    # ----- automation: produce / recipes / watches / brand kits (Phase 3) ----------
+    # Same delegation pattern as the clip methods → the same /api/v1 surface the studio uses, so the
+    # agent (MCP), the CLI, and the studio all drive the identical engine + stores (the golden rule).
+
+    def produce(self, source_id: str, *, recipe_id: str | None = None, **recipe) -> dict:
+        """Apply a recipe to a source end-to-end (find→rank→top-N→a render pipeline per moment) →
+        the review queue. Pass ``recipe_id`` for a saved recipe, or inline recipe fields
+        (content_mode/count/aspect/reframe_mode/caption_preset/platform/fast/weights/brand_kit_id)."""
+        body = {"recipe_id": recipe_id} if recipe_id else {k: v for k, v in recipe.items() if v is not None}
+        return self.post(f"/api/v1/sources/{source_id}/produce", body=body)
+
+    def list_recipes(self) -> dict:                          return self.get("/api/v1/recipes")
+    def get_recipe(self, recipe_id: str) -> dict:            return self.get(f"/api/v1/recipes/{recipe_id}")
+    def create_recipe(self, body: dict) -> dict:             return self.post("/api/v1/recipes", body=body)
+    def update_recipe(self, recipe_id: str, body: dict) -> dict:
+        return self.patch(f"/api/v1/recipes/{recipe_id}", body=body)
+    def delete_recipe(self, recipe_id: str):                 return self.delete(f"/api/v1/recipes/{recipe_id}")
+
+    def list_watches(self) -> dict:                          return self.get("/api/v1/watches")
+    def get_watch(self, watch_id: str) -> dict:              return self.get(f"/api/v1/watches/{watch_id}")
+    def create_watch(self, body: dict) -> dict:              return self.post("/api/v1/watches", body=body)
+    def update_watch(self, watch_id: str, body: dict) -> dict:
+        return self.patch(f"/api/v1/watches/{watch_id}", body=body)
+    def delete_watch(self, watch_id: str):                   return self.delete(f"/api/v1/watches/{watch_id}")
+    def scan_watch(self, watch_id: str) -> dict:             return self.post(f"/api/v1/watches/{watch_id}/scan")
+
+    def list_brand_kits(self) -> dict:                       return self.get("/api/v1/brand-kits")
+    def create_brand_kit(self, body: dict) -> dict:          return self.post("/api/v1/brand-kits", body=body)
+    def update_brand_kit(self, kit_id: str, body: dict) -> dict:
+        return self.patch(f"/api/v1/brand-kits/{kit_id}", body=body)
+    def delete_brand_kit(self, kit_id: str):                 return self.delete(f"/api/v1/brand-kits/{kit_id}")
 
     # ----- models -----------------------------------------------------
 
