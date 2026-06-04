@@ -44,17 +44,26 @@ export interface Candidate {
 /** The five glass-box ranking factors (engine snake_case keys), in display order. */
 export const RANK_FACTORS = ["hook", "self_contained", "arc", "energy", "length_fit"] as const;
 
-/** Client mirror of the engine's transparent score: round(100 · Σ(factorₖ·weightₖ) / Σweightₖ),
- *  factors in [0,1]. Identical math to `clip.moments.rank`, so the Discovery reweight slider stays
- *  instant (no server round-trip per tick, spec §6.4) yet equals what `POST /sources/<id>/rank`
- *  returns. Missing factors drop out of both sides; an all-zero weight vector scores 0. */
+/** The engine's DEFAULT_WEIGHTS (clip.moments.DEFAULT_WEIGHTS: hook .30 / self_contained .25 /
+ *  energy .20 / arc .15 / length_fit .10), expressed as INTEGER ratios that fit the 0–5 sliders and
+ *  normalize to the same proportions. The single source of truth for both reweight panels (Discovery
+ *  + Recipes) and the all-zero fallback below, so the studio's initial ranking matches the engine. */
+export const ENGINE_DEFAULT_WEIGHTS: Record<string, number> = {
+  hook: 6, self_contained: 5, energy: 4, arc: 3, length_fit: 2,
+};
+
+/** Client mirror of the engine's transparent score: round(100 · Σ(factorₖ·weightₖ) / Σweightₖ)
+ *  over all five RANK_FACTORS (engine-consistent normalization), factors in [0,1]. Same math as
+ *  `clip.moments.rank`, so the Discovery reweight slider stays instant (no server round-trip per
+ *  tick, spec §6.4); this mirrors the engine's ordering, integer-rounded for display (the engine
+ *  rounds to 1 decimal). An all-zero weight vector falls back to ENGINE_DEFAULT_WEIGHTS, exactly as
+ *  the engine's `_normalized_weights` does — so it scores like the default, never 0. */
 export function scoreFromFactors(factors: RankFactors = {}, weights: RankFactors = {}): number {
   const f = factors as Record<string, number | undefined>;
-  const w = weights as Record<string, number | undefined>;
-  const ks = RANK_FACTORS.filter((k) => f[k] != null);
-  const tw = ks.reduce((a, k) => a + (w[k] ?? 0), 0);
-  if (tw <= 0) return 0;
-  return Math.round((100 * ks.reduce((a, k) => a + (f[k] ?? 0) * (w[k] ?? 0), 0)) / tw);
+  let w = weights as Record<string, number | undefined>;
+  let tw = RANK_FACTORS.reduce((a, k) => a + (w[k] ?? 0), 0);
+  if (tw <= 0) { w = ENGINE_DEFAULT_WEIGHTS; tw = RANK_FACTORS.reduce((a, k) => a + (w[k] ?? 0), 0); }
+  return Math.round((100 * RANK_FACTORS.reduce((a, k) => a + (f[k] ?? 0) * (w[k] ?? 0), 0)) / tw);
 }
 
 export interface AgentMessage {

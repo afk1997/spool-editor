@@ -74,8 +74,11 @@ describe("scoreFromFactors (client mirror of the engine's transparent weighted s
     expect(scoreFromFactors(f, { hook: 0, energy: 1 })).toBe(90);   // energy-only
   });
 
-  it("an all-zero weight vector scores 0 (no divide-by-zero)", () => {
-    expect(scoreFromFactors({ hook: 0.9, energy: 0.9 }, { hook: 0, energy: 0 })).toBe(0);
+  it("falls back to the engine's default weights for an all-zero vector (mirrors the engine, never 0)", () => {
+    // The engine's _normalized_weights falls back to DEFAULT_WEIGHTS on an all-zero vector and
+    // normalizes over all five factors; the studio mirrors that. Absent factors (self_contained /
+    // arc / length_fit) count as 0: 100·(0.9·.30 + 0.9·.20) = 45.
+    expect(scoreFromFactors({ hook: 0.9, energy: 0.9 }, { hook: 0, energy: 0 })).toBe(45);
   });
 });
 

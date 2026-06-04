@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { RankFactors } from "@spool/types";
-import { useSpool, scoreFromFactors, type Candidate, type TranscriptLine, type SpeakerInfo } from "./context";
+import { useSpool, scoreFromFactors, ENGINE_DEFAULT_WEIGHTS, type Candidate, type TranscriptLine, type SpeakerInfo } from "./context";
 import { Btn, Chip, Empty, Icon, Thumb, fmtTC, parseTC } from "@spool/ui";
 import { WindowList } from "./virtual";
 
@@ -20,7 +20,8 @@ const LINE_VIRT_THRESHOLD = 60;
  * length-fit — replacing the demo's mock factor set), surfaced as the ScoreBar + the Reweight
  * panel below. The expandable panel ALSO keeps the real matched `signals` cues. Nothing fabricated:
  * the score and every factor come from the engine; reweighting recomputes the same transparent sum
- * the engine uses (`scoreFromFactors`), so the slider is instant (spec §6.4) yet matches the API. */
+ * the engine uses (`scoreFromFactors`), so the slider is instant (spec §6.4) and mirrors the
+ * engine's ordering, integer-rounded for display. */
 
 // Factor key → label + bar color (single source for the ScoreBar AND the Reweight sliders).
 const FACTOR_META: { key: keyof RankFactors; label: string; color: string }[] = [
@@ -158,9 +159,11 @@ export function DiscoveryBody({ candidates, sourceId, finding }: { candidates: C
   const [ranges, setRanges] = useState<Record<string, { start: number; end: number }>>({});
   const [adjust, setAdjust] = useState<Candidate | null>(null);
   const [showRank, setShowRank] = useState(false);
-  // Slider weights for the glass-box reweight (the demo's defaults, arc↔emotion swapped for the
-  // real engine factor). They drive scoreFromFactors — the same transparent sum the engine uses.
-  const [weights, setWeights] = useState<Record<string, number>>({ hook: 3, self_contained: 2, arc: 1, energy: 2, length_fit: 1 });
+  // Slider weights for the glass-box reweight, seeded from the engine's DEFAULT_WEIGHTS (integer
+  // ratios that normalize to the engine's .30/.25/.20/.15/.10) so toggling "Rank by score" matches
+  // the engine's score/order at the initial state. They drive scoreFromFactors — the same
+  // transparent sum the engine uses.
+  const [weights, setWeights] = useState<Record<string, number>>(() => ({ ...ENGINE_DEFAULT_WEIGHTS }));
 
   // merge saved in/out adjustments so the cards, footage total, and the render all use them
   const merged = candidates.map((c) => (ranges[c.id] ? { ...c, start: ranges[c.id].start, end: ranges[c.id].end } : c));
@@ -226,7 +229,7 @@ export function DiscoveryBody({ candidates, sourceId, finding }: { candidates: C
                   <span className="spacer" />
                   <span className="mono" style={{ fontSize: 11, color: "var(--text-dim)" }}>{weights[m.key]}×</span>
                 </div>
-                <input type="range" min={0} max={5} value={weights[m.key]} onChange={(e) => setWeights((w) => ({ ...w, [m.key]: +e.target.value }))} style={{ width: "100%", accentColor: "var(--accent)" }} aria-label={m.label + " weight"} />
+                <input type="range" min={0} max={6} value={weights[m.key]} onChange={(e) => setWeights((w) => ({ ...w, [m.key]: +e.target.value }))} style={{ width: "100%", accentColor: "var(--accent)" }} aria-label={m.label + " weight"} />
               </div>
             ))}
           </div>

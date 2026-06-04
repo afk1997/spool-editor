@@ -41,12 +41,16 @@ describe("CandidateCard (glass-box = real signals + excerpt)", () => {
     weights: { hook: 0.3, self_contained: 0.25, arc: 0.15, energy: 0.2, length_fit: 0.1 },
   };
 
-  it("shows the glass-box score and expands to NAMED factor bars (not an opaque number)", () => {
+  it("shows the glass-box score and expands to NAMED factor bars that reflect each value", () => {
     render(<CandidateCard c={scored} selected={false} onToggle={() => {}} />);
     expect(screen.getByText("71")).toBeInTheDocument();                 // the headline score
     fireEvent.click(screen.getByTitle(/factors/i));                     // expand the breakdown
     for (const label of ["Hook", "Self-contained", "Arc", "Energy", "Length-fit"])
       expect(screen.getByText(label)).toBeInTheDocument();              // every score traces to a named factor
+    // The bars aren't decorative: each factor value renders as its own percentage. Use
+    // collision-free values (arc 0.36, self_contained 0.55) so neither clashes with the 71 headline.
+    expect(screen.getByText("36")).toBeInTheDocument();                 // arc 0.36 → 36
+    expect(screen.getByText("55")).toBeInTheDocument();                 // self_contained 0.55 → 55
   });
 
   it("prefers the reweighted dynScore over the default score when ranking", () => {

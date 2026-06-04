@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { Recipe } from "@spool/api-client";
-import { useSpool } from "@/components/spool/context";
+import { useSpool, ENGINE_DEFAULT_WEIGHTS } from "@/components/spool/context";
 import { useEngineQuery } from "@/lib/engine-context";
 import { Btn, Icon } from "@spool/ui";
 
@@ -27,7 +27,9 @@ interface Form {
   name: string; content_mode: string; count: number; aspect: string; reframe_mode: string;
   caption_preset: string; platform: string; fast: boolean; brand_kit_id: string; weights: Record<string, number>;
 }
-const DEFAULT_WEIGHTS = { hook: 3, self_contained: 2, arc: 1, energy: 2, length_fit: 1 };
+// Seed the ranking-weight sliders from the engine's DEFAULT_WEIGHTS (integer ratios that normalize
+// to the engine's .30/.25/.20/.15/.10), so a fresh recipe ranks the way the engine would by default.
+const DEFAULT_WEIGHTS = ENGINE_DEFAULT_WEIGHTS;
 const EMPTY: Form = {
   name: "", content_mode: "funny", count: 6, aspect: "9:16", reframe_mode: "pan",
   caption_preset: "opus", platform: "tiktok", fast: true, brand_kit_id: "", weights: { ...DEFAULT_WEIGHTS },
@@ -85,18 +87,24 @@ export default function RecipesScreen() {
   };
   const del = () => {
     if (!sel) return;
-    ctx.client.deleteRecipe(sel).then(() => { newRecipe(); recipesQ.reload(); ctx.pushToast({ icon: "trash", tone: "info", title: "Recipe deleted" }); }).catch(() => {});
+    ctx.client.deleteRecipe(sel).then(() => { newRecipe(); recipesQ.reload(); ctx.pushToast({ icon: "trash", tone: "info", title: "Recipe deleted" }); }).catch(() => ctx.pushToast({ icon: "alert", tone: "warn", title: "Couldn't delete the recipe" }));
   };
 
   // Run a recipe on a project: apply it END-TO-END — find → glass-box rank → top-N → a render
   // pipeline per moment with the recipe's aspect/reframe/caption/brand-kit/platform → the review
   // queue (the same /produce the watch's "Scan now" runs). A saved recipe runs by id (provenance);
   // an unsaved draft runs inline so all its settings still ride along.
+  // A saved recipe runs by id, so the toast + sidebar copy must describe the SAVED recipe — not the
+  // unsaved editor form, which may have drifted from what's actually being produced. An unsaved
+  // draft runs inline, so it's the form that rides along.
+  const ranSel = sel ? recipes.find((r) => r.id === sel) : null;
+  const runName = ranSel?.name ?? f.name, runCount = ranSel?.count ?? f.count, runMode = ranSel?.content_mode ?? f.content_mode;
+
   const run = () => {
     if (!runSrc) return;
     const body = sel ? { recipe_id: sel } : toRecipe(f);
     ctx.client.produce(runSrc, body)
-      .then(() => { ctx.pushToast({ icon: "wand", tone: "info", title: `Running “${f.name || "recipe"}”`, body: `Producing ${f.count} ranked ${f.content_mode} clips — they'll land in the review queue.` }); router.push(`/queue`); })
+      .then(() => { ctx.pushToast({ icon: "wand", tone: "info", title: `Running “${runName || "recipe"}”`, body: `Producing ${runCount} ranked ${runMode} clips — they'll land in the review queue.` }); router.push(`/queue`); })
       .catch(() => ctx.pushToast({ icon: "alert", tone: "warn", title: "Couldn't run — is the source transcribed?" }));
   };
 
@@ -169,7 +177,7 @@ export default function RecipesScreen() {
               {FACTORS.map((m) => (
                 <div key={m.key}>
                   <div className="row" style={{ marginBottom: 6 }}><span style={{ fontSize: 11.5, fontWeight: 600 }}>{m.label}</span><span className="spacer" /><span className="mono" style={{ fontSize: 10.5, color: "var(--text-dim)" }}>{f.weights[m.key]}×</span></div>
-                  <input type="range" min={0} max={5} value={f.weights[m.key]} onChange={(e) => set("weights", { ...f.weights, [m.key]: +e.target.value })} style={{ width: "100%", accentColor: "var(--accent)" }} aria-label={m.label + " weight"} />
+                  <input type="range" min={0} max={6} value={f.weights[m.key]} onChange={(e) => set("weights", { ...f.weights, [m.key]: +e.target.value })} style={{ width: "100%", accentColor: "var(--accent)" }} aria-label={m.label + " weight"} />
                 </div>
               ))}
             </div>
@@ -185,7 +193,7 @@ export default function RecipesScreen() {
               {ctx.sources.filter((s) => s.status !== "transcribing").map((s) => <option key={s.id} value={s.id}>{s.title}</option>)}
             </select>
             <Btn variant="primary" icon="wand" onClick={run} disabled={!runSrc}>Run recipe</Btn>
-            <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", lineHeight: 1.6 }}>Produces {f.count} ranked {f.content_mode} clips end-to-end with this recipe&apos;s reframe, captions and platform — they land in the review queue. Unattended drop-a-video→review is the watch-folder step.</div>
+            <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", lineHeight: 1.6 }}>Produces {runCount} ranked {runMode} clips end-to-end with this recipe&apos;s reframe, captions and platform — they land in the review queue. Unattended drop-a-video→review is the watch-folder step.</div>
           </div>
         </div>
       </div>

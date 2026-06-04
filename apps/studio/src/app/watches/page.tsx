@@ -54,7 +54,7 @@ export default function WatchesScreen() {
   };
   const del = () => {
     if (!sel) return;
-    ctx.client.deleteWatch(sel).then(() => { newWatch(); watchesQ.reload(); ctx.pushToast({ icon: "trash", tone: "info", title: "Watch deleted" }); }).catch(() => {});
+    ctx.client.deleteWatch(sel).then(() => { newWatch(); watchesQ.reload(); ctx.pushToast({ icon: "trash", tone: "info", title: "Watch deleted" }); }).catch(() => ctx.pushToast({ icon: "alert", tone: "warn", title: "Couldn't delete the watch" }));
   };
   const scan = (w: Watch) => {
     setBusy(true);
