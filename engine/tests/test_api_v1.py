@@ -1303,3 +1303,59 @@ def test_rank_endpoint_requires_candidates(client, tmp_path):
 def test_rank_endpoint_unknown_source_404(client):
     _, c = client
     assert c.post("/api/v1/sources/ghost/rank", json={"candidates": []}).status_code == 404
+
+
+# ---- recipes (Phase 3): saved end-to-end pipelines that drive render.pipeline ----
+
+def test_recipe_crud(client):
+    _, c = client
+    assert c.get("/api/v1/recipes").get_json() == {"recipes": []}
+    r = c.post("/api/v1/recipes", json={"name": "Punchy", "content_mode": "funny", "count": 8,
+                                        "aspect": "9:16", "reframe_mode": "pan", "caption_preset": "karaoke",
+                                        "platform": "tiktok", "fast": True, "weights": {"energy": 4, "hook": 5}})
+    assert r.status_code == 201
+    rid = r.get_json()["id"]
+    assert c.get("/api/v1/recipes").get_json()["recipes"][0]["id"] == rid
+    assert c.get(f"/api/v1/recipes/{rid}").get_json()["content_mode"] == "funny"
+    u = c.patch(f"/api/v1/recipes/{rid}", json={"count": 5})
+    assert u.status_code == 200 and u.get_json()["count"] == 5 and u.get_json()["content_mode"] == "funny"
+    assert c.delete(f"/api/v1/recipes/{rid}").status_code == 204
+    assert c.get(f"/api/v1/recipes/{rid}").status_code == 404
+
+
+def test_recipe_validation(client):
+    _, c = client
+    assert c.post("/api/v1/recipes", json={}).status_code == 400                         # no name
+    assert c.post("/api/v1/recipes", json={"name": "x", "aspect": "weird"}).status_code == 400
+    assert c.post("/api/v1/recipes", json={"name": "x", "content_mode": "bogus"}).status_code == 400
+    assert c.post("/api/v1/recipes", json={"name": "x", "platform": "myspace"}).status_code == 400
+    assert c.post("/api/v1/recipes", json={"name": "x", "weights": {"hook": "lots"}}).status_code == 400
+    assert c.patch("/api/v1/recipes/nope", json={"count": 2}).status_code == 404
+    assert c.delete("/api/v1/recipes/nope").status_code == 404
+
+
+def test_pipeline_uses_recipe_defaults(client, tmp_path):
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())   # source "abc"
+    rid = c.post("/api/v1/recipes", json={"name": "R", "aspect": "1:1", "reframe_mode": "center",
+                                          "caption_preset": "minimal", "platform": "reels"}).get_json()["id"]
+    # a pipeline call giving only the range + recipe → the recipe supplies aspect/mode/style/preset
+    r = c.post("/api/v1/sources/abc/render", json={"start": 0.0, "end": 1.5, "recipe_id": rid})
+    assert r.status_code == 201
+    p = r.get_json()["params"]
+    assert (p["aspect"], p["mode"], p["style"], p["preset"]) == ("1:1", "center", "minimal", "reels")
+
+
+def test_pipeline_body_overrides_recipe(client, tmp_path):
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())
+    rid = c.post("/api/v1/recipes", json={"name": "R", "aspect": "1:1", "platform": "reels"}).get_json()["id"]
+    r = c.post("/api/v1/sources/abc/render", json={"start": 0.0, "end": 1.5, "recipe_id": rid, "aspect": "9:16"})
+    assert r.get_json()["params"]["aspect"] == "9:16"   # explicit body wins over the recipe default
+
+
+def test_pipeline_unknown_recipe_404(client, tmp_path):
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())
+    r = c.post("/api/v1/sources/abc/render", json={"start": 0.0, "end": 1.5, "recipe_id": "ghost"})
+    assert r.status_code == 404

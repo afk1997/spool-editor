@@ -375,6 +375,10 @@ def _bk():
     return current_app.extensions["trove.brand_kits"]
 
 
+def _rc():
+    return current_app.extensions["trove.recipes"]
+
+
 def _settings():
     return current_app.extensions["trove.settings"]
 
@@ -394,6 +398,7 @@ _CLIP_ASPECTS = ("9:16", "16:9", "1:1", "4:5")
 _CLIP_MODES = ("pan", "split", "center")
 _CLIP_PRESETS = ("tiktok", "reels", "shorts", "youtube", "linkedin", "x")
 _CAPTION_STYLES = ("opus", "karaoke", "minimal")
+_CONTENT_MODES = ("funny", "insightful", "hot-take", "story", "how-to", "q&a")  # clip.moments._MODE_GUIDES
 _CLIP_ARTIFACTS = {"clip": "clip.mp4", "reframed": "reframed.mp4", "captioned": "captioned.mp4",
                    "preview": "preview.mp4"}
 
@@ -1468,7 +1473,7 @@ def storage_info():
             # Internal bookkeeping files we never want to surface (job stores, the brand-kit
             # and settings stores, and the FTS5 search index + its sqlite -wal/-shm sidecars).
             if entry.name in ("jobs.json", "transcribe_jobs.json", "clip_jobs.json",
-                              "brand_kits.json", "settings.json") \
+                              "brand_kits.json", "settings.json", "recipes.json") \
                     or entry.name.startswith("transcript_index.sqlite3"):
                 continue
             size = _file_size(entry.path)
@@ -1736,10 +1741,16 @@ def render_pipeline(source_id):
     rng = _parse_range(data)
     if rng is None:
         return jsonify({"error": "bad_range"}), 400
-    aspect = str(data.get("aspect") or "9:16")
-    mode = str(data.get("mode") or "pan")
-    preset = str(data.get("preset") or "tiktok")
-    style = str(data.get("style") or "opus")
+    rec = {}
+    if data.get("recipe_id") is not None:
+        rec = _rc().get(str(data["recipe_id"]))
+        if rec is None:
+            return jsonify({"error": "recipe_not_found"}), 404
+    # a recipe supplies defaults for the reusable settings; an explicit body value always wins.
+    aspect = str(data.get("aspect") or rec.get("aspect") or "9:16")
+    mode = str(data.get("mode") or rec.get("reframe_mode") or "pan")
+    preset = str(data.get("preset") or rec.get("platform") or "tiktok")
+    style = str(data.get("style") or rec.get("caption_preset") or "opus")
     # stop_after='reframe' = the "Make clips" path: cut + auto-reframe to review, no burn/export.
     stop_after = data.get("stop_after")
     if (aspect not in _CLIP_ASPECTS or mode not in _CLIP_MODES
@@ -1750,6 +1761,11 @@ def render_pipeline(source_id):
     clip_id, render_id = uuid.uuid4().hex[:10], uuid.uuid4().hex[:10]
     params = {"start": start, "end": end, "aspect": aspect, "mode": mode,
               "style": style, "preset": preset}
+    fast = data.get("fast") if data.get("fast") is not None else rec.get("fast")
+    if fast is not None:
+        params["fast"] = bool(fast)
+    if data.get("recipe_id"):
+        params["recipe_id"] = str(data["recipe_id"])   # provenance: which recipe drove this render
     if stop_after:
         params["stop_after"] = stop_after
     jid = _cm().submit(kind="pipeline", source_id=source_id, clip_id=clip_id, params=params,
@@ -1863,6 +1879,82 @@ def update_brand_kit(kit_id):
 @token_required
 def delete_brand_kit(kit_id):
     if not _bk().delete(kit_id):
+        return jsonify({"error": "not_found"}), 404
+    return ("", 204)
+
+
+# ---- recipes (Phase 3): saved end-to-end pipelines that drive render.pipeline + watch-folder ----
+
+def _validate_recipe(data, *, require_name: bool):
+    """Validate a recipe body; return an error response tuple, or None if OK. Enums error rather
+    than silently coerce (a recipe drives real renders, so a bad value would fail asynchronously)."""
+    bad = (jsonify({"error": "bad_recipe"}), 400)
+    if not isinstance(data, dict):
+        return bad
+    if require_name and not (isinstance(data.get("name"), str) and data["name"].strip()):
+        return bad
+    if "name" in data and not isinstance(data["name"], str):
+        return bad
+    enums = (("content_mode", _CONTENT_MODES), ("aspect", _CLIP_ASPECTS),
+             ("reframe_mode", _CLIP_MODES), ("caption_preset", _CAPTION_STYLES), ("platform", _CLIP_PRESETS))
+    for key, allowed in enums:
+        if data.get(key) is not None and data[key] not in allowed:
+            return bad
+    if data.get("count") is not None and not (isinstance(data["count"], int) and 1 <= data["count"] <= 50):
+        return bad
+    if data.get("fast") is not None and not isinstance(data["fast"], bool):
+        return bad
+    if data.get("brand_kit_id") is not None and not isinstance(data["brand_kit_id"], str):
+        return bad
+    w = data.get("weights")
+    if w is not None and (not isinstance(w, dict)
+                          or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in w.values())):
+        return bad
+    return None
+
+
+@api_v1_bp.get("/recipes")
+@token_required
+def list_recipes():
+    return jsonify({"recipes": _rc().list()})
+
+
+@api_v1_bp.post("/recipes")
+@token_required
+def create_recipe():
+    data = request.get_json(silent=True) or {}
+    err = _validate_recipe(data, require_name=True)
+    if err:
+        return err
+    return jsonify(_rc().create(data)), 201
+
+
+@api_v1_bp.get("/recipes/<recipe_id>")
+@token_required
+def get_recipe(recipe_id):
+    rec = _rc().get(recipe_id)
+    if rec is None:
+        return jsonify({"error": "not_found"}), 404
+    return jsonify(rec)
+
+
+@api_v1_bp.patch("/recipes/<recipe_id>")
+@token_required
+def update_recipe(recipe_id):
+    data = request.get_json(silent=True) or {}
+    err = _validate_recipe(data, require_name=False)
+    if err:
+        return err
+    rec = _rc().update(recipe_id, data)
+    if rec is None:
+        return jsonify({"error": "not_found"}), 404
+    return jsonify(rec)
+
+
+@api_v1_bp.delete("/recipes/<recipe_id>")
+@token_required
+def delete_recipe(recipe_id):
+    if not _rc().delete(recipe_id):
         return jsonify({"error": "not_found"}), 404
     return ("", 204)
 
@@ -2046,6 +2138,8 @@ _OPENAPI_DOC = {
         "/clips/{clip_id}/artifacts/{name}": {"get": {"summary": "Stream a clip's intermediate artifact (cut/reframed/captioned mp4)"}},
         "/brand-kits":          {"get": {"summary": "List brand kits"}, "post": {"summary": "Create a brand kit"}},
         "/brand-kits/{kit_id}": {"patch": {"summary": "Update a brand kit"}, "delete": {"summary": "Delete a brand kit"}},
+        "/recipes":             {"get": {"summary": "List recipes (saved end-to-end pipelines)"}, "post": {"summary": "Create a recipe"}},
+        "/recipes/{recipe_id}": {"get": {"summary": "Get one recipe"}, "patch": {"summary": "Update a recipe"}, "delete": {"summary": "Delete a recipe"}},
         "/settings":            {"get":   {"summary": "Read writable engine config (fast/preset/aspect defaults, concurrency, MCP transport)"},
                                  "patch": {"summary": "Update engine config (fast/preset/aspect apply immediately; concurrency + MCP transport apply on restart)"}},
         "/clip-jobs":          {"get":  {"summary": "List clip/render jobs (the render queue)",

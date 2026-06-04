@@ -14,6 +14,7 @@ import transcriber
 import transcript_io
 import clip_jobs
 import brand_kits
+import recipes
 import settings as settings_store_mod
 import transcript_index as transcript_index_mod
 import clip_runner
@@ -134,6 +135,8 @@ def create_app() -> Flask:
     )
     # Brand kits — persisted reusable looks applied across a project's clips (spec §5 P2).
     app.extensions["trove.brand_kits"] = brand_kits.BrandKitStore(download_dir / "brand_kits.json")
+    # Recipes — saved end-to-end pipelines that drive render.pipeline + watch-folder (spec §5 P3).
+    app.extensions["trove.recipes"] = recipes.RecipeStore(download_dir / "recipes.json")
 
     # Register the JSON v1 API blueprint — the headless surface for the studio + MCP.
     from routes.api_v1 import api_v1_bp
