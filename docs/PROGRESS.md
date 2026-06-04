@@ -4,7 +4,7 @@
 > `Spool_Engineering-Spec.md` (§5 roadmap, §6 front-end standards). Status legend:
 > ✅ done & verified · 🟡 in progress · ◻️ not started.
 >
-> **Last updated:** 2026-06-03 · **Phase 0 — ✅ · Phase 1 — ✅ · Phase 2 — ✅ COMPLETE** (all 4 spec
+> **Last updated:** 2026-06-04 · **Phase 0 — ✅ · Phase 1 — ✅ · Phase 2 — ✅ COMPLETE** (all 4 spec
 > done-whens + all 8 work-items: S7 reframe · S8 caption · transcript editing · S9 brand kits · library
 > search · S6 editor timeline · **Settings config writes** · **perf/virtualization** + an explicit, shipped
 > **FTS5** decision (additive trigram index). Engine **676 tests** + studio typecheck/lint/12 vitest/build
@@ -155,6 +155,39 @@
 > **715** tests · studio typecheck/lint/12 vitest/build · Playwright e2e — all green. Next: manual testing
 > on :8899/:3000, then **Phase 3** (glass-box ranking — consumes E's signals · watch-folder · recipes).
 > **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
+>
+> **▶ PHASE 3 — Discovery + automation (in progress; spec §5).** Order (confirmed): glass-box ranking →
+> recipes → watch-folder, then hook-analysis / auto-metadata / batch / B-roll / de-dupe / multi-language.
+> **Quality-pass item E's ranking + feedback re-rank folded in here** (signals landed last pass; this is
+> where they get scored).
+> - **✅ 1. GLASS-BOX OPPORTUNITY RANKING — done (engine + studio), measured on real media.** Implemented
+>   `clip/moments.py::rank` (was the Phase-3 stub): a **transparent** score `= 100·Σ(factorₖ·normalized-weightₖ)`
+>   over five named, reweightable factors — **hook / self_contained / arc / energy / length_fit**, each
+>   `[0,1]` — derived from the signals `signals.annotate` already attaches (the candidate `features` +
+>   the LLM `signals` cues; it **scores ON them, never re-extracts**). Every candidate carries its
+>   `factors` + effective `weights` + `score` (no opaque 0–99; spec §6 glass-box). `clip_runner.find_moments_target`
+>   now **auto-ranks** (default weights) so Discovery shows a REAL score immediately (closes the Phase-1
+>   "no fabricated score" honesty boundary + the §6.6 review item); the effective weights ride on
+>   `job.result` (glass-box log, no silent magic). **API/parity:** `POST /sources/<id>/rank` (stateless
+>   re-rank, OpenAPI-documented) + MCP `discover.rank` (`rank_candidates`) + CLI `rank` +
+>   `TroveClient.rank_candidates`. **Studio (S5):** ported the demo's **ScoreBar + Reweight panel 1:1**,
+>   wired to the real factors (demo's mock 5th factor "emotion" → real "arc"); "Rank by score" → 5 sliders
+>   re-score+re-sort **instantly** via `scoreFromFactors` (client mirror of the engine sum — smooth per
+>   §6.4, equals `POST /rank`); the card's score chip expands to the factor bars **and** the matched-signal
+>   chips. TDD: engine +14 (8 `rank` incl. the transparent-sum identity + reweight-reorders + audio-raises-energy
+>   + no-features; 2 runner auto-rank/override; 4 `/rank` endpoint; 1 MCP tool-surface) → **engine 729**;
+>   studio +6 (`scoreFromFactors`, score/factor mapping, card factor-bars) → **18 vitest**; typecheck/lint/build/e2e
+>   (46.0s) green. **MEASURED** (new `scripts/rank_eval.py`, A/B signal-aware vs text-only on the Karpathy×Zhan
+>   interview, live): **explainable=True** (every score == 100·Σ factor·weight); energy-reweight promotes the
+>   highest-`dynamic_db` windows; on varied windows the non-text signals reorder 3/6, and on the calm interview
+>   they correctly **defer to text** at default weights (0/6 — glass-box honesty, not a bug). Commits `ce24c7e`
+>   (engine) · `7710efb` (studio). **OPEN FINDING (for a later slice):** `find_moments` returns 88–140 s topic
+>   spans (all `length_fit=0`), not tight 10–30 s clips — a *moment-finding* tightness issue (→ hook-analysis /
+>   tighter-windows slice), separate from ranking correctness.
+> - ◻️ **2. RECIPES** — saved end-to-end pipeline (mode/count/aspect/caption-preset/brand-kit/platform);
+>   `engine/recipes.py` JSON store + CRUD routes (OpenAPI) + a studio screen; drives `render.pipeline`.
+> - ◻️ **3. WATCH-FOLDER + channel/playlist automation** — drop a video → auto download→…→rank→cut→reframe→caption
+>   per a recipe → land in a "for review" queue (honest gate, NOT auto-published).
 > **UI — ✅ pixel-1:1 port of `docs/Spool (standalone) (1).html`, wired to live `api_v1`, zero mock.**
 > Every demo screen ported + screenshot-verified against the demo: Onboarding (S0), Home, Import,
 > Library, Project/Transcript (S4), Discovery (S5), Reframe (S7), Caption (S8), Editor (S6),
