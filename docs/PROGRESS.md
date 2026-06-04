@@ -212,17 +212,22 @@
 > under-wired the recipe weights** `e6840ce`: `produce_target` fetched exactly `count` then ranked+sliced
 > to `count`, so the ranking weights only reordered and never SELECTED; it now over-fetches a pool
 > (`max(count+4, count*2)`) and renders the top `count`, so an energy/hook-weighted recipe genuinely
-> picks the clips (a test that returned 4 regardless of `count` had masked it). (4) **FLAGGED (a
-> follow-up, not a bug):** the **MCP surface lacks `produce`/`recipes`/`watches` tools** — agent-mode
-> can't one-shot the Phase-3 automation the studio can, though it CAN compose the existing
-> `find_moments` + `rank_candidates` + `render_pipeline` to the same end, and the spec §4 MCP list is
-> satisfied. Adding them restores full UI⇄MCP parity for automation (recommended next).
+> picks the clips (a test that returned 4 regardless of `count` had masked it). (4) **FIXED — full
+> UI⇄MCP⇄CLI parity for the Phase-3 automation** (`87c2e7f`→`955219e`): the agent surface (TroveClient,
+> MCP, CLI) had the clip render pipeline but not produce/recipes/watches/brand_kits — only the studio
+> did. Added across all three clients, each TDD'd: TroveClient methods (+patch/delete helpers, +5
+> tests); **16 MCP tools** (produce_clips + recipes/watches/brand_kits CRUD + watch scan) + spool://
+> recipes & spool://watches resources (the e2e asserts the expanded tool set); **16 CLI commands** +
+> the `MCP_TO_CLI` map (the `test_cli_has_full_mcp_feature_parity` invariant enforces it). Engine **775**
+> green; live-verified: CLI create/list/delete a recipe + list watches/brand-kits against the real
+> engine. Agent-, CLI-, and studio-mode now drive the identical automation (golden rule, complete).
 >
 > **HARDENING PASS — VERIFIED COMPLETE (2026-06-04).** 8 fixes (G·B·E·C·D·A·I·produce-over-fetch) + the
 > watch-automation live e2e, each TDD'd + (where it touches media) measured on real media + committed
-> (`4b9799e`→`e6840ce`). **Fresh full gate green:** engine **767** pytest · studio typecheck/lint/**20**
-> vitest/build/Playwright-e2e. DO-NOT-START-Phase-4 honored. Suggested next: the MCP automation tools
-> (parity), then Phase 4 (publish + the engagement→ranking feedback loop, which also unlocks real H tuning).
+> (`4b9799e`→`e6840ce`), then full UI⇄MCP⇄CLI parity (`87c2e7f`→`955219e`). **Fresh full gate green:**
+> engine **775** pytest · studio typecheck/lint/**20** vitest/build/Playwright-e2e. DO-NOT-START-Phase-4
+> honored. Suggested next: **Phase 4** (publish + the engagement→ranking feedback loop, which also
+> unlocks real H tuning).
 > - **✅ 1. GLASS-BOX OPPORTUNITY RANKING — done (engine + studio), measured on real media.** Implemented
 >   `clip/moments.py::rank` (was the Phase-3 stub): a **transparent** score `= 100·Σ(factorₖ·normalized-weightₖ)`
 >   over five named, reweightable factors — **hook / self_contained / arc / energy / length_fit**, each
