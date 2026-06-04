@@ -201,8 +201,28 @@
 > on the *calm* interview the default ranking still defers to text (0/6 reorder) — correct glass-box
 > behavior (the moments genuinely are similar in energy), and the energy signal now discriminates when
 > the user reweights. Recommendation: wire the Phase-4 engagement→weights feedback loop for real tuning.
-> **Remaining hardening:** an independent Phase-0–2 audit (ingest/transcribe/diarization/cutter/reframe/
-> captioner/exporter + the studio) for correctness, honesty, a11y/perf, dead/partial wiring.
+>
+> **INDEPENDENT PHASE-0–2 + automation AUDIT (same session) — findings:** (1) **Studio honesty: CLEAN**
+> — swept all of `src/` for no-op handlers / fabricated data / `Math.random`·`Math.sin` / mock arrays /
+> TODOs; the only hit is the Analytics `Math.sin` chart, which is inside `FutureScreen` (50 % opacity,
+> desaturated, `pointerEvents:none`, under a "Designed — coming in Phase 4" overlay) — the approved
+> honest placeholder, not a violation. (2) **Engine error-handling: CLEAN** — no bare `except:`; every
+> swallowing handler in the clip modules is a documented best-effort (signals / face-track), so a real
+> stage failure propagates → the job goes ERROR (never a silent fake success). (3) **FIXED — produce
+> under-wired the recipe weights** `e6840ce`: `produce_target` fetched exactly `count` then ranked+sliced
+> to `count`, so the ranking weights only reordered and never SELECTED; it now over-fetches a pool
+> (`max(count+4, count*2)`) and renders the top `count`, so an energy/hook-weighted recipe genuinely
+> picks the clips (a test that returned 4 regardless of `count` had masked it). (4) **FLAGGED (a
+> follow-up, not a bug):** the **MCP surface lacks `produce`/`recipes`/`watches` tools** — agent-mode
+> can't one-shot the Phase-3 automation the studio can, though it CAN compose the existing
+> `find_moments` + `rank_candidates` + `render_pipeline` to the same end, and the spec §4 MCP list is
+> satisfied. Adding them restores full UI⇄MCP parity for automation (recommended next).
+>
+> **HARDENING PASS — VERIFIED COMPLETE (2026-06-04).** 8 fixes (G·B·E·C·D·A·I·produce-over-fetch) + the
+> watch-automation live e2e, each TDD'd + (where it touches media) measured on real media + committed
+> (`4b9799e`→`e6840ce`). **Fresh full gate green:** engine **767** pytest · studio typecheck/lint/**20**
+> vitest/build/Playwright-e2e. DO-NOT-START-Phase-4 honored. Suggested next: the MCP automation tools
+> (parity), then Phase 4 (publish + the engagement→ranking feedback loop, which also unlocks real H tuning).
 > - **✅ 1. GLASS-BOX OPPORTUNITY RANKING — done (engine + studio), measured on real media.** Implemented
 >   `clip/moments.py::rank` (was the Phase-3 stub): a **transparent** score `= 100·Σ(factorₖ·normalized-weightₖ)`
 >   over five named, reweightable factors — **hook / self_contained / arc / energy / length_fit**, each
