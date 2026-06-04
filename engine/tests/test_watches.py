@@ -38,6 +38,17 @@ def test_set_state_tracks_automation_progress(tmp_path):
     assert got["recipe_id"] == "r1" and got["kind"] == "folder"
 
 
+def test_set_state_persists_producing_jobs(tmp_path):
+    # The reconciler tracks in-flight produce jobs in `producing` (sid -> {job, attempts}) so a
+    # pending retry survives an engine restart. create() initializes it; set_state advances it.
+    s = WatchStore(str(tmp_path / "watches.json"))
+    w = s.create({"name": "W", "kind": "folder", "target": "/in", "recipe_id": "r1"})
+    assert w["producing"] == {}
+    s.set_state(w["id"], producing={"src1": {"job": "j1", "attempts": 2}})
+    reloaded = WatchStore(str(tmp_path / "watches.json"))   # survives a restart
+    assert reloaded.get(w["id"])["producing"] == {"src1": {"job": "j1", "attempts": 2}}
+
+
 def test_update_unknown_fields_dropped_and_unknown_id(tmp_path):
     s = WatchStore(str(tmp_path / "watches.json"))
     w = s.create({"name": "W", "kind": "folder", "target": "/x", "bogus": 1})

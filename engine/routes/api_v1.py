@@ -2075,7 +2075,7 @@ def scan_watch(watch_id):
     if result is None:
         return jsonify({"error": "not_found"}), 404
     return jsonify({"ingested": result["ingested"], "produced": result["produced_now"],
-                    "pending": result["pending"]})
+                    "pending": result["pending"], "producing": result["producing"]})
 
 
 # ---- settings (S14): writable engine config surfaced by the demo's Settings screen (07) ----

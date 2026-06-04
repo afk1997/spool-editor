@@ -119,7 +119,8 @@ export interface Recipe {
   weights?: Record<string, number>;   // optional glass-box ranking weights
 }
 /** A folder/channel/playlist automation (Phase 3) — new videos auto-produce ranked clips per a
- *  recipe into the review queue. `seen`/`pending`/`produced` are the reconciler's progress state. */
+ *  recipe into the review queue. The reconciler advances each source seen → pending (awaiting
+ *  transcription) → producing (produce job in flight) → produced (that job completed). */
 export interface Watch {
   id: string;
   name: string;
@@ -129,6 +130,7 @@ export interface Watch {
   enabled?: boolean;
   seen?: string[];
   pending?: Record<string, string>;
+  producing?: Record<string, { job: string; attempts: number }>;
   produced?: string[];
 }
 /** S8 Caption Studio fine-styling — clamped/validated engine-side, mapped to the real ASS. */
@@ -401,7 +403,7 @@ export class SpoolApiClient {
   deleteWatch(id: string): Promise<void> {
     return this.request(`/watches/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
-  scanWatch(id: string): Promise<{ ingested: string[]; produced: string[]; pending: Record<string, string> }> {
+  scanWatch(id: string): Promise<{ ingested: string[]; produced: string[]; pending: Record<string, string>; producing: Record<string, { job: string; attempts: number }> }> {
     return this.post(`/watches/${encodeURIComponent(id)}/scan`, {});
   }
 

@@ -636,12 +636,18 @@ def create_app() -> Flask:
         _, words_path = clip_runner_inst.source_paths(source_id)
         return bool(words_path and os.path.exists(words_path))
 
-    def _watch_produce(watch: dict, source_id: str) -> None:
+    def _watch_produce(watch: dict, source_id: str) -> str:
         recipe = {**(recipe_store.get(watch.get("recipe_id")) or {}), "watch_id": watch.get("id")}
-        clip_manager.submit(
+        return clip_manager.submit(
             kind="produce", source_id=source_id,
             params={"recipe_id": watch.get("recipe_id"), "watch_id": watch.get("id")},
             target=clip_runner_inst.produce_target(source_id=source_id, recipe=recipe))
+
+    def _watch_produce_status(job_id):
+        """Terminal status of an enqueued produce job, so the reconciler only marks a source
+        produced on a confirmed ``done`` (and retries on ``error``). None if the job is gone."""
+        cj = clip_manager.get(job_id) if job_id else None
+        return cj.status.value if cj else None
 
     def _watch_items(watch: dict):
         if watch.get("kind") == "folder":
@@ -650,8 +656,10 @@ def create_app() -> Flask:
 
     def _reconcile_one(watch: dict) -> dict:
         r = watcher.reconcile_watch(watch, list_items=_watch_items, ingest=_watch_ingest,
-                                    transcript_done=_watch_transcript_done, produce=_watch_produce)
-        watch_store.set_state(watch["id"], seen=r["seen"], pending=r["pending"], produced=r["produced"])
+                                    transcript_done=_watch_transcript_done, produce=_watch_produce,
+                                    produce_status=_watch_produce_status)
+        watch_store.set_state(watch["id"], seen=r["seen"], pending=r["pending"],
+                              produced=r["produced"], producing=r["producing"])
         return r
 
     def _reconcile_watch_by_id(watch_id: str):

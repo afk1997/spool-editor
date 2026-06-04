@@ -52,7 +52,7 @@ class WatchStore:
     def create(self, data: dict) -> dict:
         w = {"id": uuid.uuid4().hex[:10], **_clean(data),
              "enabled": bool(data.get("enabled", True)),
-             "seen": [], "pending": {}, "produced": []}
+             "seen": [], "pending": {}, "produced": [], "producing": {}}
         self._watches.append(w)
         self._save()
         return dict(w)
@@ -65,7 +65,7 @@ class WatchStore:
                 return dict(w)
         return None
 
-    def set_state(self, watch_id: str, *, seen=None, pending=None, produced=None):
+    def set_state(self, watch_id: str, *, seen=None, pending=None, produced=None, producing=None):
         """Advance the reconciler-managed state (never touches the user fields)."""
         for w in self._watches:
             if w.get("id") == watch_id:
@@ -75,6 +75,8 @@ class WatchStore:
                     w["pending"] = dict(pending)
                 if produced is not None:
                     w["produced"] = list(produced)
+                if producing is not None:
+                    w["producing"] = dict(producing)
                 self._save()
                 return dict(w)
         return None
