@@ -186,9 +186,23 @@
 > via the poller** (`SPOOL_WATCH_INTERVAL=10`): dropped a real video → poller auto-ingested (no manual
 > scan) → transcribed → `pending`→`producing`→`produced` → a real 9:16 clip with the brand kit burned
 > in; both the folder and the channel/playlist paths confirmed. Engine **761** green · studio
-> typecheck/lint/**20** vitest/build/e2e green. **Remaining hardening:** **A** clip tightness (produced
-> clips must land 10–30 s, not the 88–140 s topic spans of the OPEN FINDING), **H/I** ranking-vs-human
-> validation + making non-text signals discriminate on calm content, and an independent Phase-0–2 audit.
+> typecheck/lint/**20** vitest/build/e2e green.
+>
+> **HARDENING continued (same session):** **A — clip tightness FIXED + measured** `1d51c91`: firmer
+> prompt (hard 10–30 s, "the tightest self-contained window, not a whole topic") + a deterministic
+> `_tighten_to_window` trim (over-long candidates trimmed to a clean line boundary ≤30 s, hook kept).
+> The OPEN FINDING is RESOLVED — on the real 30-min interview, insightful + funny modes now return
+> clips **16–29 s, every `length_fit`=1.0** (was 27–50 s, 4/6 over 30). **I — relative-loudness energy
+> signal** `ce55162`: `signals.annotate` attaches `rel_db` (window level vs the in-set median); the
+> energy factor leans on it so it's mic-gain-independent and discriminates real in-video variation
+> (TDD'd). **H — NOT fabricated (skeptic call):** validating the ranking against real *human preference*
+> needs real labels or Phase-4 engagement data, which this session doesn't have; self-labeling is
+> circular and tuning `DEFAULT_WEIGHTS` to synthetic labels would be dummy validation. Measured honestly:
+> on the *calm* interview the default ranking still defers to text (0/6 reorder) — correct glass-box
+> behavior (the moments genuinely are similar in energy), and the energy signal now discriminates when
+> the user reweights. Recommendation: wire the Phase-4 engagement→weights feedback loop for real tuning.
+> **Remaining hardening:** an independent Phase-0–2 audit (ingest/transcribe/diarization/cutter/reframe/
+> captioner/exporter + the studio) for correctness, honesty, a11y/perf, dead/partial wiring.
 > - **✅ 1. GLASS-BOX OPPORTUNITY RANKING — done (engine + studio), measured on real media.** Implemented
 >   `clip/moments.py::rank` (was the Phase-3 stub): a **transparent** score `= 100·Σ(factorₖ·normalized-weightₖ)`
 >   over five named, reweightable factors — **hook / self_contained / arc / energy / length_fit**, each
@@ -210,9 +224,10 @@
 >   interview, live): **explainable=True** (every score == 100·Σ factor·weight); energy-reweight promotes the
 >   highest-`dynamic_db` windows; on varied windows the non-text signals reorder 3/6, and on the calm interview
 >   they correctly **defer to text** at default weights (0/6 — glass-box honesty, not a bug). Commits `ce24c7e`
->   (engine) · `7710efb` (studio). **OPEN FINDING (for a later slice):** `find_moments` returns 88–140 s topic
->   spans (all `length_fit=0`), not tight 10–30 s clips — a *moment-finding* tightness issue (→ hook-analysis /
->   tighter-windows slice), separate from ranking correctness.
+>   (engine) · `7710efb` (studio). **OPEN FINDING — ✅ RESOLVED (2026-06-04 hardening, `1d51c91`):**
+>   `find_moments` returned topic-length spans (88–140 s prior; 27–50 s this session); a firmer prompt +
+>   the deterministic `_tighten_to_window` trim now land clips at 16–29 s (`length_fit`=1.0) on the real
+>   interview. See the HARDENING block above.
 > - **✅ 2. RECIPES — saved end-to-end pipeline (engine + studio), proven on real media.** New
 >   `engine/recipes.py` JSON store (mirrors brand_kits.py) + GET/POST/PATCH/DELETE `/recipes`
 >   (OpenAPI-documented); a Recipe = content_mode + count + optional ranking `weights` + render
