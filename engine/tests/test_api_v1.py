@@ -1389,3 +1389,47 @@ def test_produce_endpoint_no_transcript_409(client, tmp_path, monkeypatch):
                                                      status=JobStatus.DONE, file_path=str(dd / "novx.mp4"))
     rid = c.post("/api/v1/recipes", json={"name": "R"}).get_json()["id"]
     assert c.post("/api/v1/sources/novx/produce", json={"recipe_id": rid}).status_code == 409
+
+
+# ---- watches (Phase 3): folder / channel / playlist automations ----
+
+def test_watch_crud(client):
+    _, c = client
+    assert c.get("/api/v1/watches").get_json() == {"watches": []}
+    w = c.post("/api/v1/watches", json={"name": "Chan", "kind": "channel",
+                                        "target": "https://youtube.com/@x", "recipe_id": "r1"})
+    assert w.status_code == 201
+    wid = w.get_json()["id"]
+    assert w.get_json()["enabled"] is True and w.get_json()["seen"] == []
+    assert c.get("/api/v1/watches").get_json()["watches"][0]["id"] == wid
+    assert c.patch(f"/api/v1/watches/{wid}", json={"enabled": False}).get_json()["enabled"] is False
+    assert c.delete(f"/api/v1/watches/{wid}").status_code == 204
+    assert c.get(f"/api/v1/watches/{wid}").status_code == 404
+
+
+def test_watch_validation(client):
+    _, c = client
+    assert c.post("/api/v1/watches", json={}).status_code == 400                            # no name
+    assert c.post("/api/v1/watches", json={"name": "x", "kind": "bogus", "target": "y"}).status_code == 400
+    assert c.post("/api/v1/watches", json={"name": "x", "kind": "folder"}).status_code == 400  # no target
+    assert c.patch("/api/v1/watches/nope", json={"enabled": False}).status_code == 404
+    assert c.delete("/api/v1/watches/nope").status_code == 404
+
+
+def test_watch_scan_ingests_new_folder_videos(client, tmp_path, monkeypatch):
+    monkeypatch.setattr("clip.moments.find_moments", lambda *a, **k: [])
+    app, c = client
+    indir = tmp_path / "incoming"
+    indir.mkdir()
+    (indir / "talk.mp4").write_bytes(b"x")
+    wid = c.post("/api/v1/watches", json={"name": "F", "kind": "folder",
+                                          "target": str(indir), "recipe_id": "r1"}).get_json()["id"]
+    r = c.post(f"/api/v1/watches/{wid}/scan")
+    assert r.status_code == 200 and len(r.get_json()["ingested"]) == 1     # the new file ingested
+    assert "talk.mp4" in c.get(f"/api/v1/watches/{wid}").get_json()["seen"]
+    assert c.post(f"/api/v1/watches/{wid}/scan").get_json()["ingested"] == []   # nothing new the 2nd scan
+
+
+def test_watch_scan_unknown_404(client):
+    _, c = client
+    assert c.post("/api/v1/watches/ghost/scan").status_code == 404

@@ -1,6 +1,8 @@
 # app.py
 from __future__ import annotations
 import os
+import shutil
+import threading
 from pathlib import Path
 from flask import Flask, jsonify, request
 
@@ -15,6 +17,8 @@ import transcript_io
 import clip_jobs
 import brand_kits
 import recipes
+import watches
+import watcher
 import settings as settings_store_mod
 import transcript_index as transcript_index_mod
 import clip_runner
@@ -127,16 +131,22 @@ def create_app() -> Flask:
         store_path=download_dir / "clip_jobs.json",
     )
     app.extensions["trove.clips"] = clip_manager
-    app.extensions["trove.clip_runner"] = clip_runner.ClipRunner(
+    clip_runner_inst = clip_runner.ClipRunner(
         download_dir=download_dir,
         job_manager=job_manager,
         clip_manager=clip_manager,
         settings_store=settings_store,
     )
+    app.extensions["trove.clip_runner"] = clip_runner_inst
     # Brand kits — persisted reusable looks applied across a project's clips (spec §5 P2).
     app.extensions["trove.brand_kits"] = brand_kits.BrandKitStore(download_dir / "brand_kits.json")
     # Recipes — saved end-to-end pipelines that drive render.pipeline + watch-folder (spec §5 P3).
-    app.extensions["trove.recipes"] = recipes.RecipeStore(download_dir / "recipes.json")
+    recipe_store = recipes.RecipeStore(download_dir / "recipes.json")
+    app.extensions["trove.recipes"] = recipe_store
+    # Watches — folder/channel/playlist automations (spec §5 P3). Reconciler wired below (needs the
+    # download/import action closures); the poller (opt-in) is started after create_app finishes.
+    watch_store = watches.WatchStore(download_dir / "watches.json")
+    app.extensions["trove.watches"] = watch_store
 
     # Register the JSON v1 API blueprint — the headless surface for the studio + MCP.
     from routes.api_v1 import api_v1_bp
@@ -568,11 +578,94 @@ def create_app() -> Flask:
             target=_build_transcribe_target(media_path, base_no_ext, wav_path),
         )
 
+    def _import_local_file(path: str, *, auto_transcribe: bool = True) -> str:
+        """Register a LOCAL video file as a source (the watch-folder ingest). Copies it into the
+        download dir under the job id, marks the job done, and auto-transcribes — reusing the same
+        job machinery as a download (no separate code path), so a watched folder yields sources
+        identical to a paste-URL import."""
+        title = os.path.basename(path)
+
+        def _work(job: Job):
+            ext = os.path.splitext(path)[1] or ".mp4"
+            dst = DOWNLOAD_DIR / f"{job.id}{ext}"
+            shutil.copy2(path, dst)
+            job.file_path = str(dst)
+            job.filename = sanitize_filename(title, ext)
+            _try_auto_transcribe(job)
+
+        return job_manager.submit(target=_work, title=title, url=f"file://{path}",
+                                  auto_transcribe=auto_transcribe)
+
     app.extensions["trove.actions"] = {
         "enqueue_download": _enqueue_download,
         "resume_job": _v1_resume_job,
         "start_transcribe": _v1_start_transcribe,
+        "import_local_file": _import_local_file,
     }
+
+    # --- watch-folder / channel automation reconciler (spec §5 P3) -------
+    # Detect new videos → ingest (download+auto-transcribe for URLs, local import for folder files)
+    # → once transcribed, run the watch's recipe (produce). The tick lives in watcher.py; here we
+    # inject the real ingest/transcript/produce. Nothing is auto-published (Phase 4) — review gate.
+    def _watch_ingest(watch: dict, key: str):
+        try:
+            if watch.get("kind") == "folder":
+                return _import_local_file(os.path.join(watch.get("target", ""), key), auto_transcribe=True)
+            return _enqueue_download(url=key, format_choice="video", format_id=None,
+                                     title=key, auto_transcribe=True)
+        except Exception:
+            app.logger.warning("watch ingest failed for %r", key, exc_info=True)
+            return None
+
+    def _watch_transcript_done(source_id: str) -> bool:
+        _, words_path = clip_runner_inst.source_paths(source_id)
+        return bool(words_path and os.path.exists(words_path))
+
+    def _watch_produce(watch: dict, source_id: str) -> None:
+        recipe = {**(recipe_store.get(watch.get("recipe_id")) or {}), "watch_id": watch.get("id")}
+        clip_manager.submit(
+            kind="produce", source_id=source_id,
+            params={"recipe_id": watch.get("recipe_id"), "watch_id": watch.get("id")},
+            target=clip_runner_inst.produce_target(source_id=source_id, recipe=recipe))
+
+    def _watch_items(watch: dict):
+        if watch.get("kind") == "folder":
+            return watcher.list_folder_items(watch.get("target", ""))
+        return watcher.list_playlist_items(watch.get("target", ""))
+
+    def _reconcile_one(watch: dict) -> dict:
+        r = watcher.reconcile_watch(watch, list_items=_watch_items, ingest=_watch_ingest,
+                                    transcript_done=_watch_transcript_done, produce=_watch_produce)
+        watch_store.set_state(watch["id"], seen=r["seen"], pending=r["pending"], produced=r["produced"])
+        return r
+
+    def _reconcile_watch_by_id(watch_id: str):
+        w = watch_store.get(watch_id)
+        return _reconcile_one(w) if w else None
+
+    def _reconcile_all() -> None:
+        for w in watch_store.list():
+            if w.get("enabled", True):
+                try:
+                    _reconcile_one(w)
+                except Exception:
+                    app.logger.warning("watch reconcile failed for %s", w.get("id"), exc_info=True)
+
+    app.extensions["trove.watch_reconcile"] = _reconcile_watch_by_id
+    app.extensions["trove.watch_reconcile_all"] = _reconcile_all
+
+    # Opt-in background poller: SPOOL_WATCH_INTERVAL seconds (0/unset = off — manual "Scan now"
+    # always works). A daemon thread so it never blocks shutdown.
+    try:
+        _watch_interval = float(os.environ.get("SPOOL_WATCH_INTERVAL", "0") or 0)
+    except ValueError:
+        _watch_interval = 0.0
+    if _watch_interval > 0:
+        def _poll():
+            while True:
+                _time.sleep(_watch_interval)
+                _reconcile_all()
+        threading.Thread(target=_poll, name="watch-poller", daemon=True).start()
 
     return app
 

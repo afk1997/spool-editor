@@ -379,6 +379,10 @@ def _rc():
     return current_app.extensions["trove.recipes"]
 
 
+def _ws():
+    return current_app.extensions["trove.watches"]
+
+
 def _settings():
     return current_app.extensions["trove.settings"]
 
@@ -399,6 +403,7 @@ _CLIP_MODES = ("pan", "split", "center")
 _CLIP_PRESETS = ("tiktok", "reels", "shorts", "youtube", "linkedin", "x")
 _CAPTION_STYLES = ("opus", "karaoke", "minimal")
 _CONTENT_MODES = ("funny", "insightful", "hot-take", "story", "how-to", "q&a")  # clip.moments._MODE_GUIDES
+_WATCH_KINDS = ("folder", "channel", "playlist")
 _CLIP_ARTIFACTS = {"clip": "clip.mp4", "reframed": "reframed.mp4", "captioned": "captioned.mp4",
                    "preview": "preview.mp4"}
 
@@ -1473,7 +1478,7 @@ def storage_info():
             # Internal bookkeeping files we never want to surface (job stores, the brand-kit
             # and settings stores, and the FTS5 search index + its sqlite -wal/-shm sidecars).
             if entry.name in ("jobs.json", "transcribe_jobs.json", "clip_jobs.json",
-                              "brand_kits.json", "settings.json", "recipes.json") \
+                              "brand_kits.json", "settings.json", "recipes.json", "watches.json") \
                     or entry.name.startswith("transcript_index.sqlite3"):
                 continue
             size = _file_size(entry.path)
@@ -1987,6 +1992,92 @@ def delete_recipe(recipe_id):
     return ("", 204)
 
 
+# ---- watches (Phase 3): folder / channel / playlist automations → the review queue ----
+
+def _validate_watch(data, *, require_name: bool):
+    """Validate a watch body; return an error response tuple, or None if OK."""
+    bad = (jsonify({"error": "bad_watch"}), 400)
+    if not isinstance(data, dict):
+        return bad
+    if require_name:
+        if not (isinstance(data.get("name"), str) and data["name"].strip()):
+            return bad
+        if data.get("kind") not in _WATCH_KINDS:
+            return bad
+        if not (isinstance(data.get("target"), str) and data["target"].strip()):
+            return bad
+    if "name" in data and not isinstance(data["name"], str):
+        return bad
+    if data.get("kind") is not None and data["kind"] not in _WATCH_KINDS:
+        return bad
+    if "target" in data and not isinstance(data["target"], str):
+        return bad
+    if data.get("enabled") is not None and not isinstance(data["enabled"], bool):
+        return bad
+    if data.get("recipe_id") is not None and not isinstance(data["recipe_id"], str):
+        return bad
+    return None
+
+
+@api_v1_bp.get("/watches")
+@token_required
+def list_watches():
+    return jsonify({"watches": _ws().list()})
+
+
+@api_v1_bp.post("/watches")
+@token_required
+def create_watch():
+    data = request.get_json(silent=True) or {}
+    err = _validate_watch(data, require_name=True)
+    if err:
+        return err
+    return jsonify(_ws().create(data)), 201
+
+
+@api_v1_bp.get("/watches/<watch_id>")
+@token_required
+def get_watch(watch_id):
+    w = _ws().get(watch_id)
+    if w is None:
+        return jsonify({"error": "not_found"}), 404
+    return jsonify(w)
+
+
+@api_v1_bp.patch("/watches/<watch_id>")
+@token_required
+def update_watch(watch_id):
+    data = request.get_json(silent=True) or {}
+    err = _validate_watch(data, require_name=False)
+    if err:
+        return err
+    w = _ws().update(watch_id, data)
+    if w is None:
+        return jsonify({"error": "not_found"}), 404
+    return jsonify(w)
+
+
+@api_v1_bp.delete("/watches/<watch_id>")
+@token_required
+def delete_watch(watch_id):
+    if not _ws().delete(watch_id):
+        return jsonify({"error": "not_found"}), 404
+    return ("", 204)
+
+
+@api_v1_bp.post("/watches/<watch_id>/scan")
+@token_required
+def scan_watch(watch_id):
+    """Reconcile a watch once now: detect new videos → ingest (download+auto-transcribe / local
+    import) → produce the recipe for any whose transcript is done. Returns this tick's source ids.
+    The opt-in background poller runs the same reconcile on an interval."""
+    result = current_app.extensions["trove.watch_reconcile"](watch_id)
+    if result is None:
+        return jsonify({"error": "not_found"}), 404
+    return jsonify({"ingested": result["ingested"], "produced": result["produced_now"],
+                    "pending": result["pending"]})
+
+
 # ---- settings (S14): writable engine config surfaced by the demo's Settings screen (07) ----
 
 @api_v1_bp.get("/settings")
@@ -2169,6 +2260,9 @@ _OPENAPI_DOC = {
         "/brand-kits/{kit_id}": {"patch": {"summary": "Update a brand kit"}, "delete": {"summary": "Delete a brand kit"}},
         "/recipes":             {"get": {"summary": "List recipes (saved end-to-end pipelines)"}, "post": {"summary": "Create a recipe"}},
         "/recipes/{recipe_id}": {"get": {"summary": "Get one recipe"}, "patch": {"summary": "Update a recipe"}, "delete": {"summary": "Delete a recipe"}},
+        "/watches":             {"get": {"summary": "List watches (folder/channel/playlist automations)"}, "post": {"summary": "Create a watch"}},
+        "/watches/{watch_id}":  {"get": {"summary": "Get one watch"}, "patch": {"summary": "Update a watch"}, "delete": {"summary": "Delete a watch"}},
+        "/watches/{watch_id}/scan": {"post": {"summary": "Reconcile a watch now: ingest new videos → produce ranked clips per its recipe"}},
         "/settings":            {"get":   {"summary": "Read writable engine config (fast/preset/aspect defaults, concurrency, MCP transport)"},
                                  "patch": {"summary": "Update engine config (fast/preset/aspect apply immediately; concurrency + MCP transport apply on restart)"}},
         "/clip-jobs":          {"get":  {"summary": "List clip/render jobs (the render queue)",
