@@ -169,14 +169,19 @@ def test_find_moments_target_honors_weight_overrides(runner, monkeypatch):
     assert w["energy"] == 1.0 and w["hook"] == 0.0       # the override propagated into rank
 
 
-def test_produce_target_fans_out_ranked_pipelines(runner, monkeypatch):
-    # The watch-folder keystone: apply a recipe end-to-end — find_moments → rank(recipe.weights)
-    # → take the top `count` → submit a full render pipeline per moment with the recipe's settings.
+def test_produce_target_overfetches_then_selects_top_n_by_recipe_weights(runner, monkeypatch):
+    # The watch-folder keystone: apply a recipe end-to-end. The recipe's ranking weights must SELECT
+    # which moments become clips, not merely reorder the exact `count` the model returns — so produce
+    # over-fetches a candidate POOL larger than `count`, ranks it, and renders the top `count`.
     _words_file(runner)
+    asked = {}
 
     def fake_find(words_path, **kw):
+        asked["count"] = kw["count"]
+        n = kw["count"]
+        # the one hooky moment sits at index 4 — only found if produce over-fetches beyond count=2.
         return [{"start": float(i * 20), "end": float(i * 20 + 18), "title": f"m{i}", "rationale": "",
-                 "mode": kw["mode"], "signals": (["hook", "punchline"] if i == 2 else [])} for i in range(4)]
+                 "mode": kw["mode"], "signals": (["hook", "punchline"] if i == 4 else [])} for i in range(n)]
 
     _patch(monkeypatch, "moments", "find_moments", fake_find)
     recipe = {"id": "r1", "content_mode": "funny", "count": 2, "aspect": "1:1", "reframe_mode": "center",
@@ -185,11 +190,12 @@ def test_produce_target_fans_out_ranked_pipelines(runner, monkeypatch):
     runner.produce_target(source_id="src1", recipe=recipe)(job)
 
     subs = runner.clip_manager.submitted
-    assert len(subs) == 2 and all(s["kind"] == "pipeline" for s in subs)   # top `count`=2 pipelines
+    assert asked["count"] > 2                                              # over-fetched a pool > count
+    assert len(subs) == 2 and all(s["kind"] == "pipeline" for s in subs)   # rendered exactly `count`=2
     p0 = subs[0]["params"]
     assert (p0["aspect"], p0["mode"], p0["style"], p0["preset"]) == ("1:1", "center", "minimal", "reels")
     assert p0["fast"] is True and p0["recipe_id"] == "r1" and p0["auto"] is True   # recipe + provenance
-    assert subs[0]["params"]["start"] == 40.0                              # hooky m2 ranked first (hook weight)
+    assert subs[0]["params"]["start"] == 80.0                              # hooky m4 selected from the pool
     assert job.result["count"] == 2 and len(job.result["clip_jobs"]) == 2 and job.result["recipe_id"] == "r1"
 
 

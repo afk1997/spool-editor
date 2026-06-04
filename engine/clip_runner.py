@@ -420,9 +420,13 @@ class ClipRunner:
         def _work(job):
             media_path, words_path = self.source_paths(source_id)
             count = int(recipe.get("count") or 5)
+            # Over-fetch a candidate POOL larger than `count` so the recipe's glass-box ranking
+            # weights actually SELECT the top moments — otherwise rank() would only reorder the exact
+            # `count` the model returns, and the weights would have no selective effect.
+            pool = max(count + 4, count * 2)
             self.clip_manager.update_progress(job.id, 10, stage="find")
             cands = moments.find_moments(words_path, mode=recipe.get("content_mode", "funny"),
-                                         count=count, source_id=source_id)
+                                         count=pool, source_id=source_id)
             try:
                 words = (transcript_io.load(words_path).get("words") if words_path else None) or None
                 signals.annotate(cands, words=words, media_path=media_path)
