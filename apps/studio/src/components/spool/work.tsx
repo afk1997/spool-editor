@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { useSpool, type Candidate, type TranscriptLine, type SpeakerInfo } from "./context";
+import type { RankFactors } from "@spool/types";
+import { useSpool, scoreFromFactors, type Candidate, type TranscriptLine, type SpeakerInfo } from "./context";
 import { Btn, Chip, Empty, Icon, Thumb, fmtTC, parseTC } from "@spool/ui";
 import { WindowList } from "./virtual";
 
@@ -11,13 +12,46 @@ import { WindowList } from "./virtual";
 // per-line renderer, so the rows look the same either way (spec §6.4).
 const LINE_VIRT_THRESHOLD = 60;
 
-/* Shared work-screen components ported 1:1 from the demo (04): CandidateCard, AdjustModal,
- * DiscoveryBody, TranscriptView. Used by both Project (S4) and Discovery (S5).
+/* Shared work-screen components ported 1:1 from the demo (04): ScoreBar, CandidateCard,
+ * AdjustModal, DiscoveryBody, TranscriptView. Used by both Project (S4) and Discovery (S5).
  *
- * Glass-box adaptation: a Phase-1 candidate has real named `signals` + a real transcript
- * `excerpt` (the engine's `find_moments`), but NO numeric score / 5-factor breakdown — that
- * `rank` opportunity-score is Phase 3. So the card keeps the demo's chrome but the expandable
- * panel shows the real named signals instead of fabricated factor bars. */
+ * Glass-box (Phase 3): the candidate carries a real `score` that decomposes into the five named,
+ * reweightable `factors` from the engine's `moments.rank` (hook / self-contained / arc / energy /
+ * length-fit — replacing the demo's mock factor set), surfaced as the ScoreBar + the Reweight
+ * panel below. The expandable panel ALSO keeps the real matched `signals` cues. Nothing fabricated:
+ * the score and every factor come from the engine; reweighting recomputes the same transparent sum
+ * the engine uses (`scoreFromFactors`), so the slider is instant (spec §6.4) yet matches the API. */
+
+// Factor key → label + bar color (single source for the ScoreBar AND the Reweight sliders).
+const FACTOR_META: { key: keyof RankFactors; label: string; color: string }[] = [
+  { key: "hook", label: "Hook", color: "var(--accent)" },
+  { key: "self_contained", label: "Self-contained", color: "var(--info)" },
+  { key: "arc", label: "Arc", color: "var(--warn)" },
+  { key: "energy", label: "Energy", color: "var(--ok)" },
+  { key: "length_fit", label: "Length-fit", color: "#b98cff" },
+];
+
+function ScoreBar({ factors }: { factors: RankFactors }) {
+  const f = factors as Record<string, number | undefined>;
+  const present = FACTOR_META.filter((m) => f[m.key] != null);
+  if (!present.length) return null;
+  return (
+    <div style={{ padding: "4px 2px" }}>
+      <div className="row" style={{ height: 9, borderRadius: 6, overflow: "hidden", marginBottom: 9 }}>
+        {present.map((m) => <div key={m.key} style={{ flex: f[m.key] ?? 0, background: m.color }} />)}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "5px 14px" }}>
+        {present.map((m) => (
+          <div key={m.key} className="row" style={{ gap: 7, fontSize: 11.5 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: m.color }} />
+            <span style={{ color: "var(--text-dim)" }}>{m.label}</span>
+            <span className="spacer" /><span className="mono">{Math.round((f[m.key] ?? 0) * 100)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function SignalPanel({ signals }: { signals: string[] }) {
   if (!signals.length) return <div style={{ padding: "4px 2px", fontSize: 12, color: "var(--text-faint)" }}>No named signals returned for this moment.</div>;
@@ -33,9 +67,12 @@ function SignalPanel({ signals }: { signals: string[] }) {
   );
 }
 
-export function CandidateCard({ c, selected, onToggle, onAdjust, onMerge }: { c: Candidate; selected: boolean; onToggle: (id: string) => void; onAdjust?: (c: Candidate) => void; onMerge?: (c: Candidate) => void }) {
-  const [showSignals, setShowSignals] = useState(false);
+export function CandidateCard({ c, selected, onToggle, onAdjust, onMerge, dynScore }: { c: Candidate; selected: boolean; onToggle: (id: string) => void; onAdjust?: (c: Candidate) => void; onMerge?: (c: Candidate) => void; dynScore?: number }) {
+  const [showScore, setShowScore] = useState(false);
   const [hover, setHover] = useState(false);
+  // the headline number: the live reweighted score when ranking, else the engine's default score,
+  // else (a pre-rank job with no score) the matched-signal count — never a fabricated value.
+  const headline = dynScore ?? (c.score != null ? Math.round(c.score) : c.signals.length);
   return (
     <div className="card" style={{ overflow: "hidden", borderColor: selected ? "var(--accent)" : "var(--line)", transition: "border-color .15s" }}>
       <div className="row" style={{ alignItems: "stretch" }}>
@@ -53,13 +90,18 @@ export function CandidateCard({ c, selected, onToggle, onAdjust, onMerge }: { c:
             <Chip tone="acc">{c.mode}</Chip>
             <span className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)" }}>{fmtTC(c.start)} → {fmtTC(c.end)} · {Math.round(c.end - c.start)}s</span>
             <span className="spacer" />
-            <button className="chip" style={{ cursor: "pointer", color: "var(--accent-2)" }} onClick={() => setShowSignals((s) => !s)} aria-expanded={showSignals} title="Matched signals (glass-box)"><Icon name="star" size={12} />{c.signals.length}<Icon name={showSignals ? "chevD" : "chevR"} size={11} /></button>
+            <button className="chip" style={{ cursor: "pointer", color: "var(--accent-2)" }} onClick={() => setShowScore((s) => !s)} aria-expanded={showScore} title="Score & factors (glass-box)"><Icon name="star" size={12} />{headline}<Icon name={showScore ? "chevD" : "chevR"} size={11} /></button>
           </div>
           <div style={{ fontWeight: 600, fontSize: 15.5, marginBottom: 7, fontFamily: "var(--font-display)" }}>{c.title}</div>
           <div className="row" style={{ gap: 8, marginBottom: 8, color: "var(--accent)", fontSize: 11.5, fontWeight: 600, whiteSpace: "nowrap" }}><Icon name="sparkles" size={13} />WHY THIS WORKS</div>
           <p style={{ margin: 0, color: "var(--text-dim)", fontSize: 13, lineHeight: 1.5 }}>{c.why}</p>
           {c.excerpt && <div style={{ marginTop: 10, padding: "9px 11px", borderLeft: "2px solid var(--line-str)", background: "var(--bg-1)", borderRadius: "0 8px 8px 0", fontSize: 12.5, color: "var(--text-dim)", fontStyle: "italic" }}>“{c.excerpt}”</div>}
-          {showSignals && <div style={{ marginTop: 12 }}><SignalPanel signals={c.signals} /></div>}
+          {showScore && (
+            <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+              {c.factors && <ScoreBar factors={c.factors} />}
+              <SignalPanel signals={c.signals} />
+            </div>
+          )}
         </div>
       </div>
       <div className="row" style={{ padding: "10px 14px", borderTop: "1px solid var(--line)", gap: 8, background: "var(--bg-1)" }}>
@@ -115,6 +157,10 @@ export function DiscoveryBody({ candidates, sourceId, finding }: { candidates: C
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
   const [ranges, setRanges] = useState<Record<string, { start: number; end: number }>>({});
   const [adjust, setAdjust] = useState<Candidate | null>(null);
+  const [showRank, setShowRank] = useState(false);
+  // Slider weights for the glass-box reweight (the demo's defaults, arc↔emotion swapped for the
+  // real engine factor). They drive scoreFromFactors — the same transparent sum the engine uses.
+  const [weights, setWeights] = useState<Record<string, number>>({ hook: 3, self_contained: 2, arc: 1, energy: 2, length_fit: 1 });
 
   // merge saved in/out adjustments so the cards, footage total, and the render all use them
   const merged = candidates.map((c) => (ranges[c.id] ? { ...c, start: ranges[c.id].start, end: ranges[c.id].end } : c));
@@ -123,6 +169,12 @@ export function DiscoveryBody({ candidates, sourceId, finding }: { candidates: C
   const toggle = (id: string) => setOverrides((o) => { const c = candidates.find((x) => x.id === id); return { ...o, [id]: !(o[id] ?? c?.sel ?? false) }; });
   const view = mode === "All" ? merged : merged.filter((c) => c.mode.toLowerCase() === mode.toLowerCase());
   const countFor = (m: string) => (m === "All" ? merged.length : merged.filter((c) => c.mode.toLowerCase() === m.toLowerCase()).length);
+
+  // Live reweighted score (client mirror of the engine) + score-sorted display. `view` stays in
+  // time order so "Merge next" always extends to the next-in-time moment, regardless of sort.
+  const scoreOf = (c: Candidate) => scoreFromFactors(c.factors, weights);
+  const display = showRank ? [...view].sort((a, b) => scoreOf(b) - scoreOf(a)) : view;
+  const timeNext = (c: Candidate) => { const i = view.findIndex((x) => x.id === c.id); return i >= 0 ? view[i + 1] : undefined; };
 
   // The mode tabs FILTER the already-found candidates — instant, no re-scan, nothing lost.
   // Finding more is the explicit action below; candidates accumulate (mapCandidates), so a new
@@ -134,10 +186,9 @@ export function DiscoveryBody({ candidates, sourceId, finding }: { candidates: C
       title: mode === "All" ? "Scanning every mode" : `Finding more ${mode.toLowerCase()} moments`,
       body: "New moments appear here as each scan finishes — your current picks stay put." });
   };
-  // "Merge next": extend this clip's out-point to the next candidate's end (one clip spanning both).
+  // "Merge next": extend this clip's out-point to the next-in-time candidate's end (one clip spanning both).
   const mergeNext = (c: Candidate) => {
-    const idx = view.findIndex((x) => x.id === c.id);
-    const next = view[idx + 1];
+    const next = timeNext(c);
     if (!next) return;
     setRanges((r) => ({ ...r, [c.id]: { start: c.start, end: next.end } }));
     setOverrides((o) => ({ ...o, [c.id]: true, [next.id]: false }));
@@ -154,8 +205,33 @@ export function DiscoveryBody({ candidates, sourceId, finding }: { candidates: C
           })}
         </div>
         <div className="spacer" />
+        <Btn variant={showRank ? "primary" : "ghost"} icon="chart" onClick={() => setShowRank((s) => !s)} disabled={!view.some((c) => c.factors)} title={view.some((c) => c.factors) ? "Rank by the glass-box opportunity score" : "Scores appear once a scan finishes"}>Rank by score</Btn>
         <Btn variant="ghost" icon="refresh" onClick={findMore}>{mode === "All" ? "Scan all modes" : `Find more ${mode.toLowerCase()}`}</Btn>
       </div>
+
+      {/* Glass-box reweight: drag a factor's importance → the scores + order update instantly (the
+          same transparent Σ(factor·weight) the engine's moments.rank / POST …/rank computes). */}
+      {showRank && !finding && view.length > 0 && (
+        <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+          <div className="row" style={{ marginBottom: 14 }}>
+            <div className="eyebrow">Reweight ranking factors</div>
+            <span className="spacer" />
+            <span className="mono" style={{ fontSize: 11, color: "var(--text-faint)" }}>glass-box — sorted high → low</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 18 }}>
+            {FACTOR_META.map((m) => (
+              <div key={m.key}>
+                <div className="row" style={{ marginBottom: 6 }}>
+                  <span style={{ fontSize: 12, fontWeight: 600 }}>{m.label}</span>
+                  <span className="spacer" />
+                  <span className="mono" style={{ fontSize: 11, color: "var(--text-dim)" }}>{weights[m.key]}×</span>
+                </div>
+                <input type="range" min={0} max={5} value={weights[m.key]} onChange={(e) => setWeights((w) => ({ ...w, [m.key]: +e.target.value }))} style={{ width: "100%", accentColor: "var(--accent)" }} aria-label={m.label + " weight"} />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Existing candidates always stay on screen — a scan-in-progress shows a banner above them,
           never a wipe-to-skeletons (that was the bug). Skeletons only when there's nothing yet. */}
@@ -167,7 +243,7 @@ export function DiscoveryBody({ candidates, sourceId, finding }: { candidates: C
             </div>
           )}
           <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingBottom: sel.length > 0 ? 80 : 0 }}>
-            {view.map((c, i) => <CandidateCard key={c.id} c={c} selected={isSel(c)} onToggle={toggle} onAdjust={setAdjust} onMerge={i < view.length - 1 ? mergeNext : undefined} />)}
+            {display.map((c) => <CandidateCard key={c.id} c={c} selected={isSel(c)} onToggle={toggle} onAdjust={setAdjust} onMerge={timeNext(c) ? mergeNext : undefined} dynScore={showRank ? scoreOf(c) : undefined} />)}
           </div>
         </>
       )}

@@ -3,7 +3,7 @@
 import { createContext, useContext, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { SpoolApiClient } from "@spool/api-client";
-import type { ClipJobView, EventsSnapshot, TranscriptWord } from "@spool/types";
+import type { ClipJobView, EventsSnapshot, RankFactors, TranscriptWord } from "@spool/types";
 import { useEngine, useEngineQuery, useLive } from "@/lib/engine-context";
 
 /* The demo's `useSpool()` context, backed by the LIVE engine instead of mock data.
@@ -32,11 +32,29 @@ export interface SpoolDep { id: string; name: string; note: string; status: stri
 export interface SpoolDownload { id: string; title: string; src: string; prog: number; status: string; size: string; speed: string; eta: string; err?: string | null }
 export interface Toast { id: number; icon?: string; tone?: string; title: string; body?: string }
 
-/** A discovery candidate, mapped from a `find_moments` job result. Glass-box = real named
- *  `signals` + a real transcript `excerpt` (no fabricated score; `rank`'s score is Phase 3). */
+/** A discovery candidate, mapped from a `find_moments` job result. Glass-box = a real `score`
+ *  that decomposes into named, reweightable `factors` (engine `moments.rank`), the effective
+ *  `weights` used, plus the real named `signals` cues + a real transcript `excerpt`. */
 export interface Candidate {
   id: string; title: string; start: number; end: number; mode: string;
   why: string; excerpt: string; signals: string[]; sel: boolean; source_id: string;
+  score?: number; factors?: RankFactors; weights?: RankFactors;
+}
+
+/** The five glass-box ranking factors (engine snake_case keys), in display order. */
+export const RANK_FACTORS = ["hook", "self_contained", "arc", "energy", "length_fit"] as const;
+
+/** Client mirror of the engine's transparent score: round(100 · Σ(factorₖ·weightₖ) / Σweightₖ),
+ *  factors in [0,1]. Identical math to `clip.moments.rank`, so the Discovery reweight slider stays
+ *  instant (no server round-trip per tick, spec §6.4) yet equals what `POST /sources/<id>/rank`
+ *  returns. Missing factors drop out of both sides; an all-zero weight vector scores 0. */
+export function scoreFromFactors(factors: RankFactors = {}, weights: RankFactors = {}): number {
+  const f = factors as Record<string, number | undefined>;
+  const w = weights as Record<string, number | undefined>;
+  const ks = RANK_FACTORS.filter((k) => f[k] != null);
+  const tw = ks.reduce((a, k) => a + (w[k] ?? 0), 0);
+  if (tw <= 0) return 0;
+  return Math.round((100 * ks.reduce((a, k) => a + (f[k] ?? 0) * (w[k] ?? 0), 0)) / tw);
 }
 
 export interface AgentMessage {
@@ -209,6 +227,7 @@ export function mapCandidates(snap: EventsSnapshot | null, sourceId: string | un
         id: `${job.id}-${i}`, title: m.title, start: m.start, end: m.end, mode: cap(m.mode),
         why: m.rationale, excerpt: words ? excerptFor(words, m.start, m.end) : "", signals: m.signals ?? [],
         sel: out.length < 3, source_id: sourceId, // the first few stay pre-selected for a quick "Make clips"
+        score: m.score, factors: m.factors, weights: m.weights, // the real glass-box rank (engine moments.rank)
       });
     });
   }

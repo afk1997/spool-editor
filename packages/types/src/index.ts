@@ -295,7 +295,18 @@ export interface TranscribeJobView {
 
 export type ClipKind = "moments" | "cut" | "reframe" | "caption" | "export" | "pipeline";
 
-/** One moment from a `find_moments` job's `result.candidates`. */
+/** The glass-box ranking factors (each 0–1) — named + reweightable, never an opaque 0–99
+ *  (spec §5 Phase 3 / §6 glass-box rule). The engine returns snake_case keys. */
+export interface RankFactors {
+  hook?: number;
+  self_contained?: number;
+  arc?: number;
+  energy?: number;
+  length_fit?: number;
+}
+
+/** One moment from a `find_moments` job's `result.candidates`. The engine attaches the
+ *  glass-box `score` (0–100) + its `factors` + the effective `weights` used (see `moments.rank`). */
 export interface MomentCandidate {
   start: number;
   end: number;
@@ -304,6 +315,9 @@ export interface MomentCandidate {
   mode: string;
   signals: string[];
   source_id?: string;
+  score?: number;
+  factors?: RankFactors;
+  weights?: RankFactors;
 }
 
 /** A clip/render job's `result` — fields present depend on `kind`. */
@@ -311,6 +325,7 @@ export interface ClipJobResult {
   candidates?: MomentCandidate[];
   count?: number;
   mode?: string;
+  weights?: RankFactors;
   clip_id?: string;
   clip_path?: string;
   reframed_path?: string;
