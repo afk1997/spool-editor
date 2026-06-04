@@ -92,13 +92,44 @@ def _kept_spans(words_path, start: float, end: float) -> list:
 
 
 class ClipRunner:
-    def __init__(self, *, download_dir, job_manager, clip_manager, settings_store=None):
+    def __init__(self, *, download_dir, job_manager, clip_manager, settings_store=None,
+                 brand_kits_store=None):
         self.download_dir = Path(download_dir)
         self.job_manager = job_manager
         self.clip_manager = clip_manager
         # Optional settings.SettingsStore — its in-memory get() is read per render so a
         # ``PATCH /settings`` is hot (no file re-read; the same object the API mutates).
         self.settings_store = settings_store
+        # Optional brand_kits.BrandKitStore — lets the engine resolve a referenced ``brand_kit_id``
+        # into its caption look at produce/render time (so a recipe's brand kit actually burns in,
+        # the same path a manual kit-apply uses — the golden rule).
+        self.brand_kits = brand_kits_store
+
+    def _apply_brand_kit(self, params: dict) -> dict:
+        """Fold a referenced brand kit's look into the caption params so a ``brand_kit_id`` (carried
+        by a recipe / the render pipeline) actually burns in — identical to applying the kit manually
+        via /captions. The kit's caption preset defines the ``style``; its overrides / watermark /
+        lower-third fill any the caller didn't set explicitly (an explicit param always wins). No id /
+        no store / unknown kit → params unchanged."""
+        kit_id = params.get("brand_kit_id")
+        if not kit_id or self.brand_kits is None:
+            return params
+        try:
+            kit = self.brand_kits.get(kit_id)
+        except Exception:
+            kit = None
+        if not kit:
+            return params
+        out = dict(params)
+        if kit.get("caption_preset"):
+            out["style"] = kit["caption_preset"]            # the kit defines the caption look
+        if kit.get("caption_overrides") is not None and out.get("overrides") is None:
+            out["overrides"] = kit["caption_overrides"]
+        if kit.get("watermark") and not out.get("watermark"):
+            out["watermark"] = kit["watermark"]
+        if kit.get("lower_third") and not out.get("lower_third"):
+            out["lower_third"] = kit["lower_third"]
+        return out
 
     def _setting(self, key, default):
         """Read one hot default from the settings store, tolerating its absence."""
@@ -272,6 +303,9 @@ class ClipRunner:
         meta = self.load_clip_meta(clip_id) or {}
         if meta.get("source_id"):
             job.source_id = meta["source_id"]
+        # Resolve a referenced brand kit into the caption look (style/overrides/watermark/
+        # lower-third) before building the caption — so produce/render apply it like a manual kit.
+        params = self._apply_brand_kit(params)
         words_path = self.source_paths(meta["source_id"])[1] if meta.get("source_id") else None
         if not words_path:
             raise ValueError(f"clip {clip_id!r} has no source transcript to caption from")
@@ -405,6 +439,8 @@ class ClipRunner:
                           "recipe_id": recipe.get("id"), "auto": True}
                 if recipe.get("fast") is not None:
                     params["fast"] = bool(recipe["fast"])
+                if recipe.get("brand_kit_id"):
+                    params["brand_kit_id"] = recipe["brand_kit_id"]   # the kit burns in at the caption step
                 if recipe.get("watch_id"):
                     params["watch_id"] = recipe["watch_id"]
                 jid = self.clip_manager.submit(

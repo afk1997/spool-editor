@@ -362,6 +362,79 @@ def test_caption_forwards_brandkit_watermark(runner, monkeypatch):
     assert seen["watermark"] == "@acme" and seen["lower_third"] == "Ep. 42"
 
 
+class _FakeKits:
+    """Stand-in for brand_kits.BrandKitStore — only .get(id) is read by the runner."""
+    def __init__(self, kits):
+        self._k = kits
+
+    def get(self, kid):
+        k = self._k.get(kid)
+        return dict(k) if k else None
+
+
+_ACME_KIT = {"id": "kitX", "name": "Acme", "caption_preset": "karaoke",
+             "caption_overrides": {"highlight": "#FF0000"}, "watermark": "@acme", "lower_third": "Ep. 42"}
+
+
+def _runner_with_kit(tmp_path, kit=_ACME_KIT):
+    dl = tmp_path / "downloads"
+    dl.mkdir()
+    (dl / "src1.mp4").write_bytes(b"MEDIA")
+    jm = _FakeJM({"src1": str(dl / "src1.mp4")})
+    return cr.ClipRunner(download_dir=dl, job_manager=jm, clip_manager=_FakeCM(),
+                         brand_kits_store=_FakeKits({kit["id"]: kit}))
+
+
+def test_caption_resolves_brand_kit_id_into_the_burned_look(tmp_path, monkeypatch):
+    """A brand_kit_id in the caption params (how produce/render reference a kit) must resolve to the
+    kit's caption preset + overrides + watermark + lower-third — the SAME look as applying it
+    manually. Previously brand_kit_id was a no-op everywhere except the client-resolved /captions."""
+    runner = _runner_with_kit(tmp_path)
+    _words_file(runner)
+    _seed_clip(runner, files=("clip.mp4",))
+    seen = {}
+    _patch(monkeypatch, "captioner", "generate",
+           lambda w, **kw: (seen.update(kw), Path(kw["out_ass_path"]).write_text("[ass]"))[-1] or kw["out_ass_path"])
+    _patch(monkeypatch, "captioner", "burn", lambda v, a, out, **kw: (Path(out).write_bytes(b"C"), out)[-1])
+
+    runner.caption_target(clip_id="clipA", params={"brand_kit_id": "kitX"})(_job("caption", clip_id="clipA"))
+
+    assert seen["style"] == "karaoke"                         # kit's caption preset defines the look
+    assert seen["watermark"] == "@acme" and seen["lower_third"] == "Ep. 42"
+    assert seen["overrides"] == {"highlight": "#FF0000"}
+
+
+def test_caption_explicit_params_win_over_brand_kit(tmp_path, monkeypatch):
+    """An explicitly-passed watermark/lower-third beats the kit's (the kit only fills what's unset)."""
+    runner = _runner_with_kit(tmp_path)
+    _words_file(runner)
+    _seed_clip(runner, files=("clip.mp4",))
+    seen = {}
+    _patch(monkeypatch, "captioner", "generate",
+           lambda w, **kw: (seen.update(kw), Path(kw["out_ass_path"]).write_text("[ass]"))[-1] or kw["out_ass_path"])
+    _patch(monkeypatch, "captioner", "burn", lambda v, a, out, **kw: (Path(out).write_bytes(b"C"), out)[-1])
+
+    runner.caption_target(clip_id="clipA",
+                          params={"brand_kit_id": "kitX", "watermark": "@override"})(_job("caption", clip_id="clipA"))
+
+    assert seen["watermark"] == "@override"                   # explicit wins
+    assert seen["lower_third"] == "Ep. 42"                    # kit still fills the rest
+
+
+def test_produce_target_threads_recipe_brand_kit_into_pipelines(tmp_path, monkeypatch):
+    """A recipe's brand_kit_id must ride into every produced clip's pipeline params (it was dropped
+    before — the recipe brand-kit picker was a no-op at render)."""
+    runner = _runner_with_kit(tmp_path)
+    _words_file(runner)
+    _patch(monkeypatch, "moments", "find_moments",
+           lambda words_path, **kw: [{"start": 0.0, "end": 18.0, "title": "m", "rationale": "",
+                                      "mode": kw["mode"], "signals": []}])
+    recipe = {"id": "r1", "content_mode": "funny", "count": 1, "brand_kit_id": "kitX"}
+    runner.produce_target(source_id="src1", recipe=recipe)(_job("produce", source_id="src1"))
+
+    assert runner.clip_manager.submitted[0]["params"]["brand_kit_id"] == "kitX"
+
+
 # ---- export ----------------------------------------------------------
 
 def test_export_target_prefers_captioned_and_writes_render(runner, monkeypatch):

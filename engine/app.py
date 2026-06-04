@@ -130,15 +130,19 @@ def create_app() -> Flask:
         store_path=download_dir / "clip_jobs.json",
     )
     app.extensions["trove.clips"] = clip_manager
+    # Brand kits — persisted reusable looks applied across a project's clips (spec §5 P2). Built
+    # before the ClipRunner so the engine can resolve a recipe's/render's brand_kit_id into its
+    # caption look (the same store the CRUD API mutates → manual + automated apply never diverge).
+    brand_kit_store = brand_kits.BrandKitStore(download_dir / "brand_kits.json")
+    app.extensions["trove.brand_kits"] = brand_kit_store
     clip_runner_inst = clip_runner.ClipRunner(
         download_dir=download_dir,
         job_manager=job_manager,
         clip_manager=clip_manager,
         settings_store=settings_store,
+        brand_kits_store=brand_kit_store,
     )
     app.extensions["trove.clip_runner"] = clip_runner_inst
-    # Brand kits — persisted reusable looks applied across a project's clips (spec §5 P2).
-    app.extensions["trove.brand_kits"] = brand_kits.BrandKitStore(download_dir / "brand_kits.json")
     # Recipes — saved end-to-end pipelines that drive render.pipeline + watch-folder (spec §5 P3).
     recipe_store = recipes.RecipeStore(download_dir / "recipes.json")
     app.extensions["trove.recipes"] = recipe_store

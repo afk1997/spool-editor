@@ -1784,16 +1784,21 @@ def render_pipeline(source_id):
     mode = str(data.get("mode") or rec.get("reframe_mode") or "pan")
     preset = str(data.get("preset") or rec.get("platform") or "tiktok")
     style = str(data.get("style") or rec.get("caption_preset") or "opus")
+    # A brand kit (explicit, else the recipe's) burns its look in at the caption step.
+    brand_kit_id = data.get("brand_kit_id") or rec.get("brand_kit_id")
     # stop_after='reframe' = the "Make clips" path: cut + auto-reframe to review, no burn/export.
     stop_after = data.get("stop_after")
     if (aspect not in _CLIP_ASPECTS or mode not in _CLIP_MODES
             or preset not in _CLIP_PRESETS or style not in _CAPTION_STYLES
+            or (data.get("brand_kit_id") is not None and not isinstance(data["brand_kit_id"], str))
             or (stop_after is not None and stop_after != "reframe")):
         return jsonify({"error": "bad_params"}), 400
     start, end = rng
     clip_id, render_id = uuid.uuid4().hex[:10], uuid.uuid4().hex[:10]
     params = {"start": start, "end": end, "aspect": aspect, "mode": mode,
               "style": style, "preset": preset}
+    if brand_kit_id:
+        params["brand_kit_id"] = str(brand_kit_id)
     fast = data.get("fast") if data.get("fast") is not None else rec.get("fast")
     if fast is not None:
         params["fast"] = bool(fast)
