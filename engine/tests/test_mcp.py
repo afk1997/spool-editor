@@ -288,3 +288,45 @@ def test_resolve_transport_prefers_env_then_settings_then_stdio():
     assert _resolve_transport({}, lambda: {"mcp_transport": "carrier-pigeon"}) == "stdio"
     # nothing set anywhere → stdio
     assert _resolve_transport({}, lambda: {}) == "stdio"
+
+
+# ---- produce_clips kwargs-collision guard ----
+
+def test_produce_clips_strips_reserved_keys(monkeypatch):
+    """An inline ``recipe`` that happens to carry ``source_id`` / ``recipe_id`` must not
+    collide with the positional/keyword args of ``_client.produce`` (TypeError: multiple
+    values). The tool strips those reserved keys before the splat, so the call stays clean
+    (mirrors the ``produce_bad`` no-Traceback assertion)."""
+    import mcp_server
+
+    seen: dict = {}
+
+    def fake_produce(source_id, *, recipe_id=None, **recipe):
+        seen["source_id"] = source_id
+        seen["recipe_id"] = recipe_id
+        seen["recipe"] = recipe
+        return {"id": "p1", "kind": "produce", "status": "queued"}
+
+    monkeypatch.setattr(mcp_server._client, "produce", fake_produce)
+    server = mcp_server._build_server()
+
+    async def _call(recipe):
+        res = await server.call_tool(
+            "produce_clips", {"source_id": "src1", "recipe": recipe})
+        # call_tool returns a list of content parts; parse the text payload.
+        parts = res[0] if isinstance(res, tuple) else res
+        return json.loads(parts[0].text)
+
+    # A recipe colliding on the positional source_id — would raise TypeError pre-fix.
+    out = asyncio.run(_call({"source_id": "x", "count": 3}))
+    assert out == {"id": "p1", "kind": "produce", "status": "queued"}
+    assert "Traceback" not in str(out)
+    assert seen["source_id"] == "src1"  # the real positional, not the recipe's "x"
+    assert seen["recipe"] == {"count": 3}  # reserved key dropped
+
+    # A recipe colliding on the keyword recipe_id — same clean outcome.
+    out = asyncio.run(_call({"recipe_id": "r", "aspect": "1:1"}))
+    assert out == {"id": "p1", "kind": "produce", "status": "queued"}
+    assert "Traceback" not in str(out)
+    assert seen["recipe_id"] is None  # the explicit (empty) recipe_id, not the recipe's "r"
+    assert seen["recipe"] == {"aspect": "1:1"}

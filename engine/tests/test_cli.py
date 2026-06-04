@@ -85,6 +85,14 @@ def test_cmd_produce_with_recipe_id(monkeypatch, capsys):
     assert captured["body"] == {"recipe_id": "r1"}
 
 
+def test_cmd_produce_recipe_id_and_body_are_mutually_exclusive():
+    """--recipe-id (saved recipe) and --body (inline recipe) say the same thing two ways;
+    passing both is a clear usage error (argparse SystemExit), not a silent --body drop."""
+    p = cli.build_parser()
+    with pytest.raises(SystemExit):
+        p.parse_args(["produce", "src1", "--recipe-id", "r1", "--body", '{"count":3}'])
+
+
 def test_cmd_recipe_crud_verbs_and_paths(monkeypatch, capsys):
     calls = []
 
@@ -128,6 +136,9 @@ def test_cli_has_full_mcp_feature_parity():
     registered CLI subcommand. This catches drift in either direction:
     adding an MCP tool without a CLI command, OR removing a CLI command
     that the map still claims exists."""
+    # _build_server() SystemExits without the optional `mcp` SDK; skip (don't fail)
+    # in envs that lack it, mirroring test_mcp.py's module-level importorskip.
+    pytest.importorskip("mcp")
     # 1. Live MCP tool list (from the actual FastMCP instance).
     import asyncio
     import mcp_server

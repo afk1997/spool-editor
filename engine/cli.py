@@ -1174,8 +1174,11 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- automation: produce / recipes / watches / brand kits (Phase 3) ----
     s = _sub("produce", help="apply a recipe to a source end-to-end → the review queue")
     s.add_argument("source_id")
-    s.add_argument("--recipe-id", dest="recipe_id", default="", help="a saved recipe id")
-    s.add_argument("--body", default=None, help="inline recipe JSON / @file / - (stdin), when no --recipe-id")
+    # --recipe-id (saved recipe) and --body (inline recipe) are two ways to say the same
+    # thing; passing both is a usage error rather than silently dropping one.
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--recipe-id", dest="recipe_id", default="", help="a saved recipe id")
+    g.add_argument("--body", default=None, help="inline recipe JSON / @file / - (stdin), when no --recipe-id")
     s.set_defaults(func=cmd_produce)
 
     s = _sub("recipes", help="list saved recipes")

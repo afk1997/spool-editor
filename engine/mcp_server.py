@@ -481,7 +481,10 @@ def _build_server():
         OR an inline ``recipe`` dict (content_mode/count/aspect/reframe_mode/caption_preset/platform/
         fast/weights/brand_kit_id). Returns a produce clip-job; poll ``get_clip_job`` for the fan-out.
         Clips are NOT published (Phase 4) — they land for review (the honest gate)."""
-        return _safe(lambda: _client.produce(source_id, recipe_id=recipe_id or None, **(recipe or {})))
+        # Strip the reserved (non-inline) keys so they can't collide with the positional
+        # ``source_id`` / keyword ``recipe_id`` in the splat (TypeError: multiple values).
+        recipe = {k: v for k, v in (recipe or {}).items() if k not in ("source_id", "recipe_id")}
+        return _safe(lambda: _client.produce(source_id, recipe_id=recipe_id or None, **recipe))
 
     @mcp.tool()
     def list_recipes() -> dict:
