@@ -68,6 +68,23 @@ MCP_TO_CLI: dict[str, str] = {
     "get_clip_job":            "clip",
     "cancel_clip_job":         "clip-cancel",
     "dismiss_clip_job":        "clip-rm",
+    # automation: produce / recipes / watches / brand kits (Phase 3)
+    "produce_clips":           "produce",
+    "list_recipes":            "recipes",
+    "get_recipe":              "recipe",
+    "create_recipe":           "recipe-create",
+    "update_recipe":           "recipe-update",
+    "delete_recipe":           "recipe-rm",
+    "list_watches":            "watches",
+    "get_watch":               "watch",
+    "create_watch":            "watch-create",
+    "update_watch":            "watch-update",
+    "delete_watch":            "watch-rm",
+    "scan_watch":              "watch-scan",
+    "list_brand_kits":         "brand-kits",
+    "create_brand_kit":        "brand-create",
+    "update_brand_kit":        "brand-update",
+    "delete_brand_kit":        "brand-rm",
 }
 
 
@@ -146,6 +163,26 @@ def get(path: str, **kw):
 
 def post(path: str, body: dict | None = None, **kw):
     return _request("POST", path, body=body, **kw)
+
+
+def patch(path: str, body: dict | None = None, **kw):
+    return _request("PATCH", path, body=body, **kw)
+
+
+def delete(path: str, **kw):
+    return _request("DELETE", path, **kw)
+
+
+def _read_json_arg(value: str | None) -> dict:
+    """A JSON object from an inline string, an ``@file`` path, or stdin (``-`` / omitted)."""
+    if value in (None, "-"):
+        raw = sys.stdin.read()
+    elif value.startswith("@"):
+        with open(value[1:], encoding="utf-8") as f:
+            raw = f.read()
+    else:
+        raw = value
+    return json.loads(raw)
 
 
 # ----- formatting -----------------------------------------------------
@@ -883,6 +920,36 @@ def cmd_clip_action(args, action: str) -> int:
     return 0
 
 
+# ----- automation: produce / recipes / watches / brand kits (Phase 3) ----------
+# Thin wrappers over the same /api/v1 surface the studio + MCP use (the golden rule). CRUD bodies
+# come as JSON (inline, @file, or stdin); reads/deletes just take an id.
+
+def cmd_produce(args) -> int:
+    body = {"recipe_id": args.recipe_id} if args.recipe_id else (_read_json_arg(args.body) if args.body else {})
+    _print_clip(post(f"/api/v1/sources/{args.source_id}/produce", body),
+                json_out=getattr(args, "json", False))
+    return 0
+
+
+def cmd_recipes(args) -> int:    _print_json(get("/api/v1/recipes")); return 0
+def cmd_recipe(args) -> int:     _print_json(get(f"/api/v1/recipes/{args.id}")); return 0
+def cmd_recipe_create(args) -> int: _print_json(post("/api/v1/recipes", _read_json_arg(args.body))); return 0
+def cmd_recipe_update(args) -> int: _print_json(patch(f"/api/v1/recipes/{args.id}", _read_json_arg(args.body))); return 0
+def cmd_recipe_rm(args) -> int:  delete(f"/api/v1/recipes/{args.id}"); print(f"{args.id}: deleted"); return 0
+
+def cmd_watches(args) -> int:    _print_json(get("/api/v1/watches")); return 0
+def cmd_watch(args) -> int:      _print_json(get(f"/api/v1/watches/{args.id}")); return 0
+def cmd_watch_create(args) -> int: _print_json(post("/api/v1/watches", _read_json_arg(args.body))); return 0
+def cmd_watch_update(args) -> int: _print_json(patch(f"/api/v1/watches/{args.id}", _read_json_arg(args.body))); return 0
+def cmd_watch_rm(args) -> int:   delete(f"/api/v1/watches/{args.id}"); print(f"{args.id}: deleted"); return 0
+def cmd_watch_scan(args) -> int: _print_json(post(f"/api/v1/watches/{args.id}/scan")); return 0
+
+def cmd_brand_kits(args) -> int: _print_json(get("/api/v1/brand-kits")); return 0
+def cmd_brand_create(args) -> int: _print_json(post("/api/v1/brand-kits", _read_json_arg(args.body))); return 0
+def cmd_brand_update(args) -> int: _print_json(patch(f"/api/v1/brand-kits/{args.id}", _read_json_arg(args.body))); return 0
+def cmd_brand_rm(args) -> int:   delete(f"/api/v1/brand-kits/{args.id}"); print(f"{args.id}: deleted"); return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     # `--json` lives on a parent parser so it works in EITHER position
     # (`trove --json list` or `trove list --json`). Argparse otherwise
@@ -1103,6 +1170,61 @@ def build_parser() -> argparse.ArgumentParser:
     s = _sub("clip-rm", help="drop a finished clip/render job")
     s.add_argument("id")
     s.set_defaults(func=lambda a: cmd_clip_action(a, "dismiss"))
+
+    # ---- automation: produce / recipes / watches / brand kits (Phase 3) ----
+    s = _sub("produce", help="apply a recipe to a source end-to-end → the review queue")
+    s.add_argument("source_id")
+    s.add_argument("--recipe-id", dest="recipe_id", default="", help="a saved recipe id")
+    s.add_argument("--body", default=None, help="inline recipe JSON / @file / - (stdin), when no --recipe-id")
+    s.set_defaults(func=cmd_produce)
+
+    s = _sub("recipes", help="list saved recipes")
+    s.set_defaults(func=cmd_recipes)
+    s = _sub("recipe", help="get one recipe")
+    s.add_argument("id")
+    s.set_defaults(func=cmd_recipe)
+    s = _sub("recipe-create", help="create a recipe (JSON: --body / @file / stdin)")
+    s.add_argument("--body", default=None)
+    s.set_defaults(func=cmd_recipe_create)
+    s = _sub("recipe-update", help="patch a recipe (JSON body)")
+    s.add_argument("id")
+    s.add_argument("--body", default=None)
+    s.set_defaults(func=cmd_recipe_update)
+    s = _sub("recipe-rm", help="delete a recipe")
+    s.add_argument("id")
+    s.set_defaults(func=cmd_recipe_rm)
+
+    s = _sub("watches", help="list folder/channel/playlist watches")
+    s.set_defaults(func=cmd_watches)
+    s = _sub("watch", help="get one watch")
+    s.add_argument("id")
+    s.set_defaults(func=cmd_watch)
+    s = _sub("watch-create", help="create a watch (JSON: --body / @file / stdin)")
+    s.add_argument("--body", default=None)
+    s.set_defaults(func=cmd_watch_create)
+    s = _sub("watch-update", help="patch a watch (JSON body)")
+    s.add_argument("id")
+    s.add_argument("--body", default=None)
+    s.set_defaults(func=cmd_watch_update)
+    s = _sub("watch-rm", help="delete a watch")
+    s.add_argument("id")
+    s.set_defaults(func=cmd_watch_rm)
+    s = _sub("watch-scan", help="reconcile a watch now (ingest new → produce)")
+    s.add_argument("id")
+    s.set_defaults(func=cmd_watch_scan)
+
+    s = _sub("brand-kits", help="list brand kits")
+    s.set_defaults(func=cmd_brand_kits)
+    s = _sub("brand-create", help="create a brand kit (JSON: --body / @file / stdin)")
+    s.add_argument("--body", default=None)
+    s.set_defaults(func=cmd_brand_create)
+    s = _sub("brand-update", help="patch a brand kit (JSON body)")
+    s.add_argument("id")
+    s.add_argument("--body", default=None)
+    s.set_defaults(func=cmd_brand_update)
+    s = _sub("brand-rm", help="delete a brand kit")
+    s.add_argument("id")
+    s.set_defaults(func=cmd_brand_rm)
 
     return p
 

@@ -71,6 +71,57 @@ def _cli_subcommand_names() -> set[str]:
     return names
 
 
+def test_cmd_produce_with_recipe_id(monkeypatch, capsys):
+    captured = {}
+
+    def fake_post(path, body=None, **kw):
+        captured["path"], captured["body"] = path, body
+        return {"id": "p1", "kind": "produce", "status": "queued"}
+
+    monkeypatch.setattr(cli, "post", fake_post)
+    rc = cli.main(["produce", "src1", "--recipe-id", "r1"])
+    assert rc == 0
+    assert captured["path"] == "/api/v1/sources/src1/produce"
+    assert captured["body"] == {"recipe_id": "r1"}
+
+
+def test_cmd_recipe_crud_verbs_and_paths(monkeypatch, capsys):
+    calls = []
+
+    def rec(verb):
+        def f(path, body=None, **kw):
+            calls.append((verb, path, body) if body is not None else (verb, path))
+            return {"recipes": []} if verb == "GET" else ({"id": "r9"} if verb != "DELETE" else None)
+        return f
+
+    monkeypatch.setattr(cli, "get", rec("GET"))
+    monkeypatch.setattr(cli, "post", rec("POST"))
+    monkeypatch.setattr(cli, "patch", rec("PATCH"))
+    monkeypatch.setattr(cli, "delete", rec("DELETE"))
+
+    assert cli.main(["recipes"]) == 0
+    assert cli.main(["recipe-create", "--body", '{"name":"R"}']) == 0
+    assert cli.main(["recipe-update", "r9", "--body", '{"count":3}']) == 0
+    assert cli.main(["recipe-rm", "r9"]) == 0
+
+    assert ("GET", "/api/v1/recipes") in calls
+    assert ("POST", "/api/v1/recipes", {"name": "R"}) in calls
+    assert ("PATCH", "/api/v1/recipes/r9", {"count": 3}) in calls
+    assert ("DELETE", "/api/v1/recipes/r9") in calls
+
+
+def test_cmd_watch_scan_posts(monkeypatch, capsys):
+    captured = {}
+
+    def fake_post(path, body=None, **kw):
+        captured["path"] = path
+        return {"ingested": [], "produced": [], "producing": {}, "pending": {}}
+
+    monkeypatch.setattr(cli, "post", fake_post)
+    rc = cli.main(["watch-scan", "w1"])
+    assert rc == 0 and captured["path"] == "/api/v1/watches/w1/scan"
+
+
 def test_cli_has_full_mcp_feature_parity():
     """Every MCP tool must have a CLI counterpart declared in
     cli.MCP_TO_CLI, and every value in that map must actually be a
