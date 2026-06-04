@@ -47,6 +47,55 @@ def test_reconcile_ingests_only_new_items():
     assert r["produced"] == [] and r["ingested"] == ["src-new.mp4"]
 
 
+def test_reconcile_retries_a_transient_ingest_failure_instead_of_dropping_it():
+    # Regression for the drop-on-transient-failure bug: the key used to be marked seen BEFORE ingest,
+    # so an ingest that returned None (a rare swallowed transient error) was dropped forever. Now a
+    # failed ingest is NOT marked seen — it's retried on a later tick, and succeeds once ingest does.
+    outcomes = iter([None, None, "src-x"])                            # fail, fail, then succeed
+    attempts = []
+
+    def ingest(w, k):
+        attempts.append(k)
+        return next(outcomes)
+
+    state = {"seen": [], "pending": {}, "produced": [], "producing": {}}
+    for _ in range(3):
+        watch = {"id": "w", "enabled": True, **state}
+        r = reconcile_watch(watch, list_items=lambda w: ["x.mp4"], ingest=ingest,
+                            transcript_done=lambda s: False, produce=lambda w, s: None,
+                            produce_status=_ok_status)
+        state = {k: r[k] for k in ("seen", "pending", "produced", "producing")}
+
+    assert attempts == ["x.mp4", "x.mp4", "x.mp4"]                    # retried each tick, not dropped
+    assert r["seen"] == ["x.mp4"]                                     # marked seen only once it landed
+    assert r["pending"] == {"x.mp4": "src-x"}                         # now awaiting transcript
+    assert r["ingested"] == ["src-x"]
+
+
+def test_reconcile_gives_up_on_a_persistently_bad_ingest_after_max_attempts():
+    from watcher import _MAX_INGEST_ATTEMPTS
+    # A permanently-bad item (ingest always fails) must NOT retry forever: after the bounded number
+    # of ticks it's marked seen and abandoned, so the watch stops hammering it.
+    attempts = []
+
+    def ingest(w, k):
+        attempts.append(k)
+        return None                                                  # never succeeds
+
+    state = {"seen": [], "pending": {}, "produced": [], "producing": {}}
+    for _ in range(_MAX_INGEST_ATTEMPTS + 3):
+        watch = {"id": "w", "enabled": True, **state}
+        r = reconcile_watch(watch, list_items=lambda w: ["bad.mp4"], ingest=ingest,
+                            transcript_done=lambda s: False, produce=lambda w, s: None,
+                            produce_status=_ok_status)
+        state = {k: r[k] for k in ("seen", "pending", "produced", "producing")}
+
+    assert len(attempts) == _MAX_INGEST_ATTEMPTS                      # retried, but bounded
+    assert r["seen"] == ["bad.mp4"]                                   # given up → marked seen
+    assert r["pending"] == {}                                         # no lingering retry marker
+    assert r["ingested"] == []                                        # nothing ever ingested
+
+
 def test_reconcile_marks_produced_only_when_the_produce_job_completes():
     # Regression for the premature-'produced' bug: produce() only ENQUEUES an async job, so a
     # source must move to 'producing' (tracking the job), and become 'produced' ONLY once that
@@ -92,14 +141,33 @@ def test_reconcile_retries_a_failed_produce_then_gives_up_after_max_attempts():
         statuses[jid] = "error"                                      # every produce fails outright
         return jid
 
-    state = {"seen": ["a.mp4"], "pending": {"a.mp4": "s1"}, "produced": [], "producing": {}}
-    for _ in range(_MAX_PRODUCE_ATTEMPTS + 3):
+    # Start with the source ALREADY producing (job-0, attempt 1) so each tick is a pure RETRY of an
+    # in-flight job — no step-2 enqueue muddies the per-tick count. The test controls the per-tick
+    # status (always "error"), so we can assert ONE retry per tick: exactly one new enqueue and the
+    # attempt count up by exactly one each tick (catches a same-tick retry-storm), bounded overall.
+    statuses["job-0"] = "error"
+    enqueued.append("job-0")
+    state = {"seen": ["a.mp4"], "pending": {}, "produced": [],
+             "producing": {"s1": {"job": "job-0", "attempts": 1}}}
+    for tick in range(_MAX_PRODUCE_ATTEMPTS + 3):
+        before_enqueued = len(enqueued)
+        prev_attempts = state["producing"].get("s1", {}).get("attempts")
         watch = {"id": "w", "enabled": True, **state}
         r = reconcile_watch(watch, list_items=lambda w: ["a.mp4"], ingest=lambda w, k: None,
                             transcript_done=lambda s: True, produce=produce,
                             produce_status=lambda j: statuses.get(j))
+        new_this_tick = len(enqueued) - before_enqueued
+        if prev_attempts is not None and prev_attempts < _MAX_PRODUCE_ATTEMPTS:
+            # still has retry budget: exactly one re-enqueue, attempt count up by exactly one.
+            assert new_this_tick == 1
+            assert r["producing"]["s1"]["attempts"] == prev_attempts + 1
+        else:
+            # exhausted (or already abandoned): no new enqueue, source dropped from producing.
+            assert new_this_tick == 0
+            assert "s1" not in r["producing"]
         state = {k: r[k] for k in ("seen", "pending", "produced", "producing")}
 
+    # job-0 (initial) + one re-enqueue per retry tick until the budget runs out → _MAX_PRODUCE_ATTEMPTS.
     assert len(enqueued) == _MAX_PRODUCE_ATTEMPTS                    # retried, but bounded
     assert state["produced"] == []                                   # never falsely marked produced
     assert state["producing"] == {}                                  # abandoned after exhausting retries

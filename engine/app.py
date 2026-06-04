@@ -648,22 +648,70 @@ def create_app() -> Flask:
             target=clip_runner_inst.produce_target(source_id=source_id, recipe=recipe))
 
     def _watch_produce_status(job_id):
-        """Terminal status of an enqueued produce job, so the reconciler only marks a source
-        produced on a confirmed ``done`` (and retries on ``error``). None if the job is gone."""
+        """Honest produce completion for the reconciler: produce-done == renders-done.
+
+        A produce job flips to DONE the instant it has ENQUEUED its per-moment render (pipeline)
+        jobs — long before any of them finishes. So we can't trust the produce job's own DONE; we
+        roll up the CHILD render jobs it recorded in ``result['clip_jobs']`` (each looked up via the
+        same clip job manager) into one terminal status the watcher acts on. This is a status rollup,
+        NOT a join — it never blocks a worker thread; the reconciler simply re-checks on later ticks
+        until the children settle. Returns:
+          - the produce job's OWN status if that is terminal-bad (``error``/``cancelled``) — honoured
+            directly so a failed/cancelled produce is retried/abandoned per the watcher's rules;
+          - ``done``  iff >= 1 child render reached DONE (at least one clip actually landed);
+          - ``error`` if every child ERRORED, OR the produce job is DONE with ZERO children (the
+            empty-candidates case — no moments → no clips → not a real "produced"; the bounded watch
+            retry re-attempts a few ticks then abandons);
+          - ``running`` otherwise (children still in flight). None if the produce job is gone."""
         cj = clip_manager.get(job_id) if job_id else None
-        return cj.status.value if cj else None
+        if cj is None:
+            return None
+        own = cj.status.value
+        if own in ("error", "cancelled"):
+            return own
+        children = (cj.result or {}).get("clip_jobs") or []
+        if own == "done" and not children:
+            return "error"            # DONE but produced nothing (empty candidates) — not "produced"
+        if not children:
+            return "running"          # produce still finding/ranking; no children enqueued yet
+        states = [clip_manager.get(c) for c in children]
+        statuses = [s.status.value for s in states if s is not None]
+        if any(st == "done" for st in statuses):
+            return "done"             # at least one render landed → honestly produced
+        if statuses and all(st == "error" for st in statuses):
+            return "error"            # every render failed → retry the whole produce
+        return "running"              # some children still queued/running
 
     def _watch_items(watch: dict):
         if watch.get("kind") == "folder":
             return watcher.list_folder_items(watch.get("target", ""))
         return watcher.list_playlist_items(watch.get("target", ""))
 
+    # Per-watch locks so the background poller and concurrent /scan threads can't double-ingest the
+    # SAME watch (its get→reconcile→set_state was a read-modify-write race: last-writer-wins lost
+    # state + duplicate ingests). PER-watch (not one global lock) because a single reconcile can
+    # block ~90s on yt-dlp — unrelated watches must still reconcile in parallel. A small meta-lock
+    # guards the lock dict itself. Single-process deploy, so an in-process lock is sufficient.
+    _watch_locks: dict[str, threading.Lock] = {}
+    _watch_locks_meta = threading.Lock()
+
+    def _watch_lock(watch_id: str) -> threading.Lock:
+        with _watch_locks_meta:
+            lk = _watch_locks.get(watch_id)
+            if lk is None:
+                lk = _watch_locks[watch_id] = threading.Lock()
+            return lk
+
     def _reconcile_one(watch: dict) -> dict:
-        r = watcher.reconcile_watch(watch, list_items=_watch_items, ingest=_watch_ingest,
-                                    transcript_done=_watch_transcript_done, produce=_watch_produce,
-                                    produce_status=_watch_produce_status)
-        watch_store.set_state(watch["id"], seen=r["seen"], pending=r["pending"],
-                              produced=r["produced"], producing=r["producing"])
+        # Re-read the latest persisted state UNDER the lock so a concurrent tick on the same watch
+        # can't clobber our get→reconcile→set_state with a stale snapshot.
+        with _watch_lock(watch["id"]):
+            fresh = watch_store.get(watch["id"]) or watch
+            r = watcher.reconcile_watch(fresh, list_items=_watch_items, ingest=_watch_ingest,
+                                        transcript_done=_watch_transcript_done, produce=_watch_produce,
+                                        produce_status=_watch_produce_status)
+            watch_store.set_state(fresh["id"], seen=r["seen"], pending=r["pending"],
+                                  produced=r["produced"], producing=r["producing"])
         return r
 
     def _reconcile_watch_by_id(watch_id: str):

@@ -25,6 +25,7 @@ with the engine functions mocked.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import uuid
@@ -32,6 +33,8 @@ from pathlib import Path
 
 import transcript_io
 from clip import captioner, cutter, exporter, face_track, moments, reframe, signals
+
+_log = logging.getLogger(__name__)
 
 
 def _scale_roi(roi: dict, width: int, height: int) -> dict:
@@ -434,6 +437,13 @@ class ClipRunner:
                 pass  # signals are additive glass-box extras; never fail production over them
             self.clip_manager.update_progress(job.id, 40, stage="rank")
             ranked = moments.rank(cands, weights=recipe.get("weights"))[:count]
+            if not ranked:
+                # No usable moments → submit nothing. Record the empty result (count=0, clip_jobs=[])
+                # so the watcher's terminal-status rollup treats a childless DONE produce as an error
+                # (not a false "produced") and the bounded watch-retry can re-attempt it. Log it so
+                # the no-op isn't silent.
+                _log.warning("produce for source %s yielded zero moments (recipe %s) — nothing to render",
+                             source_id, recipe.get("id"))
             submitted = []
             for c in ranked:
                 clip_id, render_id = uuid.uuid4().hex[:10], uuid.uuid4().hex[:10]

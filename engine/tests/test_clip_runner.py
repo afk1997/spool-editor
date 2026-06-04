@@ -199,6 +199,23 @@ def test_produce_target_overfetches_then_selects_top_n_by_recipe_weights(runner,
     assert job.result["count"] == 2 and len(job.result["clip_jobs"]) == 2 and job.result["recipe_id"] == "r1"
 
 
+def test_produce_target_records_empty_result_when_no_moments(runner, monkeypatch, caplog):
+    # Empty-candidates case (find_moments/rank yield nothing): produce must submit nothing AND record
+    # the empty result (count=0, clip_jobs=[]) so the watcher's rollup treats a childless DONE produce
+    # as an error (not a false "produced") and the bounded watch-retry can re-attempt. Logs the no-op.
+    _words_file(runner)
+    _patch(monkeypatch, "moments", "find_moments", lambda words_path, **kw: [])
+    recipe = {"id": "r1", "content_mode": "funny", "count": 3}
+    job = _job("produce", source_id="src1")
+    with caplog.at_level("WARNING"):
+        runner.produce_target(source_id="src1", recipe=recipe)(job)
+
+    assert runner.clip_manager.submitted == []                             # nothing rendered
+    assert job.result["count"] == 0 and job.result["clip_jobs"] == []      # empty case recorded
+    assert job.result["recipe_id"] == "r1"
+    assert any("zero moments" in r.message for r in caplog.records)        # not silent
+
+
 # ---- reframe ---------------------------------------------------------
 
 def _seed_clip(runner, clip_id="clipA", source_id="src1", *, start=2.0, end=12.0, files=("clip.mp4",)):
