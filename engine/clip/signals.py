@@ -13,8 +13,12 @@ Phase 3 (``moments.rank`` — coordinate, don't double-build).
 """
 from __future__ import annotations
 
+import base64
+import json
+import os
 import re
 import subprocess
+import tempfile
 
 # Tiny, transparent intensity lexicon — strong/charged words that mark a clip-worthy beat. NOT a
 # real sentiment model; a visible heuristic (the glass-box point is you can see exactly what fired).
@@ -87,6 +91,139 @@ def scene_density(media_path: str, start: float, end: float, threshold: float = 
         return None
     cuts = len(re.findall(r"pts_time:[0-9.]+", out))
     return round(cuts / dur, 4)
+
+
+def scene_cuts(media_path: str, start: float, end: float, threshold: float = 0.3) -> list[float] | None:
+    """Scene-cut timestamps (ABSOLUTE source seconds) within ``[start, end]`` via ffmpeg scene
+    detection — the editor timeline's Scenes lane. ``-ss`` makes ``showinfo`` pts_time window-relative,
+    so we add ``start`` back. ``None`` on failure (best-effort — never breaks the editor)."""
+    dur = max(0.05, float(end) - float(start))
+    try:
+        out = subprocess.run(
+            ["ffmpeg", "-nostdin", "-v", "info", "-ss", f"{float(start):.3f}", "-t", f"{dur:.3f}",
+             "-i", media_path, "-vf", f"select='gt(scene,{threshold})',showinfo", "-an", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=120,
+        ).stderr
+    except Exception:
+        return None
+    cuts = []
+    for m in re.finditer(r"pts_time:([0-9.]+)", out):
+        try:
+            cuts.append(round(float(start) + float(m.group(1)), 3))
+        except ValueError:
+            continue
+    return sorted(set(cuts))
+
+
+def _rms_db_series(media_path: str, start: float | None = None, end: float | None = None) -> list[float] | None:
+    """Per-~second RMS level (dB) across the media (or ``[start, end]``) via ONE ffmpeg ``astats``
+    pass — the raw series behind the audio-energy waveform. Low-memory (ffmpeg buckets per second;
+    we only parse the printed metadata, never the PCM). ``None`` on failure / no audio stream."""
+    pre = []
+    if start is not None and end is not None:
+        pre = ["-ss", f"{float(start):.3f}", "-t", f"{max(0.05, float(end) - float(start)):.3f}"]
+    try:
+        out = subprocess.run(
+            ["ffmpeg", "-nostdin", "-v", "quiet", *pre, "-i", media_path, "-map", "0:a:0", "-ac", "1",
+             "-af", "aresample=8000,asetnsamples=8000:p=0,astats=reset=1:metadata=1,"
+                    "ametadata=mode=print:key=lavfi.astats.Overall.RMS_level:file=-",
+             "-f", "null", "-"],
+            capture_output=True, text=True, timeout=300,
+        ).stdout
+    except Exception:
+        return None
+    series = []
+    for m in re.finditer(r"RMS_level=(\S+)", out):
+        try:
+            v = float(m.group(1))
+        except ValueError:
+            v = -120.0                       # -inf / nan (a silent second) → floor
+        series.append(max(v, -120.0))
+    return series or None
+
+
+def energy_envelope(media_path: str, *, buckets: int = 120,
+                    start: float | None = None, end: float | None = None) -> list[float] | None:
+    """A normalized ``0..1`` loudness envelope for the audio-energy waveform: one bar per bucket
+    across the media (or a ``[start, end]`` window), peaks ≈ louder / higher-energy moments. Min–max
+    normalized (with a small floor) so the curve fills the display. ``None`` on failure / no audio.
+
+    The full-media series is cached next to the media (``<media>.energy.json``) so repeat loads and
+    different bucket counts are instant — the ffmpeg pass runs once per source."""
+    series, cache = None, None
+    if start is None and end is None:
+        cache = os.path.splitext(media_path)[0] + ".energy.json"
+        try:
+            if os.path.exists(cache) and os.path.getmtime(cache) >= os.path.getmtime(media_path):
+                with open(cache) as f:
+                    series = json.load(f).get("db")
+        except (OSError, ValueError):
+            series = None
+    if not series:
+        series = _rms_db_series(media_path, start, end)
+        if series and cache:
+            try:
+                tmp = cache + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump({"db": series}, f)
+                os.replace(tmp, cache)
+            except OSError:
+                pass
+    if not series:
+        return None
+    n = max(1, int(buckets))
+    step = len(series) / n
+    bars_db = []
+    for i in range(n):
+        lo = int(i * step)
+        hi = max(lo + 1, int((i + 1) * step))
+        chunk = series[lo:hi] or [series[min(lo, len(series) - 1)]]
+        bars_db.append(sum(chunk) / len(chunk))
+    lo_db, hi_db = min(bars_db), max(bars_db)
+    rng = (hi_db - lo_db) or 1.0
+    return [round(0.06 + 0.94 * ((v - lo_db) / rng), 4) for v in bars_db]
+
+
+def filmstrip(media_path: str, start: float, end: float, *, frames: int = 12,
+              height: int = 48) -> str | None:
+    """A horizontal filmstrip of ``frames`` evenly-spaced thumbnails across ``[start, end]``, as a
+    single ``data:image/jpeg;base64,...`` URI — the editor timeline's Video lane. One ffmpeg pass
+    (``fps`` sample → ``tile`` into one strip). ``None`` on failure / no video stream."""
+    dur = max(0.1, float(end) - float(start))
+    n = max(2, min(40, int(frames)))
+    # Cache the strip next to the media keyed by the window+frames+height, so reopening a clip's
+    # editor is instant instead of re-running ffmpeg every time. Invalidated if the media is newer.
+    cache = f"{os.path.splitext(media_path)[0]}.{start:.2f}-{end:.2f}-{n}x{int(height)}.strip.txt"
+    try:
+        if os.path.exists(cache) and os.path.getmtime(cache) >= os.path.getmtime(media_path):
+            with open(cache) as f:
+                return f.read() or None
+    except OSError:
+        pass
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "strip.jpg")
+        try:
+            subprocess.run(
+                ["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{float(start):.3f}", "-t", f"{dur:.3f}",
+                 "-i", media_path, "-vf", f"fps={n}/{dur:.3f},scale=-1:{int(height)},tile={n}x1",
+                 "-frames:v", "1", "-q:v", "6", out],
+                capture_output=True, text=True, timeout=120,
+            )
+            with open(out, "rb") as f:
+                data = f.read()
+        except Exception:
+            return None
+    if not data:
+        return None
+    uri = "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")
+    try:
+        tmp = cache + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(uri)
+        os.replace(tmp, cache)
+    except OSError:
+        pass
+    return uri
 
 
 def _window_text(words: list[dict], start: float, end: float) -> str:

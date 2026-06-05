@@ -109,6 +109,38 @@ def test_annotate_relative_loudness_uses_true_median_for_even_n(monkeypatch):
     assert out[3]["features"]["audio"]["rel_db"] == 4.0    # -20 − (-24)
 
 
+def test_rms_db_series_parses_and_floors_silence(monkeypatch):
+    class _R:
+        stdout = ("lavfi.astats.Overall.RMS_level=-23.5\n"
+                  "lavfi.astats.Overall.RMS_level=-inf\n"      # a silent second → floored
+                  "noise line ignored\n"
+                  "lavfi.astats.Overall.RMS_level=-12.0\n")
+    monkeypatch.setattr(signals.subprocess, "run", lambda *a, **k: _R())
+    assert signals._rms_db_series("m.mp4") == [-23.5, -120.0, -12.0]
+
+
+def test_energy_envelope_buckets_and_normalizes(monkeypatch):
+    # 8 per-second dB values → 4 bars (mean per pair: -40,-20,-30,-10), min–max normalized to
+    # [0.06, 1.0]. start/end given so the cache path is skipped (no disk).
+    monkeypatch.setattr(signals, "_rms_db_series",
+                        lambda *a, **k: [-40, -40, -20, -20, -30, -30, -10, -10])
+    bars = signals.energy_envelope("m.mp4", buckets=4, start=0, end=8)
+    assert len(bars) == 4
+    assert bars[0] == 0.06 and bars[3] == 1.0          # quietest → floor, loudest → top
+    assert bars[1] > bars[2] > bars[0]                 # -20 > -30 > -40 ordering preserved
+    monkeypatch.setattr(signals, "_rms_db_series", lambda *a, **k: None)   # no audio
+    assert signals.energy_envelope("m.mp4", buckets=4, start=0, end=8) is None
+
+
+def test_scene_cuts_offsets_window_relative_times_to_absolute(monkeypatch):
+    # -ss makes showinfo pts_time window-relative; scene_cuts adds `start` back to absolute source time.
+    class _R:
+        stderr = ("[Parsed_showinfo] n:0 pts_time:1.500 type:I\n"
+                  "[Parsed_showinfo] n:1 pts_time:4.250 type:P\n")
+    monkeypatch.setattr(signals.subprocess, "run", lambda *a, **k: _R())
+    assert signals.scene_cuts("m.mp4", start=60.0, end=120.0) == [61.5, 64.25]
+
+
 def test_window_text_slices_to_the_candidate_window():
     words = [{"w": "before", "start": 0.0, "end": 0.5},
              {"w": "inside", "start": 2.0, "end": 2.4},

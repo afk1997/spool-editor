@@ -4,7 +4,8 @@ import { useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { useSpool, type SpoolClip } from "@/components/spool/context";
 import { useEngineQuery, useLive } from "@/lib/engine-context";
-import { Btn, Chip, Empty, Icon, Seg, Switch, fmtTC } from "@spool/ui";
+import { Timeline } from "@/components/spool/timeline";
+import { Btn, Chip, Empty, Icon, Seg, Switch } from "@spool/ui";
 
 /* S6 Editor — connective hub, 1:1 port of the demo (06). Preview · transport · timeline ·
  * inspector (Format / Captions / Brand / Export). Render runs the real engine with the
@@ -118,9 +119,16 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   const inWin = (w: { start: number | null }) => w.start != null && w.start >= lo && w.start <= hi;
   const tlWords = allWords.filter((w) => !w.deleted && inWin(w));
   const deletedInWin = allWords.filter((w) => w.deleted && inWin(w)).length;
-  const seekTo = (t: number) => { const v = videoRef.current; if (v && isFinite(t)) v.currentTime = Math.max(0, t - lo); };
+  // Real timeline lanes for the clip window: Energy (loudness envelope) + Scenes (cut markers).
+  // hiSafe falls back to the last word's end when the clip has no explicit out point.
+  const hiSafe = isFinite(hi) ? hi : (tlWords.length ? (tlWords[tlWords.length - 1].end ?? lo + 60) : lo + 60);
+  const energyQ = useEngineQuery((c) => (src ? c.sourceEnergy(clip.src, 80, { start: lo, end: hiSafe }) : Promise.resolve({ bars: [], buckets: 0 })), [clip.src, lo, hiSafe]);
+  const scenesQ = useEngineQuery((c) => (src ? c.sourceScenes(clip.src, { start: lo, end: hiSafe }) : Promise.resolve({ cuts: [] })), [clip.src, lo, hiSafe]);
+  const filmstripQ = useEngineQuery((c) => (src ? c.sourceFilmstrip(clip.src, { start: lo, end: hiSafe }, 14) : Promise.resolve({ strip: null, frames: 0 })), [clip.src, lo, hiSafe]);
   const delWord = (idx: number) => { if (src?.transcriptId) ctx.client.editWord(src.transcriptId, idx, { op: "delete" }).then(() => doc.reload()).catch(() => {}); };
   const recut = () => { if (!src) return; ctx.client.cut(src.id, { start: lo, end: hi }).then(() => { ctx.pushToast({ icon: "scissors", tone: "info", title: "Re-cutting clip", body: `${deletedInWin} deleted word${deletedInWin === 1 ? "" : "s"} rippled out — a new version is in the queue` }); ctx.nav("queue"); }).catch(() => {}); };
+  // Trim → re-cut to a new [start, end] window from the timeline's trim handles.
+  const trimRecut = (s: number, e: number) => { if (!src) return; ctx.client.cut(src.id, { start: s, end: e }).then(() => { ctx.pushToast({ icon: "scissors", tone: "info", title: "Re-cutting clip", body: `Trimmed to ${Math.round(e - s)}s — a new version is in the queue` }); ctx.nav("queue"); }).catch(() => {}); };
   const togglePlay = () => { const v = videoRef.current; if (v) { if (v.paused) void v.play(); else v.pause(); setPlaying(!v.paused); } else setPlaying((p) => !p); };
   const others = ctx.clips.filter((c) => c.src === clip.src && c.id !== clip.id).slice(0, 4);
 
@@ -196,28 +204,32 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
             <label className="row" style={{ gap: 7, fontSize: 12.5, cursor: "pointer" }}><Switch on={safe} onClick={() => setSafe(!safe)} /> Safe zones</label>
           </div>
           <div style={{ flex: "none", borderTop: "1px solid var(--line)", background: "var(--bg-1)", padding: "12px 18px" }}>
-            <div className="row" style={{ marginBottom: 8 }}>
-              <span className="eyebrow">Timeline</span>
-              {tlWords.length > 0 && <span className="mono" style={{ fontSize: 11, color: "var(--text-faint)" }}>· {tlWords.length} words · click to scrub · ✕ to ripple-cut</span>}
-              <span className="spacer" />
-              {renders.length > 1 && (
-                <div className="row" style={{ gap: 5, marginRight: 8 }}>
-                  <span className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)" }}>A/B</span>
-                  {renders.map((r, i) => <button key={r.id} className={"chip" + (verIdx === i ? " solid" : "")} style={{ cursor: "pointer", height: 22, padding: "0 8px" }} onClick={() => setVer(i)}>v{i + 1}</button>)}
-                </div>
-              )}
-              {deletedInWin > 0 && <Btn variant="primary" size="sm" icon="scissors" onClick={recut}>Re-cut (drop {deletedInWin})</Btn>}
-            </div>
-            {tlWords.length > 0 ? (
-              <div className="row" style={{ gap: 4, flexWrap: "wrap", maxHeight: 66, overflowY: "auto" }}>
-                {tlWords.map((w) => (
-                  <span key={w.idx} onClick={() => seekTo(w.start as number)} title={`scrub to ${fmtTC((w.start as number) - lo)}`}
-                    style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 12, padding: "2px 5px 2px 7px", borderRadius: 6, background: "var(--bg-3)", cursor: "pointer" }}>
-                    {w.w}
-                    <button onClick={(e) => { e.stopPropagation(); delWord(w.idx); }} title="delete word (rippled out on Re-cut)" style={{ border: 0, background: "transparent", color: "var(--text-faint)", cursor: "pointer", padding: "0 1px", lineHeight: 1, fontSize: 13 }}>×</button>
-                  </span>
-                ))}
+            {(renders.length > 1 || deletedInWin > 0) && (
+              <div className="row" style={{ marginBottom: 10 }}>
+                <span className="spacer" />
+                {renders.length > 1 && (
+                  <div className="row" style={{ gap: 5, marginRight: 8 }}>
+                    <span className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)" }}>A/B</span>
+                    {renders.map((r, i) => <button key={r.id} className={"chip" + (verIdx === i ? " solid" : "")} style={{ cursor: "pointer", height: 22, padding: "0 8px" }} onClick={() => setVer(i)}>v{i + 1}</button>)}
+                  </div>
+                )}
+                {deletedInWin > 0 && <Btn variant="primary" size="sm" icon="scissors" onClick={recut}>Re-cut (drop {deletedInWin})</Btn>}
               </div>
+            )}
+            {tlWords.length > 0 ? (
+              <Timeline
+                words={tlWords}
+                segments={doc.data?.segments ?? []}
+                lo={lo}
+                hi={hiSafe}
+                cur={cur}
+                onSeek={(rel) => { const v = videoRef.current; if (v && isFinite(rel)) v.currentTime = Math.max(0, rel); setCur(rel); }}
+                onDeleteWord={delWord}
+                energyBars={energyQ.data?.bars ?? []}
+                sceneCuts={scenesQ.data?.cuts ?? []}
+                filmstrip={filmstripQ.data?.strip ?? null}
+                onTrim={trimRecut}
+              />
             ) : (
               <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.6 }}>{doc.loading ? "loading the clip's transcript…" : "This clip's source isn't transcribed — transcribe it for a word-level timeline. Set the format & preset on the right, then Render."}</div>
             )}

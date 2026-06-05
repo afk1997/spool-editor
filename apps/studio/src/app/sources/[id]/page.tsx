@@ -6,6 +6,7 @@ import { useSpool, buildTranscript, mapCandidates } from "@/components/spool/con
 import { useEngineQuery, useLive } from "@/lib/engine-context";
 import { ClipCard } from "@/components/spool/cards";
 import { DiscoveryBody, TranscriptView } from "@/components/spool/work";
+import { EnergyWave } from "@/components/spool/energy";
 import { Btn, Chip, Empty, Icon, Progress, SourceGlyph, Stat, Thumb, fmtDur } from "@spool/ui";
 
 /* S4 Project detail — 1:1 port of the demo (04). Source + transcript + candidates are all
@@ -22,6 +23,8 @@ export default function ProjectScreen() {
   const doc = useEngineQuery((c) => (s?.transcriptId ? c.getTranscriptDoc(s.transcriptId) : Promise.resolve(undefined)), [s?.transcriptId]);
   const { lines, speakers } = buildTranscript(doc.data?.words);
   const candidates = mapCandidates(snapshot, id, doc.data?.words);
+  // Real audio-energy waveform (loudness envelope) for the source — only once it's downloaded.
+  const energyQ = useEngineQuery((c) => (s && s.status !== "transcribing" ? c.sourceEnergy(id, 96) : Promise.resolve({ bars: [], buckets: 0 })), [id, s?.status]);
   const finding = (snapshot?.clips ?? []).some((c) => c.kind === "moments" && c.source_id === id && (c.status === "running" || c.status === "queued"));
   const myClips = ctx.clips.filter((c) => c.src === id);
 
@@ -78,8 +81,17 @@ export default function ProjectScreen() {
                 <video src={ctx.client.jobFileUrl(s.id)} controls playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000" }} />
               </div>
               <div className="card" style={{ padding: 16 }}>
-                <div className="row" style={{ marginBottom: 10 }}><div className="eyebrow">Audio energy</div><span className="spacer" /><span className="chip warn">Phase 3</span></div>
-                <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.6 }}>Audio-peak analysis — loud / high-energy moments feeding the glass-box ranking — arrives in Phase 3. Today, candidates come from the transcript via find-moments.</div>
+                <div className="row" style={{ marginBottom: 12 }}><div className="eyebrow">Audio energy</div></div>
+                {energyQ.loading ? (
+                  <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)" }}>analyzing loudness…</div>
+                ) : energyQ.data?.bars?.length ? (
+                  <>
+                    <EnergyWave bars={energyQ.data.bars} height={68} groups={4} color="#7c89a8" />
+                    <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 12 }}>peaks ≈ moments of high engagement</div>
+                  </>
+                ) : (
+                  <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)" }}>no audio track detected</div>
+                )}
               </div>
             </div>
             <div className="card" style={{ padding: 18 }}>
