@@ -4,7 +4,7 @@
 > `Spool_Engineering-Spec.md` (§5 roadmap, §6 front-end standards). Status legend:
 > ✅ done & verified · 🟡 in progress · ◻️ not started.
 >
-> **Last updated:** 2026-06-04 · **Phase 0 — ✅ · Phase 1 — ✅ · Phase 2 — ✅ COMPLETE** (all 4 spec
+> **Last updated:** 2026-06-05 · **Phase 0 — ✅ · Phase 1 — ✅ · Phase 2 — ✅ COMPLETE** (all 4 spec
 > done-whens + all 8 work-items: S7 reframe · S8 caption · transcript editing · S9 brand kits · library
 > search · S6 editor timeline · **Settings config writes** · **perf/virtualization** + an explicit, shipped
 > **FTS5** decision (additive trigram index). Engine **676 tests** + studio typecheck/lint/12 vitest/build
@@ -330,6 +330,48 @@
 > codex-bridge provider (not the demo's Ollama endpoint/API-key); Editor's deeper timeline editing
 > (trim-render, A/B, word ripple-cut) is the Phase-2 surface; Publish/Analytics are the demo's
 > honest "coming in Phase 4" placeholders.
+>
+> ---
+> **Session 2026-06-05 — review-hardening, real waveform+timeline, agent full-parity. ✅ done, all pushed.**
+> Engine **807 tests** · studio typecheck/lint/20 vitest green · CLI↔MCP parity test green · agent live-proven on the real codex bridge.
+>
+> - **✅ Post-Phase-3 review-hardening pass** (8-reviewer + adversarial-verify of the Phase-3 arc → 28
+>   confirmed findings, fixed). Headline fixes: **honest produce/watch completion** (a produce job no
+>   longer reports `done` at enqueue time — `_watch_produce_status` rolls up the child render jobs, so a
+>   source is marked `produced` only if ≥1 clip actually landed; empty/all-errored → retry); **bounded
+>   ingest retry** (transient ingest failure no longer drops an item forever); **per-watch reconcile lock**
+>   (poller vs /scan can't double-ingest); `/rank` rejects non-dict candidates (was a 500); inline
+>   `/produce` validates enums up front; MCP produce key-collision guard; CLI `--recipe-id`/`--body`
+>   mutually exclusive; watch-repoint resets reconciler state; glass-box score parity (shared
+>   `ENGINE_DEFAULT_WEIGHTS`, all-zero fallback mirrors the engine). Then refactored the overloaded
+>   `pending` field into a dedicated **`ingesting`** watch-state field (no more `str | dict` value).
+>   Commits `cb8c3df`·`7d14861`·`f47fdc2`·`2b33796`·`78a9929`.
+> - **✅ Real audio-energy waveform + multi-lane editor timeline** (replaced placeholder/flat-row stand-ins
+>   with the approved designs, all real engine data). New `signals.energy_envelope` (cached per-second RMS
+>   → normalized bars), `signals.scene_cuts` (windowed), `signals.filmstrip` (tiled thumbnail data-URI),
+>   exposed at `GET /sources/<id>/{energy,scenes,filmstrip}`. Studio: a centered/mirrored `EnergyWave`
+>   (grouped slate on the source card, green on the lane) + a `Timeline` with **Video filmstrip · Captions
+>   (ticks→pills by zoom) · Speaker L/R (from diarization SEGMENTS — words carry no speaker) · Energy ·
+>   Scene ticks**, playhead, zoom, minimap, trim→re-cut. Screenshot-verified against the designs.
+>   Commit `e9109e7`.
+> - **✅ In-app Agent → full UI/MCP/CLI parity** (the golden rule, finally true for the agent). Was a
+>   single-shot 4-action planner (≈2 of ~65 capabilities) that couldn't even list the queue. Rewrote
+>   `/agent` as a **bounded ReAct JSON tool-loop** (`clip.agent.run_agent`) over a **shared catalog**
+>   (`clip.agent_tools`, ~50 tools) that delegates to the same `TroveClient`/`/api/v1` surface — so it can
+>   inspect AND act on the whole app. Honest gate kept (prefers `make_clips` → cut→reframe→review; exports
+>   only on explicit ask; never auto-publishes). Studio renders the real per-step tool trace + typed
+>   clarify. Live-proven: "what's in the queue?" now calls `list_jobs` and answers from real data. Two
+>   bugs caught only by live testing: `status="all"` normalized to no-filter; observation truncation sized
+>   for list results; agent runs at codex **medium** reasoning. Commit `7cdc071`.
+> - **✅ Closed MCP/CLI/client parity gaps** the audit surfaced (the one true client divergence + rounding):
+>   added `source_energy/scenes/filmstrip`, `edit_word`, `dismiss_transcribe`, `render_pipeline stop_after`
+>   to the Python `TroveClient` (existed only in the TS client) → **8 new MCP tools + 8 matching CLI
+>   commands** (settings/settings-set, word-edit, transcribe-rm, energy, scenes, filmstrip, render-get);
+>   `bulkSubmit`/`rankCandidates` added to the TS client. The bidirectional CLI↔MCP parity test keeps them
+>   in sync. Commit `245dfcc`.
+> - **Deferred (low value):** wire the Discovery score slider to the server `rank` route instead of the
+>   client-side mirror (the mirror is intentional for instant feedback); a `tail_events` MCP tool (polling
+>   `list_clip_jobs` works); per-clip filmstrip cache eviction (small files, fine for now).
 
 ## Roadmap at a glance
 
