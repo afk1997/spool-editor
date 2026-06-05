@@ -445,6 +445,10 @@ export interface AgentResponse {
   reply: string;
   action: "find_moments" | "make_clip" | "clarify" | "reply";
   jobs: ClipJobView[];
+  /** Per-step tool trace from the ReAct loop — one entry per tool the agent ran this turn. */
+  tools?: { name: string; arg?: string; ms?: number; ok?: boolean }[];
   question?: string;
   options?: string[];
+  /** Elicitation card kind for a clarify turn. */
+  kind?: "enum" | "confirm" | "multiselect";
 }

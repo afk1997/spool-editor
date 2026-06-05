@@ -82,7 +82,7 @@ export interface AgentMessage {
 const RECIPES = ["3 funny shorts", "Insightful carousel", "Hot-take TikToks", "Best moment → 9:16"];
 
 const INITIAL_AGENT: AgentMessage[] = [
-  { role: "agent", text: "Hi — I'm your clip agent. Paste a video URL or tell me what to make and I'll handle download, transcription, finding moments, reframing and captions. You decide at each step." },
+  { role: "agent", text: "Hi — I'm your clip agent. I can drive the whole app: download a URL, transcribe, find moments, make clips, run recipes, manage watches & brand kits — and inspect anything (your render queue, sources, recipes…). Ask me what's going on or tell me what to make. You decide at each step." },
 ];
 
 function originOf(url: string | null | undefined): string {
@@ -350,13 +350,14 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
       .agent(text, sourceId ? { sourceId } : {})
       .then((r) => {
         setWorking(false);
+        // Real per-step tool trace from the ReAct loop (read tools that start no job are visible too).
+        if (r.tools?.length)
+          push({ role: "trace", tools: r.tools.map((t) => ({ name: t.name, arg: t.arg ?? "", ms: t.ms ?? 0 })) });
         push({ role: "agent", text: r.reply });
-        if (r.jobs?.length) {
-          push({ role: "trace", tools: r.jobs.map((j) => ({ name: j.kind, arg: j.clip_id ? "· " + j.clip_id.slice(0, 6) : "", ms: Math.round(j.elapsed_seconds * 1000) })) });
+        if (r.jobs?.length)
           pushToast({ icon: "sparkles", tone: "info", title: `Agent started ${r.jobs.length} job${r.jobs.length > 1 ? "s" : ""}`, body: "Track them in the Render Queue" });
-        }
         if (r.action === "clarify" && r.question)
-          push({ role: "elicit", id: "e" + ++elicitSeq.current, kind: "enum", tag: "agent needs you", q: r.question, options: r.options ?? [], sourceId });
+          push({ role: "elicit", id: "e" + ++elicitSeq.current, kind: (r.kind as AgentMessage["kind"]) ?? "enum", tag: "agent needs you", q: r.question, options: r.options ?? [], sourceId });
       })
       .catch(() => {
         setWorking(false);

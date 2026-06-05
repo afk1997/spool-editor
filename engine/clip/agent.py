@@ -124,3 +124,168 @@ def _normalize(data: dict | None, *, fallback: str) -> dict:
     else:  # reply
         out["reply"] = reply or "Okay."
     return out
+
+
+# ---------------------------------------------------------------------------
+# Tool-using agent (the studio Agent panel's real brain) — a bounded ReAct loop
+# ---------------------------------------------------------------------------
+# The single-shot `plan` above only knows 4 actions. `run_agent` instead drives the FULL shared
+# tool catalog (clip.agent_tools → the same /api/v1 surface the UI/MCP/CLI use, the golden rule):
+# each step the model emits ONE JSON object — a tool call, a clarify, or a final reply — the engine
+# executes the tool against the real API, feeds the (truncated) result back, and loops until the
+# model finishes or the step budget runs out. The LLM bridge is stateless single-shot, so we
+# re-send the accumulated step transcript each call.
+
+import os  # noqa: E402
+
+from . import agent_tools  # noqa: E402  (kept next to run_agent for locality)
+
+_MAX_STEPS = 8
+_OBS_CHARS = 3200          # truncate each tool observation so the re-sent transcript stays bounded
+                           # (big enough for a ~20-item list result — too-tight truncation made the
+                           #  model misread a full list as empty)
+
+_LOOP_SYSTEM = (
+    "You are Spool's clip agent. Spool turns long videos into short vertical clips, fully on the "
+    "user's machine. You have TOOLS that drive the same engine the UI does — you can inspect and "
+    "act on the whole app (downloads, transcripts, the render queue, discovery, recipes, watches, "
+    "brand kits, models).\n\n"
+    "Work in steps. Each step, reply with EXACTLY ONE minified JSON object — no prose, no fences:\n"
+    '- {"tool":"<name>","args":{...}} — run a tool. I will reply with its JSON result so you can continue.\n'
+    '- {"clarify":{"question":"...","options":["..."],"kind":"enum|confirm"}} — ask the user a question when you need a human decision.\n'
+    '- {"final":{"reply":"..."}} — stop and answer the user in words (use the tool results you gathered).\n\n'
+    "Rules: Prefer READ tools (list_*, get_*, search_*) to answer 'what/which/status' questions — "
+    "e.g. the render queue is list_clip_jobs, downloaded videos/sources are list_jobs. REPORT WHAT THE "
+    "TOOL ACTUALLY RETURNS — count and name/title/id the items; never claim something is empty when the "
+    "result has entries. If the user says 'queue' ambiguously, the render queue is list_clip_jobs and "
+    "downloaded videos are list_jobs — check the one they mean (or both). To make clips, prefer "
+    "make_clips (cut+reframe → the review queue); only call render_pipeline/render_clip (EXPORT) when "
+    "the user explicitly asks to render/export. Clips are never auto-published. Take start/end from the "
+    "transcript timestamps when present. Keep going until you can give a useful final answer; don't ask "
+    "the user for something a tool can fetch. Always finish with a {\"final\":...} once you have enough.\n\n"
+    "TOOLS:\n" + agent_tools.catalog_prompt()
+)
+
+
+def _default_agent_provider(env: dict | None):
+    """The agent reasons OVER tool results (not just extracts), so it needs more reasoning effort
+    than moment-finding's "low" default. Give the codex bridge a higher effort (``SPOOL_AGENT_REASONING``,
+    default "medium"); for any non-codex configured provider, return None so ``llm.complete`` resolves
+    it normally. Returns an LLMProvider instance or None."""
+    e = env if env is not None else os.environ
+    name = (e.get("SPOOL_LLM_PROVIDER") or llm.DEFAULT_PROVIDER).lower()
+    if name == "codex":
+        return llm.CodexProvider(reasoning=(e.get("SPOOL_AGENT_REASONING") or "medium"))
+    return None
+
+
+def _truncate(obj, limit: int = _OBS_CHARS) -> str:
+    try:
+        s = json.dumps(obj, default=str)
+    except (TypeError, ValueError):
+        s = str(obj)
+    return s if len(s) <= limit else s[:limit] + f"… (truncated, {len(s)} chars)"
+
+
+def _short_arg(args: dict) -> str:
+    """A compact one-line arg summary for the tool trace (the studio's ToolTrace 'arg' column)."""
+    if not isinstance(args, dict) or not args:
+        return ""
+    bits = []
+    for k, v in list(args.items())[:3]:
+        sv = json.dumps(v, default=str) if not isinstance(v, str) else v
+        bits.append(f"{k}={sv[:24]}")
+    return "· " + " ".join(bits)
+
+
+def run_agent(
+    message: str,
+    *,
+    client,
+    transcript_lines: "list[tuple[float, float, str]] | None" = None,
+    elapsed=None,
+    provider: "str | llm.LLMProvider | None" = None,
+    env: dict | None = None,
+    max_steps: int = _MAX_STEPS,
+) -> dict:
+    """Run a bounded ReAct tool-loop for one user message. ``client`` is a TroveClient pointed at
+    the engine (so tools hit the SAME /api/v1 surface as the UI). ``elapsed`` is an optional
+    ``() -> float`` ms clock for trace timing (injectable for tests). Returns
+    ``{reply, action, jobs[], tools[], question?, options?, kind?}``. Propagates the LLM bridge's
+    OfflineError / ProviderUnavailableError; never raises on bad model output or tool errors."""
+    import time as _time
+    clock = elapsed or (lambda: _time.monotonic() * 1000.0)
+    if provider is None:                              # default the in-app agent to higher reasoning
+        provider = _default_agent_provider(env)
+
+    transcript = [f"User: {message.strip()}"]
+    if transcript_lines:
+        body = "\n".join(f"[{s:.2f}–{e:.2f}] {t}" for s, e, t in transcript_lines)
+        transcript.append("Transcript context (each line [start–end seconds] text):\n\n" + body)
+
+    tools_trace: list[dict] = []
+    jobs: list[dict] = []
+
+    for _ in range(max(1, max_steps)):
+        prompt = "\n\n".join(transcript) + "\n\nYour next JSON:"
+        raw = llm.complete(prompt, system=_LOOP_SYSTEM, provider=provider, env=env)
+        step = _parse_obj(raw)
+
+        if not isinstance(step, dict):                       # unparseable → treat as the final reply
+            return _finish((raw or "").strip()[:800] or "Done.", tools_trace, jobs)
+
+        if "final" in step:
+            fin = step["final"] if isinstance(step["final"], dict) else {}
+            return _finish(str(fin.get("reply") or step.get("reply") or "Done.").strip(), tools_trace, jobs)
+
+        if "clarify" in step or step.get("action") == "clarify":
+            cl = step.get("clarify") if isinstance(step.get("clarify"), dict) else step
+            opts = cl.get("options") or []
+            return {
+                "action": "clarify",
+                "reply": str(cl.get("reply") or cl.get("question") or "Could you clarify?"),
+                "question": str(cl.get("question") or "Could you clarify?"),
+                "options": [str(o) for o in opts if str(o).strip()] if isinstance(opts, list) else [],
+                "kind": cl.get("kind") if cl.get("kind") in ("enum", "confirm", "multiselect") else "enum",
+                "tools": tools_trace, "jobs": jobs,
+            }
+
+        name = step.get("tool")
+        tool = agent_tools.CATALOG.get(name)
+        if not tool:                                         # hallucinated tool → tell the model, retry
+            transcript.append(f"Assistant: {_truncate(step)}")
+            transcript.append(f"Tool result: ERROR unknown tool {name!r}. Pick one from the TOOLS list.")
+            continue
+
+        args = step.get("args") if isinstance(step.get("args"), dict) else {}
+        t0 = clock()
+        try:
+            result = tool.run(client, args)
+            ok = True
+        except Exception as e:                               # surface tool errors to the model, keep going
+            result = {"error": type(e).__name__, "message": str(e)[:300]}
+            ok = False
+        ms = int(max(0.0, clock() - t0))
+
+        tools_trace.append({"name": name, "arg": _short_arg(args), "ms": ms, "ok": ok})
+        if ok and name in agent_tools.JOB_STARTING and isinstance(result, dict) and result.get("id"):
+            jobs.append({"id": result.get("id"), "kind": result.get("kind") or name,
+                         "clip_id": result.get("clip_id"), "status": result.get("status")})
+
+        transcript.append(f"Assistant: {_truncate(step)}")
+        transcript.append(f"Tool result ({name}): {_truncate(result)}")
+
+    # Step budget exhausted → ask the model to summarize what it found into a final reply.
+    summary_prompt = ("\n\n".join(transcript) +
+                      "\n\nStep budget reached. Reply now with {\"final\":{\"reply\":\"...\"}} summarizing for the user.")
+    raw = llm.complete(summary_prompt, system=_LOOP_SYSTEM, provider=provider, env=env)
+    fin = _parse_obj(raw) or {}
+    reply = ""
+    if isinstance(fin, dict):
+        f = fin.get("final") if isinstance(fin.get("final"), dict) else fin
+        reply = str(f.get("reply") or "").strip()
+    return _finish(reply or (raw or "").strip()[:800] or "I gathered what I could — ask me to continue.", tools_trace, jobs)
+
+
+def _finish(reply: str, tools_trace: list, jobs: list) -> dict:
+    return {"action": "reply", "reply": reply or "Done.", "tools": tools_trace, "jobs": jobs}
