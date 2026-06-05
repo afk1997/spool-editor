@@ -1573,6 +1573,71 @@ def find_clip_moments(source_id):
     return jsonify(_clip_job_view(_cm().get(jid))), 201
 
 
+def _opt_window(req):
+    """Parse optional ``?start=&end=`` floats from a request; ``(None, None)`` if absent/invalid."""
+    s, e = req.args.get("start"), req.args.get("end")
+    if s is None or e is None:
+        return None, None
+    try:
+        return float(s), float(e)
+    except (TypeError, ValueError):
+        return None, None
+
+
+@api_v1_bp.get("/sources/<source_id>/energy")
+@token_required
+def source_energy(source_id):
+    """Normalized 0..1 loudness envelope across the source — the audio-energy waveform (peaks ≈
+    louder / higher-energy moments). One ffmpeg pass, cached next to the media so repeats are
+    instant. Optional ``?start=&end=`` windows it to a clip (the editor's Energy lane).
+    ``{"bars": [...], "buckets": n}``; ``bars`` is empty when the source has no audio."""
+    from clip import signals
+    src, _, err = _source_or_error(source_id)
+    if err:
+        return err
+    try:
+        buckets = max(8, min(480, int(request.args.get("buckets", 96))))
+    except (TypeError, ValueError):
+        buckets = 96
+    start, end = _opt_window(request)
+    bars = signals.energy_envelope(src.file_path, buckets=buckets, start=start, end=end)
+    return jsonify({"bars": bars or [], "buckets": buckets})
+
+
+@api_v1_bp.get("/sources/<source_id>/scenes")
+@token_required
+def source_scenes(source_id):
+    """Scene-cut timestamps (source seconds) for the editor timeline's Scenes lane. Requires
+    ``?start=&end=`` (a clip window — whole-source detection is too slow). ``{"cuts": [...]}``."""
+    from clip import signals
+    src, _, err = _source_or_error(source_id)
+    if err:
+        return err
+    start, end = _opt_window(request)
+    if start is None or end is None or end <= start:
+        return jsonify({"cuts": []})
+    return jsonify({"cuts": signals.scene_cuts(src.file_path, start, end) or []})
+
+
+@api_v1_bp.get("/sources/<source_id>/filmstrip")
+@token_required
+def source_filmstrip(source_id):
+    """A horizontal filmstrip (evenly-spaced thumbnails) across ``?start=&end=`` as one
+    ``data:image/jpeg`` URI — the editor timeline's Video lane. ``{"strip": <uri|null>, "frames": n}``."""
+    from clip import signals
+    src, _, err = _source_or_error(source_id)
+    if err:
+        return err
+    start, end = _opt_window(request)
+    if start is None or end is None or end <= start:
+        return jsonify({"strip": None, "frames": 0})
+    try:
+        frames = max(2, min(40, int(request.args.get("frames", 12))))
+    except (TypeError, ValueError):
+        frames = 12
+    return jsonify({"strip": signals.filmstrip(src.file_path, start, end, frames=frames), "frames": frames})
+
+
 @api_v1_bp.post("/sources/<source_id>/rank")
 @token_required
 def rank_clip_candidates(source_id):
@@ -2117,14 +2182,17 @@ def patch_settings():
 @api_v1_bp.post("/agent")
 @token_required
 def agent_message():
-    """The studio Agent panel's turn: NL message (+ optional source context) → one
-    structured action via the LLM, executed with the real clip tools (spec §2). A
-    ``clarify`` action is the spec's elicitation — the studio renders it as a card.
+    """The studio Agent panel's turn: a NL message (+ optional source context) driven through a
+    bounded ReAct TOOL-LOOP (clip.agent.run_agent) over the SAME /api/v1 tool catalog the UI, MCP,
+    and CLI use (the golden rule) — so the in-app agent can do everything the app can: inspect the
+    render queue, download, transcribe, discover, produce, manage recipes/watches/brand-kits, etc.
 
-    Body: ``{message, source_id?}``. Returns ``{reply, action, jobs[], question?, options?}``.
-    Blocks while the LLM plans (the codex bridge), so the client shows a thinking state.
-    """
+    Body: ``{message, source_id?}``. Returns ``{reply, action, jobs[], tools[], question?, options?,
+    kind?}`` — ``tools`` is the real per-step tool trace, ``jobs`` any jobs started this turn, and a
+    ``clarify`` action carries the question/options/kind for the studio's elicitation card. Blocks
+    while the loop runs (each step is an LLM call), so the client shows a thinking state."""
     from clip import agent as clip_agent, llm as clip_llm, moments as clip_moments
+    from trove_client import TroveClient
 
     data = request.get_json(silent=True) or {}
     message = (data.get("message") or "").strip()
@@ -2132,8 +2200,9 @@ def agent_message():
         return jsonify({"error": "missing_message"}), 400
     source_id = (data.get("source_id") or "").strip() or None
 
-    # Source context: feed the transcript to the planner when we have one.
-    lines, words_path = None, None
+    # Source context: feed the transcript to the loop when we have one (so the agent can quote
+    # timestamps for moments/clips without an extra fetch).
+    lines = None
     if source_id:
         _, words_path = _cr().source_paths(source_id)
         if words_path and os.path.exists(words_path):
@@ -2141,44 +2210,23 @@ def agent_message():
                 lines = clip_moments._transcript_lines(transcript_io.load(words_path), None)
             except (OSError, ValueError):
                 lines = None
+        if lines is None:
+            message = f"{message}\n\n(Context: source_id={source_id})"
 
+    # A TroveClient pointed at THIS engine (env TROVE_URL/TROVE_TOKEN, else the local default) — the
+    # agent's tools drive the same HTTP surface as every other client, so nothing can diverge.
+    client = TroveClient()
     try:
-        action = clip_agent.plan(message, transcript_lines=lines)
+        result = clip_agent.run_agent(message, client=client, transcript_lines=lines)
     except (clip_llm.OfflineError, clip_llm.ProviderUnavailableError) as e:
         return jsonify({"error": "llm_unavailable", "message": str(e)}), 503
 
-    has_transcript = bool(source_id and words_path and os.path.exists(words_path))
-    kind = action["action"]
-    jobs: list[dict] = []
-
-    if kind in ("find_moments", "make_clip") and not has_transcript:
-        action = {
-            "action": "clarify",
-            "reply": "Open a transcribed source first — I clip from its transcript.",
-            "question": "Which source? Pick a transcribed one from your Library.",
-            "options": [],
-        }
-        kind = "clarify"
-
-    if kind == "find_moments":
-        params = {"mode": action["mode"], "count": action["count"]}
-        jid = _cm().submit(kind="moments", source_id=source_id, params=params,
-                           target=_cr().find_moments_target(source_id=source_id, params=params))
-        jobs.append(_clip_job_view(_cm().get(jid)))
-    elif kind == "make_clip":
-        for c in action["clips"]:
-            clip_id, render_id = uuid.uuid4().hex[:10], uuid.uuid4().hex[:10]
-            params = {"start": c["start"], "end": c["end"], "aspect": c["aspect"],
-                      "mode": c["mode"], "style": c["style"], "preset": c["preset"]}
-            jid = _cm().submit(kind="pipeline", source_id=source_id, clip_id=clip_id, params=params,
-                               target=_cr().pipeline_target(source_id=source_id, clip_id=clip_id,
-                                                            render_id=render_id, params=params))
-            jobs.append(_clip_job_view(_cm().get(jid)))
-
-    resp = {"reply": action.get("reply", ""), "action": kind, "jobs": jobs}
-    if kind == "clarify":
-        resp["question"] = action.get("question", "")
-        resp["options"] = action.get("options", [])
+    resp = {"reply": result.get("reply", ""), "action": result.get("action", "reply"),
+            "jobs": result.get("jobs", []), "tools": result.get("tools", [])}
+    if result.get("action") == "clarify":
+        resp["question"] = result.get("question", "")
+        resp["options"] = result.get("options", [])
+        resp["kind"] = result.get("kind", "enum")
     return jsonify(resp)
 
 
@@ -2262,6 +2310,9 @@ _OPENAPI_DOC = {
                  "description": "Defaults: 4000 chars (txt/srt/vtt) or 50 segments (json). Capped at 64000 / 500."},
             ]}},
         "/sources/{source_id}/moments": {"post": {"summary": "Find clip-worthy moments over the source transcript (LLM)"}},
+        "/sources/{source_id}/energy":  {"get": {"summary": "Normalized 0..1 loudness envelope across the source (the audio-energy waveform)"}},
+        "/sources/{source_id}/scenes":  {"get": {"summary": "Scene-cut timestamps within ?start=&end= (the editor timeline's Scenes lane)"}},
+        "/sources/{source_id}/filmstrip": {"get": {"summary": "Horizontal thumbnail filmstrip across ?start=&end= as a data URI (the editor timeline's Video lane)"}},
         "/sources/{source_id}/rank":    {"post": {"summary": "Re-rank candidates with the glass-box opportunity score (named, reweightable factors)"}},
         "/sources/{source_id}/produce": {"post": {"summary": "Apply a recipe end-to-end (find→rank→top-N→pipeline per moment) → the review queue"}},
         "/sources/{source_id}/cut":     {"post": {"summary": "Cut a clip [start,end] from the source"}},

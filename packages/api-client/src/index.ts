@@ -289,6 +289,10 @@ export class SpoolApiClient {
   }): Promise<JobView> {
     return this.post("/jobs", input);
   }
+  /** Submit many downloads in one round-trip (POST /jobs/bulk). */
+  bulkSubmit(urls: string[], opts: { format?: "video" | "audio"; auto_transcribe?: boolean } = {}): Promise<{ jobs: JobView[] }> {
+    return this.post("/jobs/bulk", { urls, ...opts });
+  }
   pauseJob(id: string): Promise<JobView> {
     return this.post(`/jobs/${encodeURIComponent(id)}/pause`);
   }
@@ -330,6 +334,27 @@ export class SpoolApiClient {
   // ── clips (the render queue) ──
   findMoments(sourceId: string, p: MomentsParams = {}): Promise<ClipJobView> {
     return this.post(`/sources/${encodeURIComponent(sourceId)}/moments`, p);
+  }
+  /** Server-side glass-box re-rank (POST /sources/<id>/rank) — re-score held candidates with factor
+   *  weights. The Discovery slider mirrors this client-side for instant feedback; use this to confirm
+   *  against the engine or for callers without the mirror. */
+  rankCandidates(sourceId: string, candidates: unknown[], weights?: Record<string, number>): Promise<{ candidates: unknown[]; count: number; weights: Record<string, number> }> {
+    return this.post(`/sources/${encodeURIComponent(sourceId)}/rank`, { candidates, ...(weights ? { weights } : {}) });
+  }
+  /** Normalized 0..1 loudness envelope across the source — the audio-energy waveform
+   *  (peaks ≈ louder / higher-energy moments). Pass start/end to window it to a clip (the editor's
+   *  Energy lane). `bars` is empty when the source has no audio. */
+  sourceEnergy(sourceId: string, buckets = 96, window?: { start: number; end: number }): Promise<{ bars: number[]; buckets: number }> {
+    return this.get(`/sources/${encodeURIComponent(sourceId)}/energy${qs({ buckets, ...(window ?? {}) })}`);
+  }
+  /** Scene-cut timestamps (source seconds) within [start, end] — the editor timeline's Scenes lane. */
+  sourceScenes(sourceId: string, window: { start: number; end: number }): Promise<{ cuts: number[] }> {
+    return this.get(`/sources/${encodeURIComponent(sourceId)}/scenes${qs({ ...window })}`);
+  }
+  /** Horizontal thumbnail filmstrip across [start, end] as a single data:image/jpeg URI —
+   *  the editor timeline's Video lane. `strip` is null when the source has no video stream. */
+  sourceFilmstrip(sourceId: string, window: { start: number; end: number }, frames = 12): Promise<{ strip: string | null; frames: number }> {
+    return this.get(`/sources/${encodeURIComponent(sourceId)}/filmstrip${qs({ ...window, frames })}`);
   }
   cut(sourceId: string, range: { start: number; end: number }): Promise<ClipJobView> {
     return this.post(`/sources/${encodeURIComponent(sourceId)}/cut`, range);

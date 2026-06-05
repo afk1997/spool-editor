@@ -85,6 +85,15 @@ MCP_TO_CLI: dict[str, str] = {
     "create_brand_kit":        "brand-create",
     "update_brand_kit":        "brand-update",
     "delete_brand_kit":        "brand-rm",
+    # settings / transcript-edit / timeline signals (UI<->MCP<->CLI parity)
+    "get_settings":            "settings",
+    "update_settings":         "settings-set",
+    "edit_word":               "word-edit",
+    "dismiss_transcribe":      "transcribe-rm",
+    "source_energy":           "energy",
+    "source_scenes":           "scenes",
+    "source_filmstrip":        "filmstrip",
+    "download_render":         "render-get",
 }
 
 
@@ -950,6 +959,38 @@ def cmd_brand_update(args) -> int: _print_json(patch(f"/api/v1/brand-kits/{args.
 def cmd_brand_rm(args) -> int:   delete(f"/api/v1/brand-kits/{args.id}"); print(f"{args.id}: deleted"); return 0
 
 
+# ----- settings / transcript-edit / timeline signals (UI<->MCP<->CLI parity) -----
+
+def cmd_settings(args) -> int:     _print_json(get("/api/v1/settings")); return 0
+def cmd_settings_set(args) -> int: _print_json(patch("/api/v1/settings", _read_json_arg(args.body))); return 0
+def cmd_transcribe_rm(args) -> int: post(f"/api/v1/transcripts/{args.id}/dismiss"); print(f"{args.id}: dismissed"); return 0
+
+def cmd_word_edit(args) -> int:
+    body = {"op": args.op}
+    if args.text is not None:
+        body["text"] = args.text
+    _print_json(post(f"/api/v1/transcripts/{args.id}/words/{args.index}", body))
+    return 0
+
+def _win_qs(args) -> str:
+    qs = []
+    if getattr(args, "start", None) is not None and getattr(args, "end", None) is not None:
+        qs.append(f"start={args.start}"); qs.append(f"end={args.end}")
+    return ("?" + "&".join(qs)) if qs else ""
+
+def cmd_energy(args) -> int:
+    qs = _win_qs(args) or "?"
+    qs += ("&" if qs != "?" else "") + f"buckets={args.buckets}"
+    _print_json(get(f"/api/v1/sources/{args.source_id}/energy{qs}")); return 0
+def cmd_scenes(args) -> int:
+    _print_json(get(f"/api/v1/sources/{args.source_id}/scenes?start={args.start}&end={args.end}")); return 0
+def cmd_filmstrip(args) -> int:
+    _print_json(get(f"/api/v1/sources/{args.source_id}/filmstrip?start={args.start}&end={args.end}&frames={args.frames}")); return 0
+def cmd_render_get(args) -> int:
+    get(f"/api/v1/clips/{args.clip_id}/renders/{args.render_id}/file", stream_to=args.out)
+    print(f"saved → {args.out}"); return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     # `--json` lives on a parent parser so it works in EITHER position
     # (`trove --json list` or `trove list --json`). Argparse otherwise
@@ -1228,6 +1269,47 @@ def build_parser() -> argparse.ArgumentParser:
     s = _sub("brand-rm", help="delete a brand kit")
     s.add_argument("id")
     s.set_defaults(func=cmd_brand_rm)
+
+    # ---- settings / transcript-edit / timeline signals (UI<->MCP<->CLI parity) ----
+    s = _sub("settings", help="read writable engine config")
+    s.set_defaults(func=cmd_settings)
+    s = _sub("settings-set", help="patch engine config (JSON: --body / @file / stdin)")
+    s.add_argument("--body", default=None)
+    s.set_defaults(func=cmd_settings_set)
+
+    s = _sub("word-edit", help="edit one transcript word (set_text/delete/insert_after/merge_next)")
+    s.add_argument("id", help="transcript id")
+    s.add_argument("index", type=int, help="word index")
+    s.add_argument("op", choices=["set_text", "delete", "insert_after", "merge_next"])
+    s.add_argument("--text", default=None, help="new text (for set_text/insert_after)")
+    s.set_defaults(func=cmd_word_edit)
+    s = _sub("transcribe-rm", help="dismiss a finished transcribe job")
+    s.add_argument("id")
+    s.set_defaults(func=cmd_transcribe_rm)
+
+    s = _sub("energy", help="audio-energy loudness envelope (0..1 bars) for a source")
+    s.add_argument("source_id")
+    s.add_argument("--start", type=float, default=None)
+    s.add_argument("--end", type=float, default=None)
+    s.add_argument("--buckets", type=int, default=96)
+    s.set_defaults(func=cmd_energy)
+    s = _sub("scenes", help="scene-cut timestamps within a [start,end] window")
+    s.add_argument("source_id")
+    s.add_argument("--start", type=float, required=True)
+    s.add_argument("--end", type=float, required=True)
+    s.set_defaults(func=cmd_scenes)
+    s = _sub("filmstrip", help="thumbnail filmstrip data-URI across a [start,end] window")
+    s.add_argument("source_id")
+    s.add_argument("--start", type=float, required=True)
+    s.add_argument("--end", type=float, required=True)
+    s.add_argument("--frames", type=int, default=12)
+    s.set_defaults(func=cmd_filmstrip)
+
+    s = _sub("render-get", help="save a finished render .mp4 to a local path")
+    s.add_argument("clip_id")
+    s.add_argument("render_id")
+    s.add_argument("-o", "--out", required=True, help="output file path")
+    s.set_defaults(func=cmd_render_get)
 
     return p
 

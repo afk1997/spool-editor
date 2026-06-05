@@ -101,3 +101,31 @@ def test_brand_kits_crud(c, captured):
     assert captured[-1]["method"] == "PATCH" and captured[-1]["url"].endswith("/api/v1/brand-kits/k1")
     c.delete_brand_kit("k1")
     assert captured[-1]["method"] == "DELETE" and captured[-1]["url"].endswith("/api/v1/brand-kits/k1")
+
+
+# ---- parity additions: settings / word-edit / timeline signals / render fetch ----
+
+def test_settings_get_and_patch(c, captured):
+    c.get_settings()
+    assert captured[-1]["method"] == "GET" and captured[-1]["url"].endswith("/api/v1/settings")
+    c.update_settings({"fast": True})
+    assert captured[-1]["method"] == "PATCH" and _body(captured) == {"fast": True}
+
+
+def test_edit_word_and_dismiss_transcribe(c, captured):
+    c.edit_word("t1", 3, "set_text", text="hello")
+    assert captured[-1]["method"] == "POST" and captured[-1]["url"].endswith("/api/v1/transcripts/t1/words/3")
+    assert _body(captured) == {"op": "set_text", "text": "hello"}
+    c.edit_word("t1", 4, "delete")
+    assert _body(captured) == {"op": "delete"}                       # no text key when not given
+    c.dismiss_transcribe("t1")
+    assert captured[-1]["method"] == "POST" and captured[-1]["url"].endswith("/api/v1/transcripts/t1/dismiss")
+
+
+def test_source_signals_windowed(c, captured):
+    c.source_energy("s1", buckets=64, start=10, end=40)
+    assert captured[-1]["url"] == "http://x/api/v1/sources/s1/energy?buckets=64&start=10.0&end=40.0"
+    c.source_scenes("s1", start=10, end=40)
+    assert captured[-1]["url"].endswith("/api/v1/sources/s1/scenes?start=10.0&end=40.0")
+    c.source_filmstrip("s1", start=10, end=40, frames=8)
+    assert captured[-1]["url"].endswith("/api/v1/sources/s1/filmstrip?start=10.0&end=40.0&frames=8")

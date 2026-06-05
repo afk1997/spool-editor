@@ -271,6 +271,17 @@ class TroveClient:
     def cancel_transcribe(self, tid: str):
         return self.post(f"/api/v1/transcripts/{tid}/cancel")
 
+    def dismiss_transcribe(self, tid: str):
+        return self.post(f"/api/v1/transcripts/{tid}/dismiss")
+
+    def edit_word(self, tid: str, idx: int, op: str, *, text: str | None = None) -> dict:
+        """Edit one transcript word in place (``set_text``/``delete``/``insert_after``/``merge_next``);
+        the server re-renders srt/vtt/txt and re-indexes. ``text`` is required for set_text/insert_after."""
+        body: dict = {"op": op}
+        if text is not None:
+            body["text"] = text
+        return self.post(f"/api/v1/transcripts/{tid}/words/{int(idx)}", body=body)
+
     def export_transcript(self, tid: str, fmt: str = "txt", *,
                           stream_to: str | None = None):
         """Fetch (or stream-save) a finished transcript artifact.
@@ -314,6 +325,24 @@ class TroveClient:
 
     # ----- clips (the render queue) -----------------------------------
 
+    def source_energy(self, source_id: str, *, buckets: int = 96,
+                      start: float | None = None, end: float | None = None) -> dict:
+        """Normalized 0..1 loudness envelope (the audio-energy waveform); optional ``start``/``end``
+        windows it to a clip. Parity with the studio's sourceEnergy."""
+        qs = f"?buckets={int(buckets)}"
+        if start is not None and end is not None:
+            qs += f"&start={float(start)}&end={float(end)}"
+        return self.get(f"/api/v1/sources/{source_id}/energy" + qs)
+
+    def source_scenes(self, source_id: str, *, start: float, end: float) -> dict:
+        """Scene-cut timestamps within ``[start, end]`` (the editor timeline's Scenes lane)."""
+        return self.get(f"/api/v1/sources/{source_id}/scenes?start={float(start)}&end={float(end)}")
+
+    def source_filmstrip(self, source_id: str, *, start: float, end: float, frames: int = 12) -> dict:
+        """Thumbnail filmstrip data-URI across ``[start, end]`` (the editor timeline's Video lane)."""
+        return self.get(f"/api/v1/sources/{source_id}/filmstrip"
+                        f"?start={float(start)}&end={float(end)}&frames={int(frames)}")
+
     def find_moments(self, source_id: str, *, mode: str = "funny", count: int = 5,
                      window: tuple[float, float] | None = None) -> dict:
         """Submit an LLM moment-finding job over a source transcript. Returns the
@@ -353,12 +382,22 @@ class TroveClient:
 
     def render_pipeline(self, source_id: str, *, start: float, end: float,
                         aspect: str = "9:16", mode: str = "pan",
-                        style: str = "opus", preset: str = "tiktok") -> dict:
-        """Submit the one-shot cut→reframe→caption→export pipeline for a source window."""
-        return self.post(f"/api/v1/sources/{source_id}/render", body={
-            "start": start, "end": end, "aspect": aspect, "mode": mode,
-            "style": style, "preset": preset,
-        })
+                        style: str = "opus", preset: str = "tiktok",
+                        stop_after: str | None = None, recipe_id: str | None = None,
+                        brand_kit_id: str | None = None) -> dict:
+        """Submit the one-shot cut→reframe→caption→export pipeline for a source window.
+
+        ``stop_after="reframe"`` is the "Make clips" path: cut + auto-reframe → the review queue,
+        NO burn/export (the honest gate — the agent uses this so clips land for review)."""
+        body: dict = {"start": start, "end": end, "aspect": aspect, "mode": mode,
+                      "style": style, "preset": preset}
+        if stop_after:
+            body["stop_after"] = stop_after
+        if recipe_id:
+            body["recipe_id"] = recipe_id
+        if brand_kit_id:
+            body["brand_kit_id"] = brand_kit_id
+        return self.post(f"/api/v1/sources/{source_id}/render", body=body)
 
     def list_clip_jobs(self, *, kind: str = "", status: str = "", limit: int = 100,
                        offset: int = 0, order: str = "newest") -> dict:

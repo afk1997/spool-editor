@@ -1315,6 +1315,94 @@ def test_rank_endpoint_rejects_non_dict_candidate(client, tmp_path):
     assert r.get_json()["error"] == "bad_candidates"
 
 
+def test_source_energy_endpoint_returns_envelope(client, tmp_path, monkeypatch):
+    # The audio-energy waveform: a normalized 0..1 envelope for a ready source (ffmpeg stubbed).
+    import clip.signals as sig
+    monkeypatch.setattr(sig, "energy_envelope", lambda path, **k: [0.1, 0.5, 1.0])
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())   # source "abc", media on disk
+    r = c.get("/api/v1/sources/abc/energy?buckets=16")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["bars"] == [0.1, 0.5, 1.0] and body["buckets"] == 16
+    assert c.get("/api/v1/sources/ghost/energy").status_code == 404   # unknown source
+
+
+def test_source_scenes_endpoint_windows_to_the_clip(client, tmp_path, monkeypatch):
+    # The editor timeline's Scenes lane: scene-cut times within a clip window (ffmpeg stubbed).
+    import clip.signals as sig
+    monkeypatch.setattr(sig, "scene_cuts", lambda path, s, e, **k: [61.5, 64.25])
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())
+    r = c.get("/api/v1/sources/abc/scenes?start=60&end=120")
+    assert r.status_code == 200 and r.get_json()["cuts"] == [61.5, 64.25]
+    # no window → empty (whole-source detection is too slow to run on demand)
+    assert c.get("/api/v1/sources/abc/scenes").get_json()["cuts"] == []
+
+
+def test_source_filmstrip_endpoint_returns_data_uri(client, tmp_path, monkeypatch):
+    # The editor timeline's Video lane: a thumbnail filmstrip across a clip window (ffmpeg stubbed).
+    import clip.signals as sig
+    monkeypatch.setattr(sig, "filmstrip", lambda path, s, e, **k: "data:image/jpeg;base64,AAAA")
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())
+    r = c.get("/api/v1/sources/abc/filmstrip?start=60&end=105&frames=12")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["strip"].startswith("data:image/jpeg") and body["frames"] == 12
+    # no window → no strip (avoids a full-source extraction on demand)
+    assert c.get("/api/v1/sources/abc/filmstrip").get_json()["strip"] is None
+
+
+# ---- agent: NL → bounded ReAct tool-loop over the full /api/v1 surface ----
+
+def test_agent_route_shapes_loop_result(client, monkeypatch):
+    # The route drives clip.agent.run_agent and returns its reply + real tool trace + jobs.
+    import clip.agent as clip_agent
+    captured = {}
+
+    def fake_run(message, *, client, transcript_lines=None, **kw):
+        captured["message"] = message
+        return {"action": "reply", "reply": "1 job in the queue, done.",
+                "tools": [{"name": "list_clip_jobs", "arg": "", "ms": 5, "ok": True}],
+                "jobs": [{"id": "j1", "kind": "produce", "status": "done"}]}
+
+    monkeypatch.setattr(clip_agent, "run_agent", fake_run)
+    _, c = client
+    r = c.post("/api/v1/agent", json={"message": "what's in the queue?"})
+    assert r.status_code == 200
+    b = r.get_json()
+    assert b["reply"] == "1 job in the queue, done." and b["action"] == "reply"
+    assert b["tools"][0]["name"] == "list_clip_jobs"          # REAL tool trace (not fabricated from jobs)
+    assert b["jobs"][0]["id"] == "j1"
+
+
+def test_agent_route_clarify_carries_kind(client, monkeypatch):
+    import clip.agent as clip_agent
+    monkeypatch.setattr(clip_agent, "run_agent", lambda m, **kw: {
+        "action": "clarify", "reply": "Which one?", "question": "Which source?",
+        "options": ["a", "b"], "kind": "enum", "tools": [], "jobs": []})
+    _, c = client
+    b = c.post("/api/v1/agent", json={"message": "clip it"}).get_json()
+    assert b["action"] == "clarify" and b["question"] == "Which source?"
+    assert b["options"] == ["a", "b"] and b["kind"] == "enum"
+
+
+def test_agent_route_missing_message_400(client):
+    _, c = client
+    assert c.post("/api/v1/agent", json={}).status_code == 400
+
+
+def test_agent_route_llm_unavailable_503(client, monkeypatch):
+    import clip.agent as clip_agent
+    from clip import llm
+    def boom(*a, **k):
+        raise llm.OfflineError("offline")
+    monkeypatch.setattr(clip_agent, "run_agent", boom)
+    _, c = client
+    assert c.post("/api/v1/agent", json={"message": "hi"}).status_code == 503
+
+
 # ---- recipes (Phase 3): saved end-to-end pipelines that drive render.pipeline ----
 
 def test_recipe_crud(client):

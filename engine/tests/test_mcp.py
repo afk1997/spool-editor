@@ -168,6 +168,9 @@ def test_mcp_end_to_end(tmp_path):
         "list_recipes", "get_recipe", "create_recipe", "update_recipe", "delete_recipe",
         "list_watches", "get_watch", "create_watch", "update_watch", "delete_watch", "scan_watch",
         "list_brand_kits", "create_brand_kit", "update_brand_kit", "delete_brand_kit",
+        # settings / transcript-edit / timeline signals (UI<->MCP<->CLI parity)
+        "get_settings", "update_settings", "edit_word", "dismiss_transcribe",
+        "source_energy", "source_scenes", "source_filmstrip", "download_render",
     }
     assert set(result["tool_names"]) == expected_tools, result["tool_names"]
     assert "trove://transcript/{tid}" in result["templates"]

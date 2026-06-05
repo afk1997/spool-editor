@@ -572,6 +572,54 @@ def _build_server():
         r = _safe(lambda: _client.delete_brand_kit(kit_id))
         return {"ok": True, "kit_id": kit_id} if r is None else r
 
+    # ---- settings / transcript-edit / timeline signals (UI<->MCP<->CLI parity) ----
+    # These reach engine surfaces the studio uses (writable settings, word editing, the editor
+    # timeline's energy/scenes/filmstrip lanes) so an agent has the SAME reach as the UI.
+
+    @mcp.tool()
+    def get_settings() -> dict:
+        """Read writable engine config (render defaults: fast/preset/aspect, concurrency, MCP transport)."""
+        return _safe(lambda: _client.get_settings())
+
+    @mcp.tool()
+    def update_settings(changes: dict) -> dict:
+        """Patch writable engine config (the changed keys only)."""
+        return _safe(lambda: _client.update_settings(changes))
+
+    @mcp.tool()
+    def edit_word(transcript_id: str, word_index: int, op: str, text: str = "") -> dict:
+        """Edit ONE transcript word in place — op = set_text|delete|insert_after|merge_next (``text``
+        required for set_text/insert_after). Re-renders srt/vtt/txt + re-indexes. Fix a misheard word
+        before captioning."""
+        return _safe(lambda: _client.edit_word(transcript_id, word_index, op, text=text or None))
+
+    @mcp.tool()
+    def dismiss_transcribe(transcript_id: str) -> dict:
+        """Drop a finished transcribe job from the list."""
+        r = _safe(lambda: _client.dismiss_transcribe(transcript_id))
+        return {"ok": True, "transcript_id": transcript_id} if r is None else r
+
+    @mcp.tool()
+    def source_energy(source_id: str, buckets: int = 96, start: float | None = None,
+                      end: float | None = None) -> dict:
+        """Normalized 0..1 loudness envelope (the audio-energy waveform); optional start/end window it."""
+        return _safe(lambda: _client.source_energy(source_id, buckets=buckets, start=start, end=end))
+
+    @mcp.tool()
+    def source_scenes(source_id: str, start: float, end: float) -> dict:
+        """Scene-cut timestamps within [start, end] (the editor timeline's Scenes lane)."""
+        return _safe(lambda: _client.source_scenes(source_id, start=start, end=end))
+
+    @mcp.tool()
+    def source_filmstrip(source_id: str, start: float, end: float, frames: int = 12) -> dict:
+        """Thumbnail filmstrip data-URI across [start, end] (the editor timeline's Video lane)."""
+        return _safe(lambda: _client.source_filmstrip(source_id, start=start, end=end, frames=frames))
+
+    @mcp.tool()
+    def download_render(clip_id: str, render_id: str, save_to: str) -> dict:
+        """Save a finished render .mp4 to a local path (the produced clip bytes)."""
+        return _safe(lambda: _client.download_render(clip_id, render_id, stream_to=save_to))
+
     # ---- resources --------------------------------------------------
     # Resources let the agent surface live application state to the user
     # without spending tool-call budget on plain reads.
