@@ -248,13 +248,28 @@ def _parse_progress_float(s: str) -> float:
         return 0.0
 
 
+DEFAULT_DOWNLOAD_TIMEOUT = 3600
+
+
+def _download_timeout_default() -> int:
+    """Wall-clock budget for one download. 300s silently killed any long podcast/lecture —
+    exactly the long-form content the clip workflow exists for. Overridable per install
+    via TROVE_DOWNLOAD_TIMEOUT (seconds)."""
+    raw = os.environ.get("TROVE_DOWNLOAD_TIMEOUT", "").strip()
+    try:
+        v = int(raw)
+    except ValueError:
+        return DEFAULT_DOWNLOAD_TIMEOUT
+    return v if v > 0 else DEFAULT_DOWNLOAD_TIMEOUT
+
+
 def run_download(
     *,
     url: str,
     out_template: str,
     format_choice: str,
     format_id: str | None,
-    timeout: int = 300,
+    timeout: int | None = None,
     progress_cb=None,
     register_process=None,
     was_paused_check: object = None,
@@ -275,6 +290,8 @@ def run_download(
     register_process signature: (popen) — called once with the live Popen handle
     so callers can implement cancellation.
     """
+    if timeout is None:
+        timeout = _download_timeout_default()
     argv = build_download_argv(
         url=url,
         out_template=out_template,

@@ -1,6 +1,8 @@
 import os
 import subprocess
+import types
 import pytest
+import runner
 from runner import build_info_argv, build_download_argv
 
 
@@ -358,3 +360,39 @@ def test_run_download_runs_cleanup_when_not_paused(monkeypatch, tmp_path):
     )
     assert not part_file.exists()  # cleaned up
     assert res.error_category is not None
+
+
+def test_download_timeout_defaults_to_an_hour(monkeypatch, tmp_path):
+    monkeypatch.delenv("TROVE_DOWNLOAD_TIMEOUT", raising=False)
+    seen = {}
+    def fake_run(argv, capture_output, text, timeout):
+        seen["timeout"] = timeout
+        return types.SimpleNamespace(returncode=1, stderr="boom", stdout="")
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    runner.run_download(url="https://example.com/v", out_template=str(tmp_path / "x.%(ext)s"),
+                        format_choice="video", format_id=None)
+    assert seen["timeout"] == 3600
+
+
+def test_download_timeout_env_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("TROVE_DOWNLOAD_TIMEOUT", "7200")
+    seen = {}
+    def fake_run(argv, capture_output, text, timeout):
+        seen["timeout"] = timeout
+        return types.SimpleNamespace(returncode=1, stderr="boom", stdout="")
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    runner.run_download(url="https://example.com/v", out_template=str(tmp_path / "x.%(ext)s"),
+                        format_choice="video", format_id=None)
+    assert seen["timeout"] == 7200
+
+
+def test_download_timeout_garbage_env_falls_back(monkeypatch, tmp_path):
+    monkeypatch.setenv("TROVE_DOWNLOAD_TIMEOUT", "not-a-number")
+    seen = {}
+    def fake_run(argv, capture_output, text, timeout):
+        seen["timeout"] = timeout
+        return types.SimpleNamespace(returncode=1, stderr="boom", stdout="")
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    runner.run_download(url="https://example.com/v", out_template=str(tmp_path / "x.%(ext)s"),
+                        format_choice="video", format_id=None)
+    assert seen["timeout"] == 3600
