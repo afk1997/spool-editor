@@ -77,6 +77,8 @@ export interface AgentMessage {
   jobChips?: { id: string; kind: string }[];
   /** source context the turn was asked with — re-sent when this elicit is answered */
   sourceId?: string;
+  /** set on a confirm elicit: re-ask payload for the approved turn */
+  confirmFor?: { text: string; tool: string };
 }
 
 const RECIPES = ["3 funny shorts", "Insightful carousel", "Hot-take TikToks", "Best moment → 9:16"];
@@ -291,7 +293,7 @@ interface SpoolCtx {
   paletteOpen: boolean; openPalette: () => void; closePalette: () => void;
   shortcutsOpen: boolean; openShortcuts: () => void; closeShortcuts: () => void;
   agentMessages: AgentMessage[]; working: boolean;
-  askAgent: (text: string, sourceId?: string) => void;
+  askAgent: (text: string, sourceId?: string, confirmTool?: string) => void;
   answerElicit: (msg: AgentMessage, answer: unknown) => void;
   makeClipsFrom: (sel: { source_id?: string; start?: number; end?: number; id?: string; title?: string }[], opts?: { aspect?: string; mode?: string; style?: string; preset?: string }) => void;
   /** Poll a clip job to a terminal state — pages sequence dependent jobs with it. */
@@ -359,13 +361,13 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
 
   const push = useCallback((m: AgentMessage) => setAgentMessages((a) => [...a, m]), []);
 
-  const askAgent = useCallback((text: string, sourceId?: string) => {
+  const askAgent = useCallback((text: string, sourceId?: string, confirmTool?: string) => {
     if (!text.trim()) return;
     setAgentOpen(true);
     push({ role: "user", text });
     setWorking(true);
     client
-      .agent(text, sourceId ? { sourceId } : {})
+      .agent(text, { sourceId, confirmTool })
       .then((r) => {
         setWorking(false);
         // Real per-step tool trace from the ReAct loop (read tools that start no job are visible too).
@@ -376,6 +378,14 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
           pushToast({ icon: "sparkles", tone: "info", title: `Agent started ${r.jobs.length} job${r.jobs.length > 1 ? "s" : ""}`, body: "Track them in the Render Queue" });
         if (r.action === "clarify" && r.question)
           push({ role: "elicit", id: "e" + ++elicitSeq.current, kind: (r.kind as AgentMessage["kind"]) ?? "enum", tag: "agent needs you", q: r.question, options: r.options ?? [], sourceId });
+        if (r.action === "confirm" && r.pending)
+          push({
+            role: "elicit", id: "e" + ++elicitSeq.current, kind: "confirm",
+            tag: "agent needs approval",
+            q: r.question || `Allow ${r.pending.tool}?`,
+            options: r.options ?? ["Confirm", "Cancel"], yes: "Confirm",
+            sourceId, confirmFor: { text, tool: r.pending.tool },
+          });
       })
       .catch(() => {
         setWorking(false);
@@ -385,9 +395,18 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
 
   const answerElicit = useCallback((msg: AgentMessage, answer: unknown) => {
     setAgentMessages((a) => a.map((m) => (m === msg || (msg.id && m.id === msg.id) ? { ...m, answered: true, answer } : m)));
+    if (msg.confirmFor) {
+      // Approval re-runs the SAME message with the tool pre-approved for one call — the
+      // loop re-plans, so args may differ from the pending preview; the gate's contract
+      // is "no gated tool without a human click", not arg-exact replay.
+      const approved = String(answer).toLowerCase() === "yes";
+      if (approved) askAgent(msg.confirmFor.text, msg.sourceId, msg.confirmFor.tool);
+      else push({ role: "agent", text: "Cancelled — nothing was run." });
+      return;
+    }
     const text = Array.isArray(answer) ? answer.join(", ") : String(answer ?? "");
     if (text) askAgent(text, msg.sourceId); // re-ask with the source context the clarify was raised in
-  }, [askAgent]);
+  }, [askAgent, push]);
 
   /** Poll a clip job until it leaves the running/queued state, so a dependent next step (caption
    *  after reframe, export after caption) starts only once its input file is fully written. */

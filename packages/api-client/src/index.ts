@@ -425,10 +425,16 @@ export class SpoolApiClient {
    *  clip-tool action. Blocks while the LLM plans, so show a thinking state. */
   agent(
     message: string,
-    opts: { sourceId?: string } = {},
+    opts: { sourceId?: string; confirmTool?: string } = {},
     reqOpts: { timeoutMs?: number; signal?: AbortSignal } = {},
   ): Promise<AgentResponse> {
-    return this.post("/agent", { message, source_id: opts.sourceId }, { timeoutMs: 600_000, ...reqOpts });
+    // `confirm_tool` pre-approves ONE invocation of a gated tool (name-only match; the loop
+    // re-plans, so args may differ). Undefined keys serialize away via JSON.stringify.
+    return this.post(
+      "/agent",
+      { message, source_id: opts.sourceId, confirm_tool: opts.confirmTool },
+      { timeoutMs: 600_000, ...reqOpts },
+    );
   }
 
   // ── brand kits (S9) ──

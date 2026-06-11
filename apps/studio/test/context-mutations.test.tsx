@@ -134,6 +134,69 @@ describe("makeClipsFrom surfaces mutation-chain failures (no silent fire-and-for
   });
 });
 
+describe("agent confirm flow: gated tools require a click before running", () => {
+  it("a confirm turn re-asks with confirmTool when the user approves", async () => {
+    client = {
+      getSettings: vi.fn().mockResolvedValue({ offline: false }),
+      agent: vi
+        .fn()
+        .mockResolvedValueOnce({
+          reply: "", action: "confirm", jobs: [], tools: [],
+          question: "Allow delete_recipe?", options: ["Confirm", "Cancel"], kind: "confirm",
+          pending: { tool: "delete_recipe", args: { recipe_id: "r1" } },
+        })
+        .mockResolvedValueOnce({ reply: "deleted", action: "reply", jobs: [], tools: [] }),
+    };
+    const ctx = mountCtx();
+
+    act(() => { ctx.get().askAgent("delete my recipe"); });
+
+    // The confirm turn surfaces as an elicit card (kind confirm) carrying the re-ask payload.
+    await waitFor(() => {
+      const m = ctx.get().agentMessages.find((x) => x.role === "elicit" && x.kind === "confirm");
+      expect(m).toBeTruthy();
+      expect(m!.confirmFor).toEqual({ text: "delete my recipe", tool: "delete_recipe" });
+    });
+    const elicit = ctx.get().agentMessages.find((x) => x.role === "elicit" && x.kind === "confirm")!;
+
+    act(() => { ctx.get().answerElicit(elicit, "yes"); });
+
+    // Approval re-sends the SAME message with the gated tool pre-approved for one call.
+    await waitFor(() => expect(client.agent).toHaveBeenCalledTimes(2));
+    expect(client.agent).toHaveBeenNthCalledWith(2, "delete my recipe", {
+      sourceId: undefined,
+      confirmTool: "delete_recipe",
+    });
+    // The post-approval reply lands in the stream.
+    await waitFor(() => expect(ctx.get().agentMessages.some((x) => x.text === "deleted")).toBe(true));
+  });
+
+  it("a declined confirm runs nothing", async () => {
+    client = {
+      getSettings: vi.fn().mockResolvedValue({ offline: false }),
+      agent: vi.fn().mockResolvedValueOnce({
+        reply: "", action: "confirm", jobs: [], tools: [],
+        question: "Allow delete_recipe?", options: ["Confirm", "Cancel"], kind: "confirm",
+        pending: { tool: "delete_recipe", args: { recipe_id: "r1" } },
+      }),
+    };
+    const ctx = mountCtx();
+
+    act(() => { ctx.get().askAgent("delete my recipe"); });
+    await waitFor(() =>
+      expect(ctx.get().agentMessages.some((x) => x.role === "elicit" && x.kind === "confirm")).toBe(true),
+    );
+    const elicit = ctx.get().agentMessages.find((x) => x.role === "elicit" && x.kind === "confirm")!;
+
+    act(() => { ctx.get().answerElicit(elicit, "no"); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    // No second agent call; a cancellation note is appended instead.
+    expect(client.agent).toHaveBeenCalledTimes(1);
+    expect(ctx.get().agentMessages.some((x) => x.text === "Cancelled — nothing was run.")).toBe(true);
+  });
+});
+
 describe("SpoolCtx exposes awaitClipJob for pages to sequence dependent jobs", () => {
   it("awaitClipJob is on the context and resolves when the job is already terminal", async () => {
     client = { getClipJob: vi.fn().mockResolvedValue({ id: "j", status: "done" }) };

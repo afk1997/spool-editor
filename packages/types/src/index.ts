@@ -443,8 +443,10 @@ export interface TranscriptDoc {
  *  the studio renders `question` + `options` as an inline card. */
 export interface AgentResponse {
   reply: string;
-  action: "find_moments" | "make_clip" | "clarify" | "reply";
+  action: "find_moments" | "make_clip" | "clarify" | "reply" | "confirm";
   jobs: ClipJobView[];
+  /** Set when action === "confirm": the gated tool call awaiting explicit approval. */
+  pending?: { tool: string; args: Record<string, unknown> };
   /** Per-step tool trace from the ReAct loop — one entry per tool the agent ran this turn. */
   tools?: { name: string; arg?: string; ms?: number; ok?: boolean }[];
   question?: string;
