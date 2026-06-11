@@ -93,3 +93,14 @@ def test_intermediate_flags_default_follow_pick_encoder(monkeypatch):
     assert _val(exporter.intermediate_encode_flags(), "-c:v") == "h264_videotoolbox"
     monkeypatch.setattr(machine, "_detect_gpu", lambda: "cpu")
     assert _val(exporter.intermediate_encode_flags(), "-c:v") == "libx264"
+
+
+def test_export_forces_yuv420p(captured, tmp_path):
+    exporter.export(str(tmp_path / "in.mp4"), preset="tiktok", out_path=str(tmp_path / "out.mp4"))
+    assert _val(captured["argv"], "-pix_fmt") == "yuv420p"
+
+
+def test_intermediate_flags_force_yuv420p():
+    for enc in ("h264_videotoolbox", "h264_nvenc", "libx264"):
+        flags = exporter.intermediate_encode_flags(enc)
+        assert flags[flags.index("-pix_fmt") + 1] == "yuv420p", enc

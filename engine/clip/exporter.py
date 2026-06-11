@@ -55,11 +55,11 @@ def intermediate_encode_flags(encoder: str | None = None) -> list[str]:
         # q:v 75 ≈ the libx264 crf18 fallback in size/quality (measured ~15MB vs 14.5MB on a 30s
         # 1080×1920 clip) — visually lossless, so the intermediate doesn't bottleneck the final
         # export; speed is q-independent on hardware (~same wall-time at any q:v).
-        return ["-c:v", "h264_videotoolbox", "-q:v", "75"]
+        return ["-c:v", "h264_videotoolbox", "-q:v", "75", "-pix_fmt", "yuv420p"]
     if enc == "h264_nvenc":
-        return ["-c:v", "h264_nvenc", "-rc", "vbr", "-cq", "18", "-preset", "p4"]
+        return ["-c:v", "h264_nvenc", "-rc", "vbr", "-cq", "18", "-preset", "p4", "-pix_fmt", "yuv420p"]
     if enc == "libx264":
-        return ["-c:v", "libx264", "-crf", "18", "-preset", "veryfast"]
+        return ["-c:v", "libx264", "-crf", "18", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
     return ["-c:v", enc]   # unknown encoder: set the codec, let ffmpeg default the rest
 
 
@@ -86,6 +86,9 @@ def export(
     argv = [
         "ffmpeg", "-y", "-i", clip_path,
         "-c:v", enc, "-b:v", p["v_bitrate"], "-r", str(p["fps"]),
+        # 4:2:0 8-bit: 10-bit HEVC (iPhone), ProRes 4:2:2 etc. otherwise yield High-4:2:2/
+        # High-10 H.264 that Safari/QuickTime silently refuse and some uploaders reject.
+        "-pix_fmt", "yuv420p",
         *_speed_flags(enc, fast),
         "-af", _LOUDNORM, "-c:a", "aac", "-b:a", p["a_bitrate"],
         "-movflags", "+faststart",          # web-streamable (moov atom up front)
