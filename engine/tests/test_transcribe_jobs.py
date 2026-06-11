@@ -170,3 +170,31 @@ def test_cancel_with_live_process_handle_still_persists(tmp_path):
     # Clean up: release the worker and drain the thread pool.
     gate.set()
     mgr.shutdown(wait=True)
+
+
+def _wait_tj(mgr, jid, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if mgr.get(jid).status in (TranscribeStatus.DONE, TranscribeStatus.ERROR):
+            return
+        time.sleep(0.01)
+
+
+def test_started_at_is_wall_clock(tmp_path):
+    mgr = TranscribeJobManager(store_path=tmp_path / "tj.json")
+    jid = mgr.submit(parent_job_id="p", model_path="m.bin", target=lambda j, model_path: None)
+    job = mgr.get(jid)
+    assert abs(job.started_at - time.time()) < 10, "started_at must be epoch seconds, not monotonic"
+
+
+def test_get_by_parent_prefers_most_recent_across_restart(tmp_path):
+    store = tmp_path / "tj.json"
+    m1 = TranscribeJobManager(store_path=store)
+    a = m1.submit(parent_job_id="p", model_path="m.bin", target=lambda j, model_path: None)
+    _wait_tj(m1, a)
+    time.sleep(0.02)
+    b = m1.submit(parent_job_id="p", model_path="m.bin", target=lambda j, model_path: None)
+    _wait_tj(m1, b)
+    m2 = TranscribeJobManager(store_path=store)   # restart: ordering must survive the reload
+    got = m2.get_by_parent("p")
+    assert got is not None and got.id == b

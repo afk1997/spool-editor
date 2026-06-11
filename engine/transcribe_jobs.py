@@ -34,7 +34,7 @@ class TranscribeJob:
     model_used: str
     status: TranscribeStatus = TranscribeStatus.QUEUED
     progress_pct: int = 0
-    started_at: float = field(default_factory=time.monotonic)
+    started_at: float = field(default_factory=time.time)
     duration_seconds: float = 0.0
     language_detected: str = ""
     error_category: str | None = None

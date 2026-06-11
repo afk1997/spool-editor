@@ -47,7 +47,7 @@ class ClipJob:
     status: ClipStatus = ClipStatus.QUEUED
     progress_pct: int = 0
     stage: str = ""                        # human stage label (pipeline: cut→reframe→…)
-    started_at: float = field(default_factory=time.monotonic)
+    started_at: float = field(default_factory=time.time)
     params: dict = field(default_factory=dict)   # kind-specific inputs
     result: dict = field(default_factory=dict)   # kind-specific outputs
     error_category: str | None = None

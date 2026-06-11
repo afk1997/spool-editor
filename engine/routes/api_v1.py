@@ -271,7 +271,7 @@ def _summarize_job(job, pct: int, elapsed: float) -> str:
 
 
 def _tj_view(tj) -> dict:
-    elapsed = max(0.0, time.monotonic() - tj.started_at)
+    elapsed = max(0.0, time.time() - tj.started_at)
     out = {
         "id": tj.id,
         "parent_job_id": tj.parent_job_id,
@@ -316,7 +316,7 @@ def _summarize_tj(tj, elapsed: float) -> str:
 
 
 def _clip_job_view(cj) -> dict:
-    elapsed = max(0.0, time.monotonic() - cj.started_at)
+    elapsed = max(0.0, time.time() - cj.started_at)
     out = {
         "id": cj.id,
         "kind": cj.kind,
