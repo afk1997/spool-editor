@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { SpoolApiClient } from "@spool/api-client";
 import type { ClipJobView, EventsSnapshot, RankFactors, TranscriptWord } from "@spool/types";
@@ -320,13 +320,13 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   const [offline, setOffline] = useState(true);
   const elicitSeq = useRef(0); // monotonic, collision-free ids for elicitation cards
 
-  const pushToast = (t: Omit<Toast, "id">) => {
+  const pushToast = useCallback((t: Omit<Toast, "id">) => {
     const id = Date.now() + Math.random();
     setToasts((ts) => [...ts, { ...t, id }]);
     setTimeout(() => setToasts((ts) => ts.filter((x) => x.id !== id)), 4200);
-  };
+  }, []);
 
-  const nav = (screen: string, params: { id?: string; tab?: string } = {}) => {
+  const nav = useCallback((screen: string, params: { id?: string; tab?: string } = {}) => {
     const id = params.id;
     const q = params.tab ? `?tab=${encodeURIComponent(params.tab)}` : "";
     switch (screen) {
@@ -337,11 +337,11 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
       case "caption": return router.push(id ? `/clips/${id}/caption` : "/clips");
       default: return router.push(ROUTE[screen] ?? "/");
     }
-  };
+  }, [router]);
 
-  const push = (m: AgentMessage) => setAgentMessages((a) => [...a, m]);
+  const push = useCallback((m: AgentMessage) => setAgentMessages((a) => [...a, m]), []);
 
-  const askAgent = (text: string, sourceId?: string) => {
+  const askAgent = useCallback((text: string, sourceId?: string) => {
     if (!text.trim()) return;
     setAgentOpen(true);
     push({ role: "user", text });
@@ -363,24 +363,24 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
         setWorking(false);
         push({ role: "agent", text: "I couldn't reach the engine just now. Make sure it's running, then try again." });
       });
-  };
+  }, [client, push, pushToast]);
 
-  const answerElicit = (msg: AgentMessage, answer: unknown) => {
+  const answerElicit = useCallback((msg: AgentMessage, answer: unknown) => {
     setAgentMessages((a) => a.map((m) => (m === msg || (msg.id && m.id === msg.id) ? { ...m, answered: true, answer } : m)));
     const text = Array.isArray(answer) ? answer.join(", ") : String(answer ?? "");
     if (text) askAgent(text, msg.sourceId); // re-ask with the source context the clarify was raised in
-  };
+  }, [askAgent]);
 
   /** Poll a clip job until it leaves the running/queued state, so a dependent next step (caption
    *  after reframe, export after caption) starts only once its input file is fully written. */
-  const awaitClipJob = async (id?: string): Promise<void> => {
+  const awaitClipJob = useCallback(async (id?: string): Promise<void> => {
     if (!id) return;
     for (let i = 0; i < 600; i++) {
       const j = await client.getClipJob(id).catch(() => null);
       if (!j || j.status === "done" || j.status === "error" || j.status === "cancelled") return;
       await new Promise((r) => setTimeout(r, 1000));
     }
-  };
+  }, [client]);
 
   /** Two paths, by what's passed:
    *  - Discovery candidates (have source_id + start/end) → CUT + auto-reframe to 9:16 and STOP
@@ -388,7 +388,7 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
    *    each clip first (the user-requested flow).
    *  - An existing clip (the Editor's Render, id only) → caption (chosen style) + export, and go
    *    to the Render Queue to watch it. Reframe first if the Editor changed the format. */
-  const makeClipsFrom = (
+  const makeClipsFrom = useCallback((
     sel: { source_id?: string; start?: number; end?: number; id?: string; title?: string }[],
     opts: { aspect?: string; mode?: string; style?: string; preset?: string } = {},
   ) => {
@@ -421,24 +421,40 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
     pushToast({ icon: "film", tone: "info", title: `Rendering ${existing.length} clip${existing.length > 1 ? "s" : ""}`, body: "Burning captions + exporting — track it in the Render Queue" });
     setAgentOpen(true);
     nav("queue");
-  };
+  }, [client, nav, pushToast, awaitClipJob]);
 
-  const deps: SpoolDep[] = doctor.data
-    ? Object.entries(doctor.data.tools).map(([id, t]) => ({
-        id, name: id, note: "", status: t.present ? "ok" : "missing", ver: t.version || "—",
-      }))
-    : [];
+  // Mappers walk the full snapshot; unmemoized they re-ran 4x on EVERY provider render —
+  // including renders caused by toasts/panel state — and the ~1Hz SSE delta churned every
+  // useSpool() consumer. Keyed on the snapshot: identity is stable between frames.
+  const sources = useMemo(() => mapSources(snapshot), [snapshot]);
+  const clips = useMemo(() => mapClips(snapshot), [snapshot]);
+  const jobs = useMemo(() => mapJobs(snapshot), [snapshot]);
+  const downloads = useMemo(() => mapDownloads(snapshot), [snapshot]);
+  const deps = useMemo<SpoolDep[]>(
+    () =>
+      doctor.data
+        ? Object.entries(doctor.data.tools).map(([id, t]) => ({
+            id, name: id, note: "", status: t.present ? "ok" : "missing", ver: t.version || "—",
+          }))
+        : [],
+    [doctor.data],
+  );
 
-  const value: SpoolCtx = {
-    client,
-    sources: mapSources(snapshot), clips: mapClips(snapshot), jobs: mapJobs(snapshot),
-    downloads: mapDownloads(snapshot), recipes: RECIPES, deps, snapshot,
-    nav, agentOpen, openAgent: () => setAgentOpen(true), toggleAgent: () => setAgentOpen((o) => !o), closeAgent: () => setAgentOpen(false),
-    paletteOpen, openPalette: () => setPaletteOpen(true), closePalette: () => setPaletteOpen(false),
-    shortcutsOpen, openShortcuts: () => setShortcutsOpen(true), closeShortcuts: () => setShortcutsOpen(false),
-    agentMessages, working, askAgent, answerElicit, makeClipsFrom,
-    toasts, pushToast, offline, toggleOffline: () => setOffline((o) => !o),
-  };
+  const value = useMemo<SpoolCtx>(
+    () => ({
+      client,
+      sources, clips, jobs, downloads, recipes: RECIPES, deps, snapshot,
+      nav, agentOpen, openAgent: () => setAgentOpen(true), toggleAgent: () => setAgentOpen((o) => !o), closeAgent: () => setAgentOpen(false),
+      paletteOpen, openPalette: () => setPaletteOpen(true), closePalette: () => setPaletteOpen(false),
+      shortcutsOpen, openShortcuts: () => setShortcutsOpen(true), closeShortcuts: () => setShortcutsOpen(false),
+      agentMessages, working, askAgent, answerElicit, makeClipsFrom,
+      toasts, pushToast, offline, toggleOffline: () => setOffline((o) => !o),
+    }),
+    [
+      client, sources, clips, jobs, downloads, deps, snapshot, nav, agentOpen, paletteOpen,
+      shortcutsOpen, agentMessages, working, askAgent, answerElicit, makeClipsFrom, toasts, pushToast, offline,
+    ],
+  );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
