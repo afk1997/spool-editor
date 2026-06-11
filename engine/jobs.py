@@ -1,5 +1,6 @@
 from __future__ import annotations
 import enum
+import logging
 import os
 import threading
 import time
@@ -75,7 +76,9 @@ class JobManager:
         self.max_workers = max_workers
         self.ttl_seconds = ttl_seconds
         self._jobs: dict[str, Job] = {}
-        self._lock = threading.Lock()
+        # RLock: cancel() persists while already holding the lock, and _persist itself
+        # takes the lock to snapshot — reentrancy keeps that legal.
+        self._lock = threading.RLock()
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._inflight = 0
         self._queue_size = queue_size
@@ -102,10 +105,14 @@ class JobManager:
             return
         try:
             from jobs_store import persist_atomic
-            persist_atomic(self._jobs, self._store_path)
+            with self._lock:
+                snapshot = dict(self._jobs)   # never serialize the live dict unlocked
+            persist_atomic(snapshot, self._store_path)
         except Exception:
-            # Persistence failure shouldn't crash a download.
-            pass
+            # Persistence failure shouldn't crash a download — but a dropped terminal
+            # write IS data loss across restart, so say so instead of swallowing.
+            logging.getLogger(__name__).warning(
+                "job-store persist failed for %s", self._store_path, exc_info=True)
 
     def submit(
         self,

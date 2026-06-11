@@ -11,6 +11,7 @@ version. We never want a corrupted store to crash the app.
 from __future__ import annotations
 import json
 import os
+import tempfile
 from pathlib import Path
 
 from jobs import Job, JobStatus
@@ -75,14 +76,16 @@ def dump_jobs(jobs: dict[str, Job]) -> dict:
 def persist_atomic(jobs: dict[str, Job], path: Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    # Unique temp file per writer (mkstemp): concurrent persists previously shared one
+    # ".tmp" name, so the losing os.replace raced and raised FileNotFoundError.
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     try:
-        tmp.write_text(json.dumps(dump_jobs(jobs), indent=2))
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(dump_jobs(jobs), indent=2))
         os.replace(tmp, path)
     except Exception:
-        # If the temp write fails, leave the existing file intact and clean up.
         try:
-            tmp.unlink()
+            os.unlink(tmp)
         except OSError:
             pass
         raise

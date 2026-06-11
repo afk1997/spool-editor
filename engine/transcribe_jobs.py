@@ -7,6 +7,7 @@ lifecycle independent of the media Job's status.
 from __future__ import annotations
 import enum
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -111,16 +112,17 @@ class TranscribeJobManager:
         if self._store_path is None:
             return
         try:
-            payload = {
-                "schema_version": 1,
-                "jobs": {
-                    jid: {k: v for k, v in asdict(j).items() if k in _PERSISTENT_FIELDS}
-                    for jid, j in self._jobs.items()
-                },
-            }
-            # asdict converts enum to "queued" via str enum; ensure status is a string
-            for jid, raw in payload["jobs"].items():
-                raw["status"] = self._jobs[jid].status.value
+            with self._lock:
+                payload = {
+                    "schema_version": 1,
+                    "jobs": {
+                        jid: {k: v for k, v in asdict(j).items() if k in _PERSISTENT_FIELDS}
+                        for jid, j in self._jobs.items()
+                    },
+                }
+                # asdict converts enum to "queued" via str enum; ensure status is a string
+                for jid, raw in payload["jobs"].items():
+                    raw["status"] = self._jobs[jid].status.value
 
             self._store_path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(prefix=".tj.", dir=str(self._store_path.parent))
@@ -133,7 +135,8 @@ class TranscribeJobManager:
                 except OSError: pass
                 raise
         except Exception:
-            pass  # persistence failure shouldn't crash a transcribe
+            logging.getLogger(__name__).warning(
+                "transcribe-store persist failed for %s", self._store_path, exc_info=True)
 
     # ----- lifecycle -----------------------------------------------------
 

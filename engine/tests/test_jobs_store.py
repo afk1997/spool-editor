@@ -1,8 +1,10 @@
 import json
+import threading
+import time
 from pathlib import Path
 import pytest
 
-from jobs import Job, JobStatus
+from jobs import Job, JobManager, JobStatus
 from jobs_store import dump_jobs, load_jobs, persist_atomic
 
 
@@ -105,3 +107,39 @@ def test_dump_serializes_all_persistent_fields(tmp_path):
     assert s["format_choice"] == "audio"
     assert s["out_template"] == "/tmp/x.%(ext)s"
     assert s["filename"] == "x.mp4"
+
+
+def test_concurrent_submits_never_drop_a_persisted_job(tmp_path):
+    """4 threads × 50 submits: _persist used to serialize the LIVE dict outside the lock
+    (RuntimeError: dict changed size — swallowed) and all writers shared one .tmp name."""
+    store = tmp_path / "jobs.json"
+    mgr = JobManager(max_workers=4, store_path=store)
+    def hammer(n):
+        for i in range(50):
+            mgr.submit(target=lambda j: None, title=f"t{n}-{i}", url=f"u{n}-{i}")
+    threads = [threading.Thread(target=hammer, args=(n,)) for n in range(4)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        snap = mgr.snapshot_jobs()
+        if len(snap) == 200 and all(j.status is JobStatus.DONE for j in snap):
+            break
+        time.sleep(0.05)
+    mgr._persist()  # one final settled write
+    data = json.loads(store.read_text())
+    assert len(data["jobs"]) == 200
+
+
+def test_cancel_done_job_persists_without_deadlock(tmp_path):
+    """cancel() persists while holding the manager lock — must not deadlock now that
+    _persist snapshots under the (reentrant) lock."""
+    mgr = JobManager(max_workers=1, store_path=tmp_path / "jobs.json")
+    jid = mgr.submit(target=lambda j: None, title="t", url="u")
+    deadline = time.time() + 5
+    while mgr.get(jid).status is not JobStatus.DONE and time.time() < deadline:
+        time.sleep(0.01)
+    result = []
+    t = threading.Thread(target=lambda: result.append(mgr.cancel(jid)))
+    t.start(); t.join(timeout=5)
+    assert result == [True], "cancel deadlocked or failed"
