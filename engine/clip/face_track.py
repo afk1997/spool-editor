@@ -126,10 +126,22 @@ def _reduce_points(points, vi: int, *, tol: float = 1.5):
         forced = {kept[0], kept[-1]} | {i for i in kept if points[i][5]}
         free = [i for i in kept if i not in forced]
         budget = max(0, _MAX_KEYFRAMES - len(forced))
-        if budget < len(free):
-            step = len(free) / budget
-            free = [free[min(len(free) - 1, int(k * step))] for k in range(budget)]
-        kept = sorted(forced.union(free))
+        if budget == 0:
+            # More hard cuts than the whole budget: drop the in-between points and
+            # uniformly decimate the cuts themselves to the cap — a coarser pan beats
+            # an expression ffmpeg refuses to parse (or a ZeroDivisionError here).
+            forced_sorted = sorted(forced)
+            if len(forced_sorted) > _MAX_KEYFRAMES:
+                step = (len(forced_sorted) - 1) / (_MAX_KEYFRAMES - 1)
+                keep_idx = {forced_sorted[round(k * step)] for k in range(_MAX_KEYFRAMES)}
+                keep_idx |= {forced_sorted[0], forced_sorted[-1]}
+                forced_sorted = sorted(keep_idx)
+            kept = forced_sorted
+        else:
+            if budget < len(free):
+                step = len(free) / budget
+                free = [free[min(len(free) - 1, int(k * step))] for k in range(budget)]
+            kept = sorted(forced.union(free))
     return [points[i] for i in kept]
 
 

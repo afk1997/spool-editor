@@ -188,3 +188,19 @@ def test_reduce_points_keeps_endpoints_snaps_and_collapses_collinear():
     assert red[0] == pts[0] and red[-1] == pts[-1]   # endpoints preserved
     assert pts[20][0] in ts                           # the snap (hard cut) boundary kept
     assert len(red) < 12                              # collinear ramp collapses, not 40 points
+
+
+def test_reduce_points_survives_more_cuts_than_the_keyframe_budget():
+    """A fast-cut clip can have more hard-cut (snap) boundaries than _MAX_KEYFRAMES:
+    budget hits 0 and `len(free)/budget` divided by zero, crashing track()/crop_exprs()."""
+    import clip.face_track as face_track
+    pts = []
+    t = 0.0
+    for i in range(80):                       # 80 snaps > _MAX_KEYFRAMES (50)
+        pts.append((t, 10.0 * i, 5.0, 100.0, 200.0, 1))
+        t += 0.5
+    out = face_track._reduce_points(pts, 1)
+    assert 2 <= len(out) <= face_track._MAX_KEYFRAMES
+    assert out[0] == pts[0] and out[-1] == pts[-1]   # endpoints always survive
+    for e in face_track.crop_exprs(pts):              # public API must not raise
+        assert isinstance(e, str) and e
