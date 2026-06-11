@@ -105,8 +105,8 @@ def _rois():
 
 def test_speaker_track_fused_when_diarization_present(monkeypatch, tmp_path):
     measured = []
-    monkeypatch.setattr(reframe, "_measure_roi_motion",
-                        lambda clip, roi, out, **kw: measured.append(roi))
+    monkeypatch.setattr(reframe, "_measure_roi_motion_pair",
+                        lambda clip, roi_l, roi_r, out_l, out_r, **kw: measured.extend([roi_l, roi_r]))
     monkeypatch.setattr(reframe, "_roi_motion_segments",
                         lambda l, r, m, smoothing=None: [{"start": 0.0, "end": 5.0, "speaker": "left"},
                                          {"start": 5.0, "end": 10.0, "speaker": "right"}])
@@ -116,7 +116,7 @@ def test_speaker_track_fused_when_diarization_present(monkeypatch, tmp_path):
         diarization=[{"start": 0.0, "end": 5.0, "speaker": "A"},
                      {"start": 5.0, "end": 10.0, "speaker": "B"}],
     )
-    assert len(measured) == 2                      # both ROIs measured
+    assert len(measured) == 2                      # both ROIs measured (via single pair call)
     assert track["source"] == "fused"
     assert track["roiL"] == left and track["roiR"] == right
     assert track["segments"][0]["speaker"] == "left"
@@ -124,7 +124,7 @@ def test_speaker_track_fused_when_diarization_present(monkeypatch, tmp_path):
 
 
 def test_speaker_track_roi_only_without_diarization(monkeypatch, tmp_path):
-    monkeypatch.setattr(reframe, "_measure_roi_motion", lambda *a, **k: None)
+    monkeypatch.setattr(reframe, "_measure_roi_motion_pair", lambda *a, **k: None)
     monkeypatch.setattr(reframe, "_roi_motion_segments",
                         lambda l, r, m, smoothing=None: [{"start": 0.0, "end": 3.0, "speaker": "left"},
                                          {"start": 3.0, "end": 4.0, "speaker": "left"}])
@@ -231,7 +231,7 @@ def test_render_rejects_unknown_aspect_or_mode(tmp_path, kw):
 def test_speaker_track_forwards_min_dwell_and_smoothing(monkeypatch, tmp_path):
     """min-dwell + smoothing are real S7 knobs, forwarded to the timeline builder."""
     seen = {}
-    monkeypatch.setattr(reframe, "_measure_roi_motion", lambda *a, **k: None)
+    monkeypatch.setattr(reframe, "_measure_roi_motion_pair", lambda *a, **k: None)
     monkeypatch.setattr(
         reframe, "_roi_motion_segments",
         lambda l, r, min_dwell, smoothing=None: (seen.update(min_dwell=min_dwell, smoothing=smoothing), [])[-1],
@@ -284,3 +284,21 @@ def test_render_pan_crop_margin_tightens_crop(monkeypatch, tmp_path):
     cw, ch = int(m.group(1)), int(m.group(2))
     assert ch < 1080 and cw < 608                # tighter than the crop_margin=0 strip
     assert "scale=1080:1920" in vf               # still fills 9:16
+
+
+# ---- perf: single decode for both ROI motion passes (Task 13) --------------
+
+def test_speaker_track_decodes_the_clip_once_for_both_rois(monkeypatch, tmp_path):
+    runs = []
+    monkeypatch.setattr(reframe._ffmpeg, "run", lambda argv, **kw: runs.append(argv))
+    monkeypatch.setattr(reframe, "_roi_motion_segments",
+                        lambda l, r, d, s=None: [{"start": 0.0, "end": 1.0, "speaker": "left"}])
+    roi_l = {"x": 0, "y": 0, "w": 100, "h": 200}
+    roi_r = {"x": 100, "y": 0, "w": 100, "h": 200}
+    reframe.speaker_track(str(tmp_path / "clip.mp4"), roi_left=roi_l, roi_right=roi_r,
+                          work_dir=str(tmp_path))
+    assert len(runs) == 1, f"expected ONE ffmpeg decode, got {len(runs)}"
+    argv = runs[0]
+    fc = argv[argv.index("-filter_complex") + 1]
+    assert "split=2" in fc
+    assert "motion_left.txt" in fc and "motion_right.txt" in fc

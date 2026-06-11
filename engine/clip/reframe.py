@@ -102,8 +102,8 @@ def speaker_track(
     tmp = work_dir or tempfile.mkdtemp(prefix="spool-track.")
     left_txt = os.path.join(tmp, "motion_left.txt")
     right_txt = os.path.join(tmp, "motion_right.txt")
-    _measure_roi_motion(clip_path, roi_left, left_txt, cancel_check=cancel_check, register_proc=register_proc)
-    _measure_roi_motion(clip_path, roi_right, right_txt, cancel_check=cancel_check, register_proc=register_proc)
+    _measure_roi_motion_pair(clip_path, roi_left, roi_right, left_txt, right_txt,
+                             cancel_check=cancel_check, register_proc=register_proc)
 
     video_segments = _roi_motion_segments(left_txt, right_txt, min_dwell, smoothing)
 
@@ -129,6 +129,25 @@ def _measure_roi_motion(clip_path, roi, out_txt, *, cancel_check=None, register_
     )
     _ffmpeg.run(
         ["ffmpeg", "-y", "-i", clip_path, "-an", "-vf", vf, "-f", "null", "-"],
+        cancel_check=cancel_check, register_proc=register_proc,
+        timeout=MOTION_TIMEOUT, label="ffmpeg roi-motion",
+    )
+
+
+def _measure_roi_motion_pair(clip_path, roi_l, roi_r, out_l, out_r, *,
+                             cancel_check=None, register_proc=None):
+    """One decode for BOTH ROIs: split the input, crop/diff/measure each branch, and let
+    ffmpeg write the two metadata files. Decoding dominates a reframe's cost and the old
+    per-ROI helper decoded the whole clip twice."""
+    def _branch(roi, out_txt, tag):
+        return (f"[{tag}]crop={int(roi['w'])}:{int(roi['h'])}:{int(roi['x'])}:{int(roi['y'])},"
+                f"tblend=all_mode=difference,signalstats,"
+                f"metadata=print:file={out_txt}[{tag}o]")
+    fc = f"[0:v]split=2[l][r];{_branch(roi_l, out_l, 'l')};{_branch(roi_r, out_r, 'r')}"
+    _ffmpeg.run(
+        ["ffmpeg", "-y", "-i", clip_path, "-an", "-filter_complex", fc,
+         "-map", "[lo]", "-f", "null", "-",
+         "-map", "[ro]", "-f", "null", "-"],
         cancel_check=cancel_check, register_proc=register_proc,
         timeout=MOTION_TIMEOUT, label="ffmpeg roi-motion",
     )
