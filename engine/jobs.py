@@ -131,6 +131,12 @@ class JobManager:
             time.sleep(0.001)
             try:
                 with self._lock:
+                    # The user may have cancelled or paused this job while it sat QUEUED
+                    # waiting for a worker slot. Starting it anyway resurrected the job
+                    # (and orphaned its yt-dlp subprocess on cancel). Paused stays paused —
+                    # resume() is the only sanctioned restart path.
+                    if job.status is not JobStatus.QUEUED:
+                        return
                     job.status = JobStatus.DOWNLOADING
                 self._persist()
                 target(job)

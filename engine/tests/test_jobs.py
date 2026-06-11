@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 import pytest
 from jobs import JobManager, Job, JobStatus
@@ -444,6 +445,47 @@ def test_dismiss_removes_error_job():
     assert jm.dismiss("errjob1") is True
     assert jm.get("errjob1") is None
     jm.shutdown()
+
+
+def _wait_status(mgr, jid, status, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if mgr.get(jid).status is status:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_cancel_while_queued_stays_cancelled_and_target_never_runs():
+    mgr = JobManager(max_workers=1)
+    gate = threading.Event()
+    ran = []
+    a = mgr.submit(target=lambda job: gate.wait(5), title="a", url="u-a")
+    b = mgr.submit(target=lambda job: ran.append(job.id), title="b", url="u-b")
+    assert mgr.get(b).status is JobStatus.QUEUED
+    assert mgr.cancel(b) is True
+    gate.set()
+    assert _wait_status(mgr, a, JobStatus.DONE)
+    time.sleep(0.2)  # let b's worker slot fire and (correctly) no-op
+    assert mgr.get(b).status is JobStatus.CANCELLED
+    assert ran == []
+
+
+def test_pause_while_queued_stays_paused_until_resumed():
+    mgr = JobManager(max_workers=1)
+    gate = threading.Event()
+    ran = []
+    a = mgr.submit(target=lambda job: gate.wait(5), title="a", url="u-a")
+    b = mgr.submit(target=lambda job: ran.append(job.id), title="b", url="u-b")
+    assert mgr.pause(b) is True
+    gate.set()
+    assert _wait_status(mgr, a, JobStatus.DONE)
+    time.sleep(0.2)
+    assert mgr.get(b).status is JobStatus.PAUSED   # pause means pause — not auto-restarted
+    assert ran == []
+    assert mgr.resume(b, target=lambda job: ran.append(job.id)) is True
+    assert _wait_status(mgr, b, JobStatus.DONE)
+    assert ran == [b]
 
 
 def test_dismiss_removes_cancelled_job():
