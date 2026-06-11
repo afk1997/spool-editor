@@ -96,24 +96,48 @@ def load(path: str) -> dict:
     return data
 
 
-def flat_text(words) -> tuple[str, list[int]]:
+def flat_text(words, segments=None) -> tuple[str, list[int]]:
     """Space-joined text of the non-deleted words, plus a per-char → word-position map.
 
     The single definition shared by ``/transcripts/search`` (which needs the char map to turn
     a match offset back into start/end timestamps) and the FTS5 index (which indexes just the
     flat string), so the index's candidate filter matches exactly what the scan searches.
+
+    When ``segments`` is given, words are joined in SEGMENT order (``segments[*].word_idxs``)
+    — the reading order word ops maintain. ``insert_after`` appends the new word to the tail
+    of ``words`` but splices its idx mid-segment, so positional iteration put insertions at
+    the END of the flat string: substring queries spanning the boundary went false-negative.
+    Words unreferenced by any segment are appended last (list order) to preserve the
+    zero-false-negative guarantee. Map values are positions into ``words`` (not idx values),
+    the contract callers already rely on.
     """
+    words = list(words or [])
+    if segments:
+        pos_by_idx = {w.get("idx"): i for i, w in enumerate(words)}
+        order: list[int] = []
+        seen: set[int] = set()
+        for seg in segments:
+            for wi in seg.get("word_idxs") or []:
+                pos = pos_by_idx.get(wi)
+                if pos is not None and pos not in seen:
+                    order.append(pos)
+                    seen.add(pos)
+        order.extend(i for i in range(len(words)) if i not in seen)
+    else:
+        order = list(range(len(words)))
+
     chunks: list[str] = []
     char_to_widx: list[int] = []
-    for i, w in enumerate(words or []):
+    for pos in order:
+        w = words[pos]
         if w.get("deleted"):
             continue
         text = w.get("w") or ""
         if chunks:
             chunks.append(" ")
-            char_to_widx.append(i)
+            char_to_widx.append(pos)
         chunks.append(text)
-        char_to_widx.extend([i] * len(text))
+        char_to_widx.extend([pos] * len(text))
     return "".join(chunks), char_to_widx
 
 

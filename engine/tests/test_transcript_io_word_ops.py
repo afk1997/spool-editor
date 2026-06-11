@@ -152,3 +152,27 @@ def test_ops_do_not_touch_other_words():
     transcript_io.apply_word_op(data, 0, "merge_next")
     transcript_io.apply_word_op(data, 0, "insert_after", w="!")
     assert data["words"][2:4] == snapshot
+
+
+# ----- flat_text segment-order contract ------------------------------------
+
+def test_insert_after_keeps_flat_text_in_reading_order():
+    data = {
+        "schema_version": 2,
+        "words": [
+            {"idx": 0, "w": "alpha", "original_w": "alpha", "start": 0.0, "end": 0.4, "edited": False, "deleted": False},
+            {"idx": 1, "w": "bravo", "original_w": "bravo", "start": 0.5, "end": 0.9, "edited": False, "deleted": False},
+            {"idx": 2, "w": "charlie", "original_w": "charlie", "start": 1.0, "end": 1.4, "edited": False, "deleted": False},
+        ],
+        "segments": [{"start": 0.0, "end": 1.4, "text": "alpha bravo charlie",
+                      "word_idxs": [0, 1, 2], "speaker": "Speaker 1", "reviewed": False}],
+    }
+    # insert_after idx 0 appends to words[] tail but splices its idx at position 1 in the segment
+    transcript_io.apply_word_op(data, 0, "insert_after", w="inserted")
+    flat, cmap = transcript_io.flat_text(data["words"], data["segments"])
+    assert flat == "alpha inserted bravo charlie"
+    # substring spanning the insertion boundary must match (FTS zero-false-negative guarantee)
+    assert "inserted bravo" in flat
+    # char map values are positions into data["words"] (not idx values)
+    pos = cmap[flat.index("inserted")]
+    assert data["words"][pos]["w"] == "inserted"

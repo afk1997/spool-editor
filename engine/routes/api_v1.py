@@ -1049,7 +1049,7 @@ def search_transcripts():
         words = data.get("words") or []
         # Flat text + per-char → word-position map (shared builder), so a string-match offset
         # converts back to the word range and thence to start/end timestamps for deep-linking.
-        flat, char_to_widx = transcript_io.flat_text(words)
+        flat, char_to_widx = transcript_io.flat_text(words, data.get("segments") or [])
         # Self-healing backfill: index any DONE transcript we had to scan because it wasn't yet
         # indexed (pre-existing library, or completed before this feature) — so the next search
         # can skip it. Best-effort; the store swallows its own errors.
@@ -1204,7 +1204,7 @@ def edit_transcript_word(tid, idx):
     # could otherwise leave a now-matching transcript un-indexed → wrongly filtered out.
     idx = _txidx()
     if idx is not None:
-        flat, _ = transcript_io.flat_text(data.get("words") or [])
+        flat, _ = transcript_io.flat_text(data.get("words") or [], data.get("segments") or [])
         idx.index(tid, flat)
     return jsonify({"tid": tid, "word": word})
 

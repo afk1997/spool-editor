@@ -125,5 +125,5 @@ def index_words_file(index: "TranscriptIndex", tid: str, words_path: str) -> Non
         data = transcript_io.load(words_path)
     except (OSError, ValueError):
         return
-    flat, _ = transcript_io.flat_text(data.get("words") or [])
+    flat, _ = transcript_io.flat_text(data.get("words") or [], data.get("segments") or [])
     index.index(tid, flat)
