@@ -779,7 +779,8 @@ def get_job(job_id):
 def _submit_one(url: str, *, format_choice: str = "video",
                 format_id: str | None = None, title: str = "",
                 thumbnail: str = "", auto_transcribe: bool = False,
-                subtitles: bool = False, chapters: bool = False, embed: bool = False
+                subtitles: bool = False, chapters: bool = False, embed: bool = False,
+                probe: bool = True,
                 ) -> tuple[dict | None, dict | None]:
     """Shared download-submission core used by both the single-URL
     POST /jobs path and the bulk POST /jobs/bulk path.
@@ -787,6 +788,12 @@ def _submit_one(url: str, *, format_choice: str = "video",
     Returns ``(job_view, None)`` on success or ``(None, error_dict)`` on
     failure. The caller is responsible for HTTP status mapping (single
     posts surface 4xx; bulk posts return per-URL errors in the array).
+
+    ``probe=True`` (default, single-URL path): call ``run_info`` synchronously
+    to resolve the title/thumbnail before enqueuing — one probe is acceptable.
+    ``probe=False`` (bulk path): skip the synchronous probe to avoid blocking
+    the request thread on up to 50 sequential network calls; the worker
+    resolves the real title just before downloading (``resolve_title=True``).
     """
     from safety import is_safe_url
     from runner import run_info
@@ -796,19 +803,27 @@ def _submit_one(url: str, *, format_choice: str = "video",
     if not is_safe_url(url):
         return None, {"error": "unsupported_url"}
 
+    given_title = bool(title)
     if not title:
-        info = run_info(url)
-        if info.error_category:
-            return None, {"error": info.error_category}
-        title = info.title or url
-        if not thumbnail:
-            thumbnail = info.thumbnail or ""
+        if probe:
+            info = run_info(url)
+            if info.error_category:
+                return None, {"error": info.error_category}
+            title = info.title or url
+            if not thumbnail:
+                thumbnail = info.thumbnail or ""
+        else:
+            # Bulk path: up to 50 sequential seconds-long probes would block
+            # the request thread.  Submit with the URL as a placeholder; the
+            # worker resolves the real title/thumbnail just before downloading.
+            title = url
 
     try:
         job_id = _actions()["enqueue_download"](
             url, format_choice, format_id, title, thumbnail,
             auto_transcribe=auto_transcribe,
             subtitles=subtitles, chapters=chapters, embed=embed,
+            resolve_title=(not probe and not given_title),
         )
     except RuntimeError:
         return None, {"error": "busy"}
@@ -878,10 +893,13 @@ def submit_job():
     return jsonify(view), 201
 
 
+_BULK_MAX_URLS = 50
+
+
 @api_v1_bp.post("/jobs/bulk")
 @token_required
 def submit_bulk():
-    """Enqueue many downloads in one round-trip.
+    """Enqueue many downloads in one round-trip (max 50 URLs).
 
     Body: ``{urls: [...], format?, format_id?, auto_transcribe?}``.
     Each URL gets its own job. Per-URL errors are returned alongside
@@ -899,13 +917,18 @@ def submit_bulk():
 
     HTTP 207 Multi-Status when any URL failed; 201 when all succeeded;
     400 when the body itself is malformed.
+
+    Title/thumbnail resolution is deferred to the download worker so that
+    up to 50 synchronous ``run_info`` probes do not block the request thread.
+    The ``title`` field in each result row is initially the URL itself and
+    is updated in the SSE stream once the worker resolves the real title.
     """
     data = request.get_json(silent=True) or {}
     urls = data.get("urls")
     if not isinstance(urls, list) or not urls:
         return jsonify({"error": "missing_urls"}), 400
-    if len(urls) > 100:
-        return jsonify({"error": "too_many_urls", "limit": 100}), 400
+    if len(urls) > _BULK_MAX_URLS:
+        return jsonify({"error": "too_many_urls", "limit": _BULK_MAX_URLS}), 400
 
     fmt = data.get("format", "video")
     fmt_id = data.get("format_id")
@@ -917,7 +940,7 @@ def submit_bulk():
         u = (raw or "").strip() if isinstance(raw, str) else ""
         view, err = _submit_one(
             u, format_choice=fmt, format_id=fmt_id,
-            auto_transcribe=auto_t,
+            auto_transcribe=auto_t, probe=False,
         )
         if view is not None:
             results.append({"url": u, "id": view["id"], "title": view["title"]})

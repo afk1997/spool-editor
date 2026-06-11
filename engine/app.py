@@ -461,6 +461,7 @@ def create_app() -> Flask:
         url: str, format_choice: str, format_id, title: str,
         thumbnail: str = "", *, auto_transcribe: bool = False,
         subtitles: bool = False, chapters: bool = False, embed: bool = False,
+        resolve_title: bool = False,
     ) -> str:
         def _work(job: Job):
             job.thumbnail = thumbnail
@@ -468,6 +469,18 @@ def create_app() -> Flask:
             job.format_id = format_id
             out_template = str(DOWNLOAD_DIR / f"{job.id}.%(ext)s")
             job.out_template = out_template
+
+            if resolve_title:
+                # Bulk-submitted jobs defer title/thumbnail resolution here so
+                # the request thread isn't blocked on up to 50 network probes.
+                # Never let a failed probe prevent the download from starting.
+                try:
+                    info = run_info(url)
+                    if not info.error_category:
+                        job.title = info.title or job.title
+                        job.thumbnail = info.thumbnail or job.thumbnail
+                except Exception:
+                    pass  # URL placeholder title is acceptable; download must proceed
 
             def _on_progress(downloaded, total, speed, eta, frag_idx, frag_count):
                 job.downloaded_bytes = downloaded
@@ -500,7 +513,7 @@ def create_app() -> Flask:
                 return
             ext = os.path.splitext(result.file_path)[1] if result.file_path else ""
             job.file_path = result.file_path
-            job.filename = sanitize_filename(title, ext)
+            job.filename = sanitize_filename(job.title or title, ext)
             _try_auto_transcribe(job)
 
         return job_manager.submit(

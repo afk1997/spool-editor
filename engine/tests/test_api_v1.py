@@ -193,7 +193,8 @@ def test_submit_job_calls_enqueue_with_supplied_title(client, monkeypatch):
     app, c = client
     captured = {}
 
-    def fake_enqueue(url, fmt, fmt_id, title, thumbnail="", *, auto_transcribe=False, subtitles=False, chapters=False, embed=False):
+    def fake_enqueue(url, fmt, fmt_id, title, thumbnail="", *, auto_transcribe=False,
+                     subtitles=False, chapters=False, embed=False, resolve_title=False):
         captured.update(dict(
             url=url, fmt=fmt, fmt_id=fmt_id, title=title,
             thumbnail=thumbnail, auto_transcribe=auto_transcribe,
@@ -225,7 +226,7 @@ def test_submit_job_forwards_download_opts(client):
     captured = {}
 
     def fake_enqueue(url, fmt, fmt_id, title, thumbnail="", *, auto_transcribe=False,
-                     subtitles=False, chapters=False, embed=False):
+                     subtitles=False, chapters=False, embed=False, resolve_title=False):
         captured.update(subtitles=subtitles, chapters=chapters, embed=embed)
         jm = app.extensions["trove.jobs"]
         jm._jobs["optid"] = Job(id="optid", url=url, title=title, status=JobStatus.QUEUED)
@@ -580,21 +581,17 @@ def test_list_transcripts_pagination(client):
 
 # ---- bulk submit ----------------------------------------------------
 
-def test_submit_bulk_partial_failure(client, monkeypatch):
+def test_submit_bulk_partial_failure(client):
+    # After the bulk-no-probe fix, _submit_one is called with probe=False so
+    # run_info is NOT invoked on the request thread — no monkeypatch needed.
     app, c = client
-    def fake_enqueue(url, fmt, fmt_id, title, thumbnail="", *, auto_transcribe=False, subtitles=False, chapters=False, embed=False):
+    def fake_enqueue(url, fmt, fmt_id, title, thumbnail="", *, auto_transcribe=False,
+                     subtitles=False, chapters=False, embed=False, resolve_title=False):
         jm = app.extensions["trove.jobs"]
         jid = f"id{len(jm._jobs)}"
         jm._jobs[jid] = Job(id=jid, url=url, title=title, status=JobStatus.QUEUED)
         return jid
     app.extensions["trove.actions"]["enqueue_download"] = fake_enqueue
-    # Bulk path resolves titles via run_info() when none is supplied;
-    # stub it so we never touch the network.
-    class _Info:
-        error_category = None
-        title = "stub"
-        thumbnail = ""
-    monkeypatch.setattr("runner.run_info", lambda url: _Info())
     r = c.post("/api/v1/jobs/bulk", json={
         "urls": [
             "https://example.com/ok-1",
@@ -615,11 +612,51 @@ def test_submit_bulk_rejects_empty(client):
     assert c.post("/api/v1/jobs/bulk", json={"urls": []}).status_code == 400
 
 
-def test_submit_bulk_caps_at_100(client):
+def test_submit_bulk_caps_at_50(client):
+    # Limit was lowered from 100 to 50; cap fires at 51 URLs.
     _, c = client
-    r = c.post("/api/v1/jobs/bulk", json={"urls": ["https://x"] * 101})
+    r = c.post("/api/v1/jobs/bulk", json={"urls": ["https://example.com/v"] * 51})
     assert r.status_code == 400
-    assert r.get_json()["error"] == "too_many_urls"
+    body = r.get_json()
+    assert body["error"] == "too_many_urls" and body["limit"] == 50
+
+
+def test_bulk_submit_does_not_probe_on_the_request_thread(client):
+    # _submit_one is called with probe=False on the bulk path; run_info must
+    # NOT be called synchronously.  We monkey-patch runner.run_info to raise
+    # AssertionError — since _submit_one does `from runner import run_info`
+    # at call time, patching the module attribute intercepts any request-thread
+    # probe.  app.py imports run_info at module top (app.run_info) so the
+    # worker's copy is unaffected.
+    import runner
+    import app as _app_module
+    original_run_info = runner.run_info
+    runner.run_info = lambda url: (_ for _ in ()).throw(
+        AssertionError("run_info called on request thread"))
+
+    app_obj, c = client
+
+    # Stub enqueue_download so no real worker or yt-dlp fires.
+    def fake_enqueue(url, fmt, fmt_id, title, thumbnail="", *, auto_transcribe=False,
+                     subtitles=False, chapters=False, embed=False, resolve_title=False):
+        jm = app_obj.extensions["trove.jobs"]
+        jid = f"bulk{len(jm._jobs)}"
+        jm._jobs[jid] = Job(id=jid, url=url, title=title, status=JobStatus.QUEUED)
+        return jid
+    app_obj.extensions["trove.actions"]["enqueue_download"] = fake_enqueue
+
+    try:
+        r = c.post("/api/v1/jobs/bulk", json={
+            "urls": [f"https://93.184.216.34/v{i}" for i in range(3)]})
+    finally:
+        runner.run_info = original_run_info
+
+    assert r.status_code in (201, 207)
+    data = r.get_json()
+    assert data["submitted"] == 3
+    for row in data["results"]:
+        # Placeholder title: URL itself (real title resolved by worker)
+        assert row["title"] == row["url"]
 
 
 # ---- idempotency ----------------------------------------------------
