@@ -283,7 +283,13 @@ def test_resolve_transport_prefers_env_then_settings_then_stdio():
                               lambda: {"mcp_transport": "streamable-http"}) == "streamable-http"
     # no env → the stored value
     assert _resolve_transport({}, lambda: {"mcp_transport": "sse"}) == "sse"
-    # store unreachable (engine down at MCP boot) → stdio
+    # store unreachable (engine down at MCP boot) → stdio. TroveClient.request raises
+    # SystemExit (not Exception) on connection-refused — the common Claude Desktop boot
+    # order (MCP server starts before the engine).
+    def _engine_down():
+        raise SystemExit("trove: cannot reach http://127.0.0.1:5000 (connection refused)")
+    assert _resolve_transport({}, _engine_down) == "stdio"
+
     def _boom():
         raise RuntimeError("engine down")
     assert _resolve_transport({}, _boom) == "stdio"

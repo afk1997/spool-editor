@@ -706,7 +706,9 @@ def _resolve_transport(env, settings_getter) -> str:
         return t
     try:
         stored = str((settings_getter() or {}).get("mcp_transport", "stdio"))
-    except Exception:
+    except (Exception, SystemExit):
+        # TroveClient.request raises SystemExit (a BaseException) when the engine is
+        # unreachable; the docstring's promise is "degrade to stdio, never crash".
         return "stdio"
     return stored if stored in _VALID_TRANSPORTS else "stdio"
 
