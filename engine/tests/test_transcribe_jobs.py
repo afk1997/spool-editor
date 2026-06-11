@@ -137,7 +137,13 @@ def test_dismiss_refuses_running(tmp_path):
 def test_cancel_with_live_process_handle_still_persists(tmp_path):
     """asdict() used to deep-copy process_handle (a live Popen → TypeError: cannot
     pickle _thread.lock), silently dropping the CANCELLED write — the store kept
-    'running' and the job resurfaced as a spurious error after restart."""
+    'running' and the job resurfaced as a spurious error after restart.
+
+    Determinism: the store is read BEFORE gate.set(), so the worker is still parked
+    inside target() and cannot race cancel()'s persist.  With the old asdict code the
+    CANCELLED write raises TypeError and is silently dropped, so the file still says
+    'running' and this assertion fails reliably.
+    """
     import threading as _threading
     class _FakeProc:
         def __init__(self):
@@ -151,10 +157,16 @@ def test_cancel_with_live_process_handle_still_persists(tmp_path):
         job.process_handle = _FakeProc()
         gate.wait(5)
     jid = mgr.submit(parent_job_id="p", model_path="m.bin", target=target)
+    # Poll until the handle is attached — worker is now parked inside target().
     deadline = time.time() + 5
-    while mgr.get(jid).status is not TranscribeStatus.RUNNING and time.time() < deadline:
+    while mgr.get(jid).process_handle is None and time.time() < deadline:
         time.sleep(0.01)
+    assert mgr.get(jid).process_handle is not None, "worker never attached handle"
+    # Cancel while worker is parked: cancel()'s own _persist() runs now, no race.
     assert mgr.cancel(jid) is True
-    gate.set()
+    # Assert the store NOW — before releasing the gate — so no competing writer exists.
     data = json.loads(store.read_text())
     assert data["jobs"][jid]["status"] == "cancelled"   # the write must survive the live handle
+    # Clean up: release the worker and drain the thread pool.
+    gate.set()
+    mgr.shutdown(wait=True)
