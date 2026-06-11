@@ -3,6 +3,8 @@ JSON-backed, atomic (mirrors recipes.py). User fields are CRUD'd; the per-watch 
 state (seen / pending / produced) is advanced by the reconciler via set_state."""
 from __future__ import annotations
 
+import threading
+
 from watches import WatchStore
 
 
@@ -88,3 +90,32 @@ def test_update_unknown_fields_dropped_and_unknown_id(tmp_path):
     assert "bogus" not in w
     assert s.update("nope", {"name": "x"}) is None
     assert s.delete("nope") is False
+
+
+def test_concurrent_crud_and_set_state_lose_nothing(tmp_path):
+    """API CRUD races the reconciler's set_state: without a store lock, list-mutation +
+    shared .tmp writes lose watches or tear watches.json (reloaded as [])."""
+    store = WatchStore(tmp_path / "watches.json")
+    base = store.create({"name": "base", "kind": "folder", "target": "/tmp/x"})
+    errors = []
+    def crud(n):
+        try:
+            for i in range(30):
+                w = store.create({"name": f"w{n}-{i}", "kind": "folder", "target": "/t"})
+                store.update(w["id"], {"name": f"w{n}-{i}b"})
+        except Exception as e:
+            errors.append(e)
+    def state():
+        try:
+            for i in range(60):
+                store.set_state(base["id"], seen=[f"s{i}"])
+        except Exception as e:
+            errors.append(e)
+    threads = [threading.Thread(target=crud, args=(n,)) for n in range(3)]
+    threads.append(threading.Thread(target=state))
+    for t in threads: t.start()
+    for t in threads: t.join()
+    assert errors == []
+    assert len(store.list()) == 91          # base + 3×30, nothing lost in memory
+    fresh = WatchStore(tmp_path / "watches.json")
+    assert len(fresh.list()) == 91          # …or on disk
