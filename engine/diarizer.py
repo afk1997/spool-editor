@@ -164,10 +164,11 @@ def diarize(*, audio_path: str,
         raise DiarizationUnavailable(
             "TROVE_DIARIZATION is off (set TROVE_DIARIZATION=on to enable)"
         )
-    speech = _vad_speech_chunks(audio_path)
+    wav = _load_wav_16k(audio_path)
+    speech = _vad_speech_chunks(wav)
     if not speech:
         return []
-    times, embeddings = _continuous_embeddings(audio_path, speech)
+    times, embeddings = _continuous_embeddings(wav, speech)
     if len(embeddings) < 2:
         # One or zero embeddings — nothing to cluster. Fall back to a
         # single SpeakerChunk covering the whole speech span.
@@ -216,24 +217,35 @@ def diarize(*, audio_path: str,
 # on a stock Python install).
 # ----------------------------------------------------------------------
 
-def _vad_speech_chunks(audio_path: str) -> list[dict]:
+def _load_wav_16k(audio_path: str):
+    """Decode once: 16 kHz mono float32. Both silero-vad and Resemblyzer operate at
+    16 kHz, so one decode serves VAD + embedding (it was decoded up to 3x per job)."""
+    try:
+        import librosa
+    except Exception as e:
+        raise DiarizationUnavailable(f"librosa not installed: {e}") from e
+    wav, _sr = librosa.load(audio_path, sr=16000, mono=True)
+    return wav
+
+
+def _vad_speech_chunks(wav) -> list[dict]:
     """silero-vad → list of {"start": s, "end": s} dicts.
 
-    silero-vad's bundled ``read_audio`` calls torchaudio for I/O, which on
-    torchaudio ≥2.9 requires the optional ``torchcodec`` package and breaks
-    with a confusing message when it's missing. We sidestep all of that by
-    loading via librosa (already a hard dep through resemblyzer) and feeding
-    silero-vad a pre-built tensor.
+    Accepts a 16 kHz mono float32 numpy array (pre-decoded by
+    ``_load_wav_16k``). silero-vad's bundled ``read_audio`` calls
+    torchaudio for I/O, which on torchaudio ≥2.9 requires the optional
+    ``torchcodec`` package and breaks with a confusing message when it's
+    missing. We sidestep all of that by receiving an already-loaded
+    array and feeding silero-vad a pre-built tensor.
     """
     try:
         import torch
         from silero_vad import load_silero_vad, get_speech_timestamps
-        import librosa
     except Exception as e:
         raise DiarizationUnavailable(f"silero-vad not installed: {e}") from e
     model = load_silero_vad()
-    wav, source_sr = librosa.load(audio_path, sr=16000, mono=True)
-    wav_tensor = torch.from_numpy(wav)
+    import numpy as np
+    wav_tensor = torch.from_numpy(np.asarray(wav, dtype=np.float32))
     timestamps = get_speech_timestamps(wav_tensor, model, sampling_rate=16000)
     return [{"start": t["start"] / 16000.0, "end": t["end"] / 16000.0}
             for t in timestamps]
@@ -391,16 +403,17 @@ def _auto_k(embeddings, max_k: int = 4) -> int:
     return best_k
 
 
-def _continuous_embeddings(audio_path: str, speech_regions: list[dict]):
+def _continuous_embeddings(wav, speech_regions: list[dict]):
     """Slide overlapping 1.6 s windows across each speech region and embed
     each one. Returns ``(times, embeddings)`` where ``times[i]`` is the
     ``(start, end)`` interval of the i-th partial (in original-audio seconds)
     and ``embeddings[i]`` is its 256-d Resemblyzer embedding.
 
-    This is the v3 path: instead of one embedding per VAD region (which
-    smears multi-speaker audio into a single point), we compute many
-    finer-grained embeddings so a speaker change inside one VAD region
-    is still resolvable downstream.
+    Accepts a 16 kHz mono float32 numpy array (pre-decoded by
+    ``_load_wav_16k``). This is the v3 path: instead of one embedding
+    per VAD region (which smears multi-speaker audio into a single
+    point), we compute many finer-grained embeddings so a speaker change
+    inside one VAD region is still resolvable downstream.
     """
     try:
         from resemblyzer.audio import (
@@ -408,14 +421,14 @@ def _continuous_embeddings(audio_path: str, speech_regions: list[dict]):
             audio_norm_target_dBFS,
             sampling_rate as _RES_SR,
         )
-        import librosa
         import numpy as np
     except Exception as e:
         raise DiarizationUnavailable(f"resemblyzer not installed: {e}") from e
     encoder = _get_encoder()
-    wav, source_sr = librosa.load(audio_path, sr=None)
-    if source_sr != _RES_SR:
-        wav = librosa.resample(wav, orig_sr=source_sr, target_sr=_RES_SR)
+    wav = np.asarray(wav, dtype=np.float32)
+    if _RES_SR != 16000:   # resemblyzer's constant is 16000 today; resample defensively
+        import librosa
+        wav = librosa.resample(wav, orig_sr=16000, target_sr=_RES_SR)
     wav = normalize_volume(wav, audio_norm_target_dBFS, increase_only=True)
     sr = _RES_SR
 

@@ -124,7 +124,12 @@ def _stub_transcribe(monkeypatch, words):
     # through real librosa — same spirit as stubbing extract_audio above.
     # Tests exercising realignment/diarization override _vad_speech_chunks
     # (and vad_available/available) AFTER calling this helper.
+    # _load_wav_16k is also stubbed: after the single-decode refactor app.py
+    # calls it before _vad_speech_chunks, so it must be stubbed too or
+    # librosa would try to decode the dummy FAKEWAV bytes.
     import diarizer
+    import numpy as np
+    monkeypatch.setattr(diarizer, "_load_wav_16k", lambda _p: np.zeros(0, dtype=np.float32))
     monkeypatch.setattr(diarizer, "_vad_speech_chunks", lambda _p: [])
 
 

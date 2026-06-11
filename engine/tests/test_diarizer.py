@@ -243,6 +243,8 @@ def test_diarize_merges_consecutive_same_speaker_partials(monkeypatch):
     import numpy as np
     d = _fresh_diarizer()
 
+    _WAV_STUB = np.zeros(0, dtype=np.float32)
+    monkeypatch.setattr(d, "_load_wav_16k", lambda _p: _WAV_STUB)
     monkeypatch.setattr(d, "_vad_speech_chunks", lambda _p: [{"start": 0.0, "end": 6.0}])
 
     times = [(float(i), float(i) + 1.0) for i in range(6)]
@@ -270,7 +272,10 @@ def test_diarize_passes_through_explicit_speaker_count(monkeypatch):
     import numpy as np
     d = _fresh_diarizer()
 
-    def fake_vad(_path):
+    _WAV_STUB = np.zeros(0, dtype=np.float32)
+    monkeypatch.setattr(d, "_load_wav_16k", lambda _p: _WAV_STUB)
+
+    def fake_vad(_p):
         return [{"start": 0.0, "end": 6.0}]
 
     def fake_continuous(_p, _r):
@@ -301,7 +306,9 @@ def test_diarize_passes_through_explicit_speaker_count(monkeypatch):
 
 def test_diarize_returns_empty_when_no_speech(monkeypatch):
     monkeypatch.setenv("TROVE_DIARIZATION", "on")
+    import numpy as np
     d = _fresh_diarizer()
+    monkeypatch.setattr(d, "_load_wav_16k", lambda _p: np.zeros(0, dtype=np.float32))
     monkeypatch.setattr(d, "_vad_speech_chunks", lambda _p: [])
     out = d.diarize(audio_path="ignored.wav")
     assert out == []
@@ -446,3 +453,26 @@ def test_warm_constructs_encoder_when_available(monkeypatch):
     # Idempotent — second warm() doesn't rebuild.
     assert d.warm() is True
     assert len(constructed) == 1
+
+
+# ---------------------------------------------------------------------------
+# Single-decode: diarize() loads the WAV exactly once and threads it through
+# _vad_speech_chunks and _continuous_embeddings (medium finding: same WAV was
+# decoded up to 3× per job).
+# ---------------------------------------------------------------------------
+
+def test_diarize_decodes_audio_once(monkeypatch):
+    monkeypatch.setenv("TROVE_DIARIZATION", "on")
+    d = _fresh_diarizer()
+    calls = []
+    wav_token = object()   # identity proves the SAME decoded array flows everywhere
+    monkeypatch.setattr(d, "_load_wav_16k",
+                        lambda p: (calls.append(("load", p)), wav_token)[1])
+    monkeypatch.setattr(d, "_vad_speech_chunks",
+                        lambda wav: (calls.append(("vad", wav)), [{"start": 0.0, "end": 2.0}])[1])
+    monkeypatch.setattr(d, "_continuous_embeddings",
+                        lambda wav, regions: (calls.append(("emb", wav)), ([(0.0, 1.0)], [[0.1, 0.2]]))[1])
+    out = d.diarize(audio_path="x.wav")
+    assert [c[0] for c in calls] == ["load", "vad", "emb"]
+    assert calls[1][1] is wav_token and calls[2][1] is wav_token
+    assert len(out) == 1 and out[0].speaker == "Speaker 1"   # <2 embeddings → single chunk

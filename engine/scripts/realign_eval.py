@@ -142,7 +142,8 @@ def main():
     raw_words = copy.deepcopy(result.words)
 
     # 2) REAL silero-vad regions + REAL realignment (mutates result.words).
-    vad = diarizer._vad_speech_chunks(wav)
+    _wav_arr = diarizer._load_wav_16k(wav)
+    vad = diarizer._vad_speech_chunks(_wav_arr)
     transcriber.realign_words_to_vad(result, vad)
     new_words = result.words
 

@@ -361,7 +361,8 @@ def create_app() -> Flask:
                     import diarizer
                     if diarizer.vad_available():
                         try:
-                            vad_regions = diarizer._vad_speech_chunks(wav_path)
+                            _wav = diarizer._load_wav_16k(wav_path)
+                            vad_regions = diarizer._vad_speech_chunks(_wav)
                             if vad_regions:
                                 transcriber.realign_words_to_vad(result, vad_regions)
                         except Exception as e:
