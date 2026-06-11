@@ -1,8 +1,10 @@
 flask>=3.0
-# yt-dlp from master — YouTube extraction breaks frequently on stable releases.
-# trove.sh / Dockerfile install this from the GitHub master tarball directly.
-yt-dlp @ https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz
+# yt-dlp pinned to a released version: the master tarball made builds non-reproducible
+# and shipped unreviewed upstream changes straight into the binary that processes
+# user-supplied URLs. Bump deliberately (YouTube breakage is the usual trigger).
+yt-dlp==2025.10.14
 pytest>=8.0
+pytest-timeout>=2.3
 pywhispercpp>=1.2.0
 psutil>=5.9
 

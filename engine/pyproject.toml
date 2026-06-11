@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 # is one-shot per environment.
 dependencies = [
     "flask>=3.0",
-    "yt-dlp",
+    "yt-dlp>=2025.10",
     "pywhispercpp>=1.2.0",
     "psutil>=5.9",
     "resemblyzer>=0.1.4",
@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pytest-timeout>=2.3"]
 # MCP server is optional — only needed if the user wants to expose
 # Trove to a coding agent (Claude Desktop / Cursor / Replit Agent).
 # The CLI itself is stdlib-only.
@@ -38,3 +38,4 @@ trove-mcp = "mcp_server:main"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-v --tb=short"
+timeout = 300
