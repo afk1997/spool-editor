@@ -60,6 +60,26 @@ describe("CandidateCard (glass-box = real signals + excerpt)", () => {
   });
 });
 
+import { renderHook, act } from "@testing-library/react";
+import { useClipSeededState } from "@/lib/use-clip-seeded-state";
+
+describe("useClipSeededState", () => {
+  it("reseeds when the live clip value changes (background reframe/caption)", () => {
+    const { result, rerender } = renderHook(({ live }) => useClipSeededState(live, "9:16"), {
+      initialProps: { live: "9:16" as string | undefined },
+    });
+    act(() => result.current[1]("1:1"));         // user picks a format locally
+    expect(result.current[0]).toBe("1:1");
+    rerender({ live: "16:9" });                   // a background job re-reframed the clip
+    expect(result.current[0]).toBe("16:9");       // inspector follows — Render submits truth
+  });
+
+  it("keeps the fallback when live stays undefined", () => {
+    const { result } = renderHook(() => useClipSeededState(undefined, "opus"));
+    expect(result.current[0]).toBe("opus");
+  });
+});
+
 import { WindowList } from "@/components/spool/virtual";
 
 describe("WindowList", () => {

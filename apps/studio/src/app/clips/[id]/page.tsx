@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { useSpool, type SpoolClip } from "@/components/spool/context";
 import { useEngineQuery, useLive } from "@/lib/engine-context";
+import { useClipSeededState } from "@/lib/use-clip-seeded-state";
 import { Timeline } from "@/components/spool/timeline";
 import { Btn, Chip, Empty, Icon, Seg, Switch } from "@spool/ui";
 
@@ -77,12 +78,12 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   const id = clip.id;
   const [insp, setInsp] = useState("Format");
   const [playing, setPlaying] = useState(false);
-  const [aspect, setAspect] = useState(clip.aspect || "9:16");
+  const [aspect, setAspect] = useClipSeededState(clip.aspect, "9:16");
   const [reframe, setReframe] = useState("pan");
-  const [preset, setPreset] = useState(clip.platform || "tiktok");
+  const [preset, setPreset] = useClipSeededState(clip.platform, "tiktok");
   const [safe, setSafe] = useState(true);
   const [cur, setCur] = useState(0);               // playhead (clip-relative seconds) for the live caption overlay
-  const [style, setStyle] = useState(clip.style || "opus");
+  const [style, setStyle] = useClipSeededState(clip.style, "opus");
   const [artifact, setArtifact] = useState<"reframed" | "clip">("reframed"); // which intermediate to preview
   const videoRef = useRef<HTMLVideoElement>(null);
 
