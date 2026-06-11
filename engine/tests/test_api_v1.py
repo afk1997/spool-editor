@@ -1024,6 +1024,30 @@ def test_chunk_json_clamps_segment_limit(client, tmp_path):
     assert body["limit"] == 500  # _CHUNK_JSON_MAX_LIMIT
 
 
+def test_chunk_json_corrupt_transcript_is_structured_500(client, tmp_path):
+    """A corrupt .words.json must yield a structured JSON 500, not an HTML stack trace."""
+    app, c = client
+    # Arrange: seed a done transcript whose .words.json contains invalid JSON.
+    dd = app.extensions["trove.download_dir"]
+    os.makedirs(dd, exist_ok=True)
+    media = dd / "abc.mp4"
+    media.write_bytes(b"x")
+    base = str(dd / "abc")
+    with open(base + ".words.json", "wb") as f:
+        f.write(b"{not json")
+    jm = app.extensions["trove.jobs"]
+    jm._jobs["abc"] = Job(id="abc", url="https://x", title="Clip",
+                          status=JobStatus.DONE, file_path=str(media))
+    tm = app.extensions["trove.transcribe"]
+    tm._jobs["t1"] = transcribe_jobs.TranscribeJob(
+        id="t1", parent_job_id="abc", model_used="m",
+        status=transcribe_jobs.TranscribeStatus.DONE,
+    )
+    r = c.get("/api/v1/transcripts/t1/chunk?format=json")
+    assert r.status_code == 500
+    assert r.get_json()["error"] == "transcript_unreadable"
+
+
 def test_chunk_rejects_invalid_format(client, tmp_path):
     app, c = client
     _seed_done_transcript(app, tmp_path, body_text="x")

@@ -1285,7 +1285,10 @@ def chunk_transcript(tid):
         # transcript_io.load() returns the canonical in-memory v2 dict
         # regardless of what's on disk; the startup migrate_all() sweep
         # is what persists cold v1 files. This GET handler stays read-only.
-        data = transcript_io.load(path)
+        try:
+            data = transcript_io.load(path)
+        except (OSError, ValueError) as e:
+            return jsonify({"error": "transcript_unreadable", "detail": str(e)}), 500
         segments = list(data.get("segments") or [])
         all_words = list(data.get("words") or [])
         total = len(segments)
