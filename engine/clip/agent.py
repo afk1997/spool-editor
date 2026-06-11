@@ -211,10 +211,12 @@ def run_agent(
 ) -> dict:
     """Run a bounded ReAct tool-loop for one user message. ``client`` is a TroveClient pointed at
     the engine (so tools hit the SAME /api/v1 surface as the UI). ``elapsed`` is an optional
-    ``() -> float`` ms clock for trace timing (injectable for tests). ``confirmed_tool`` is a single
-    tool name pre-approved by the caller for ONE invocation this turn (the /agent route's
-    ``confirm_tool``): tools in :data:`agent_tools.CONFIRM_REQUIRED` (exports + destructive config)
-    otherwise return ``action="confirm"`` instead of running. Returns
+    ``() -> float`` ms clock for trace timing (injectable for tests). ``confirmed_tool`` is a single tool name pre-approved by the caller for ONE invocation
+    this turn (the /agent route's ``confirm_tool``): tools in :data:`agent_tools.CONFIRM_REQUIRED`
+    (exports + destructive config) otherwise return ``action="confirm"`` instead of running.
+    Confirmation matches by TOOL NAME only and is single-use; the confirmed run re-plans, so
+    its args may differ from the ``pending.args`` the user was shown -- the gate's contract is
+    "no gated tool without a human click", NOT arg-exact replay. Returns
     ``{reply, action, jobs[], tools[], question?, options?, kind?, pending?}``. Propagates the LLM
     bridge's OfflineError / ProviderUnavailableError; never raises on bad model output or tool errors."""
     import time as _time

@@ -187,11 +187,13 @@ TOOLS: list[Tool] = [
 
 CATALOG: dict[str, Tool] = {t.name: t for t in TOOLS}
 
-# Tools that must not run without an explicit human go-ahead: anything that EXPORTS a
-# finished file (past the review gate) or permanently deletes/rewrites config. The agent's
-# plan is steered by an UNTRUSTED transcript (whisper output of arbitrary downloaded
-# media), so a prompt-injection payload must never reach these unconfirmed. The loop
-# returns action="confirm" until the turn carries confirm_tool=<name>.
+# Tools that must not run without an explicit human go-ahead: gates the exports-flagged
+# tools (render_clip / render_pipeline) plus the delete/settings/model-removal family --
+# the audit's scope. The agent's plan is steered by an UNTRUSTED transcript (whisper
+# output of arbitrary downloaded media), so a prompt-injection payload must never reach
+# these unconfirmed. The loop returns action="confirm" until the turn carries
+# confirm_tool=<name>. Known residual: produce_clips / scan_watch can transitively reach
+# the export stage via a recipe and remain un-gated by that scope.
 CONFIRM_REQUIRED: frozenset = frozenset(
     {t.name for t in TOOLS if t.exports}
     | {"delete_recipe", "delete_watch", "delete_brand_kit", "remove_model", "update_settings"}
