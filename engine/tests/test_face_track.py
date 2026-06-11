@@ -204,3 +204,24 @@ def test_reduce_points_survives_more_cuts_than_the_keyframe_budget():
     assert out[0] == pts[0] and out[-1] == pts[-1]   # endpoints always survive
     for e in face_track.crop_exprs(pts):              # public API must not raise
         assert isinstance(e, str) and e
+
+
+def test_reduce_points_mixed_cuts_and_pans_over_budget_no_zero_division():
+    """The audited crash: >budget snap points PLUS surviving free points makes
+    budget==0 while free is non-empty — the old `step = len(free)/budget` divided
+    by zero. (The all-snap case above exercises the oversized-list cousin instead.)"""
+    import clip.face_track as face_track
+    pts = []
+    t = 0.0
+    for i in range(80):
+        if i % 4 == 3:                     # every 4th point: a panning (non-snap) point
+            x = 0.0 if (i // 4) % 2 == 0 else 500.0   # zigzag → survives the tol filter
+            pts.append((t, x, 5.0, 100.0, 200.0, 0))
+        else:                              # 60 hard cuts > _MAX_KEYFRAMES
+            pts.append((t, 10.0 * i, 5.0, 100.0, 200.0, 1))
+        t += 0.5
+    out = face_track._reduce_points(pts, 1)
+    assert 2 <= len(out) <= face_track._MAX_KEYFRAMES
+    assert out[0] == pts[0] and out[-1] == pts[-1]
+    for e in face_track.crop_exprs(pts):
+        assert isinstance(e, str) and e
