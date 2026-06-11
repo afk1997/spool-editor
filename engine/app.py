@@ -613,10 +613,26 @@ def create_app() -> Flask:
     # Detect new videos → ingest (download+auto-transcribe for URLs, local import for folder files)
     # → once transcribed, run the watch's recipe (produce). The tick lives in watcher.py; here we
     # inject the real ingest/transcript/produce. Nothing is auto-published (Phase 4) — review gate.
+    def _find_existing_source(url: str):
+        """Cross-watch ingest dedup: a source already ingested under this canonical
+        URL/path is reused instead of re-running download→transcribe→produce. The
+        per-watch ``seen`` list can't see other watches; the job store can."""
+        for j in job_manager.snapshot_jobs():
+            if j.url == url and j.status not in (JobStatus.ERROR, JobStatus.CANCELLED):
+                return j.id
+        return None
+
     def _watch_ingest(watch: dict, key: str):
         try:
             if watch.get("kind") == "folder":
-                return _import_local_file(os.path.join(watch.get("target", ""), key), auto_transcribe=True)
+                path = os.path.join(watch.get("target", ""), key)
+                existing = _find_existing_source(f"file://{path}")
+                if existing:
+                    return existing
+                return _import_local_file(path, auto_transcribe=True)
+            existing = _find_existing_source(key)
+            if existing:
+                return existing
             # ``key`` is a canonical video URL (watcher.list_playlist_items prints ``url``).
             # Resolve its real title/thumbnail up front — same as a paste-URL import (the
             # _start_download path) — so a watched channel/playlist yields sources identical to

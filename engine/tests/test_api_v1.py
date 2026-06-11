@@ -7,6 +7,7 @@ existing endpoint tests use.
 """
 from __future__ import annotations
 import os
+import time
 import pytest
 from app import create_app
 from jobs import Job, JobStatus
@@ -1591,3 +1592,23 @@ def test_update_watch_rejects_unsafe_retarget(client):
     r = c.patch(f"/api/v1/watches/{wid}", json={"target": "-o/tmp/pwn"})
     assert r.status_code == 400
     assert r.get_json()["error"] == "unsafe_target"
+
+
+def test_two_watches_on_the_same_folder_ingest_a_file_once(client, tmp_path, monkeypatch):
+    monkeypatch.setattr("clip.moments.find_moments", lambda *a, **k: [])
+    _, c = client
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    f = inbox / "video.mp4"
+    f.write_bytes(b"\x00" * 4096)
+    old = time.time() - 3600
+    os.utime(f, (old, old))   # pre-settled so the upcoming folder-debounce task can't skip it
+
+    w1 = c.post("/api/v1/watches", json={"name": "a", "kind": "folder", "target": str(inbox)}).get_json()
+    w2 = c.post("/api/v1/watches", json={"name": "b", "kind": "folder", "target": str(inbox)}).get_json()
+    c.post(f"/api/v1/watches/{w1['id']}/scan")
+    c.post(f"/api/v1/watches/{w2['id']}/scan")
+
+    jobs = c.get("/api/v1/jobs?limit=100").get_json()["jobs"]
+    same_file = [j for j in jobs if j["url"].endswith("video.mp4")]
+    assert len(same_file) == 1, f"file ingested {len(same_file)}x across two watches"
