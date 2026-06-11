@@ -248,6 +248,51 @@ def test_export_transcript_stream_to_writes_file(monkeypatch, tmp_path):
     assert out.read_bytes() == body
 
 
+def test_stream_to_failure_leaves_no_partial_file(monkeypatch, tmp_path):
+    """A mid-transfer read failure must not leave a truncated file at the
+    destination — callers (CLI export download) must not mistake it for a
+    finished render."""
+    class DyingBody:
+        status = 200
+        headers = {"Content-Type": "application/octet-stream"}
+        def read(self, n=-1):
+            raise OSError("connection reset mid-transfer")
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr("urllib.request.urlopen",
+                        lambda req, timeout=None: DyingBody())
+    c = TroveClient(base_url="http://127.0.0.1:1")
+    dest = tmp_path / "render.mp4"
+    with pytest.raises(OSError):
+        c.request("GET", "/api/v1/x", stream_to=str(dest))
+    assert not dest.exists()
+    assert not (tmp_path / "render.mp4.part").exists()
+
+
+def test_stream_to_success_promotes_atomically(monkeypatch, tmp_path):
+    """A successful stream must write the full content to the destination
+    and leave no .part sidecar behind."""
+    chunks = [b"abc", b"def", b""]
+
+    class Body:
+        status = 200
+        headers = {"Content-Type": "application/octet-stream"}
+        def read(self, n=-1):
+            return chunks.pop(0)
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr("urllib.request.urlopen",
+                        lambda req, timeout=None: Body())
+    c = TroveClient(base_url="http://127.0.0.1:1")
+    dest = tmp_path / "render.mp4"
+    out = c.request("GET", "/api/v1/x", stream_to=str(dest))
+    assert out == {"saved_to": str(dest)}
+    assert dest.read_bytes() == b"abcdef"
+    assert not (tmp_path / "render.mp4.part").exists()
+
+
 def test_page_qs_helper_canonical_shape():
     assert _page_qs() == ""
     assert _page_qs(status="done") == "?status=done"

@@ -178,12 +178,24 @@ class TroveClient:
         try:
             with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
                 if stream_to is not None:
-                    with open(stream_to, "wb") as out:
-                        while True:
-                            chunk = resp.read(64 * 1024)
-                            if not chunk:
-                                break
-                            out.write(chunk)
+                    # Stream to a sidecar and promote atomically — a mid-transfer
+                    # failure must not leave a truncated file at the destination
+                    # that the caller will then treat as a finished render.
+                    part_path = stream_to + ".part"
+                    try:
+                        with open(part_path, "wb") as out:
+                            while True:
+                                chunk = resp.read(64 * 1024)
+                                if not chunk:
+                                    break
+                                out.write(chunk)
+                        os.replace(part_path, stream_to)
+                    except BaseException:
+                        try:
+                            os.unlink(part_path)
+                        except OSError:
+                            pass
+                        raise
                     return {"saved_to": stream_to}
                 raw = resp.read()
                 if resp.status == 204 or not raw:
