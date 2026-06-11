@@ -28,6 +28,8 @@ export interface SpoolApiOptions {
   token?: string;
   /** Inject a fetch (tests / non-browser runtimes). Defaults to global fetch. */
   fetch?: typeof globalThis.fetch;
+  /** Per-request budget in ms; 0 disables. Default 30_000. */
+  timeoutMs?: number;
 }
 
 /** Typed error carrying the engine's machine-readable `error` code and HTTP status. */
@@ -203,6 +205,7 @@ export class SpoolApiClient {
   private readonly baseUrl: string;
   private readonly token?: string;
   private readonly fetchImpl: typeof globalThis.fetch;
+  private readonly timeoutMs: number;
 
   constructor(opts: SpoolApiOptions = {}) {
     this.baseUrl = (opts.baseUrl ?? "http://127.0.0.1:8899").replace(/\/+$/, "");
@@ -210,6 +213,7 @@ export class SpoolApiClient {
     // Bind to globalThis: native `fetch` throws "Illegal invocation" in browsers when
     // called as a method of another object (i.e. `this.fetchImpl(...)`). Node tolerates it.
     this.fetchImpl = opts.fetch ?? globalThis.fetch.bind(globalThis);
+    this.timeoutMs = opts.timeoutMs ?? 30_000;
   }
 
   private headers(extra?: HeadersInit): Headers {
@@ -219,41 +223,68 @@ export class SpoolApiClient {
     return h;
   }
 
-  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const res = await this.fetchImpl(`${this.baseUrl}/api/v1${path}`, {
-      ...init,
-      headers: this.headers(init.headers),
-    });
-    if (!res.ok) {
-      let code = `http_${res.status}`;
-      try {
-        const body = (await res.json()) as { error?: string };
-        if (body.error) code = body.error;
-      } catch {
-        // non-JSON error body — keep the http_<status> code
+  private async request<T>(
+    path: string,
+    init: RequestInit = {},
+    opts: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<T> {
+    // Internal controller so a wedged engine can't hang a caller forever (most visibly
+    // agent(), which previously left the studio "thinking" until a reload). The caller's
+    // signal and the timeout both funnel into it; signal-source decides the error code.
+    const budget = opts.timeoutMs ?? this.timeoutMs;
+    const ctrl = new AbortController();
+    const onCallerAbort = () => ctrl.abort();
+    opts.signal?.addEventListener("abort", onCallerAbort, { once: true });
+    const timer = budget > 0 ? setTimeout(() => ctrl.abort(), budget) : undefined;
+    try {
+      const res = await this.fetchImpl(`${this.baseUrl}/api/v1${path}`, {
+        ...init,
+        headers: this.headers(init.headers),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) {
+        let code = `http_${res.status}`;
+        try {
+          const body = (await res.json()) as { error?: string };
+          if (body.error) code = body.error;
+        } catch {
+          // non-JSON error body — keep the http_<status> code
+        }
+        throw new SpoolApiError(res.status, code);
       }
-      throw new SpoolApiError(res.status, code);
+      if (res.status === 204) return undefined as T;
+      const text = await res.text();
+      return (text ? JSON.parse(text) : undefined) as T;
+    } catch (e) {
+      if (e instanceof SpoolApiError) throw e;
+      if (ctrl.signal.aborted) throw new SpoolApiError(0, opts.signal?.aborted ? "aborted" : "timeout");
+      throw e;
+    } finally {
+      if (timer) clearTimeout(timer);
+      opts.signal?.removeEventListener("abort", onCallerAbort);
     }
-    if (res.status === 204) return undefined as T;
-    const text = await res.text();
-    return (text ? JSON.parse(text) : undefined) as T;
   }
 
-  private get<T>(path: string): Promise<T> {
-    return this.request<T>(path);
+  private get<T>(path: string, opts: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<T> {
+    return this.request<T>(path, {}, opts);
   }
 
-  private post<T>(path: string, body?: unknown): Promise<T> {
-    return this.bodyMethod<T>("POST", path, body);
+  private post<T>(path: string, body?: unknown, opts: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<T> {
+    return this.bodyMethod<T>("POST", path, body, opts);
   }
 
-  private bodyMethod<T>(method: "POST" | "PATCH" | "PUT", path: string, body?: unknown): Promise<T> {
+  private bodyMethod<T>(
+    method: "POST" | "PATCH" | "PUT",
+    path: string,
+    body?: unknown,
+    opts: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<T> {
     const init: RequestInit = { method };
     if (body !== undefined) {
       init.body = JSON.stringify(body);
       init.headers = { "Content-Type": "application/json" };
     }
-    return this.request<T>(path, init);
+    return this.request<T>(path, init, opts);
   }
 
   // ── meta ──
@@ -390,8 +421,12 @@ export class SpoolApiClient {
   }
   /** One agent turn: a natural-language message (+ optional source context) → an executed
    *  clip-tool action. Blocks while the LLM plans, so show a thinking state. */
-  agent(message: string, opts: { sourceId?: string } = {}): Promise<AgentResponse> {
-    return this.post("/agent", { message, source_id: opts.sourceId });
+  agent(
+    message: string,
+    opts: { sourceId?: string } = {},
+    reqOpts: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<AgentResponse> {
+    return this.post("/agent", { message, source_id: opts.sourceId }, { timeoutMs: 600_000, ...reqOpts });
   }
 
   // ── brand kits (S9) ──

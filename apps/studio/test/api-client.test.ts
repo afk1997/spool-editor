@@ -81,3 +81,29 @@ describe("subscribeEvents clean close", () => {
     expect(errors.length).toBe(0);
   });
 });
+
+// ── request timeout / abort (medium finding) ─────────────────────────────────
+// agent() previously had no budget — a wedged engine would hang the studio forever.
+
+describe("request timeout/abort", () => {
+  function hangingFetch(): typeof fetch {
+    return ((_url: string, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+      })) as unknown as typeof fetch;
+  }
+
+  it("times out a hung request with a distinct error code", async () => {
+    const client = new SpoolApiClient({ baseUrl: "http://x", fetch: hangingFetch(), timeoutMs: 20 });
+    await expect(client.health()).rejects.toMatchObject({ code: "timeout", status: 0 });
+  });
+
+  it("caller AbortSignal surfaces as 'aborted'", async () => {
+    const client = new SpoolApiClient({ baseUrl: "http://x", fetch: hangingFetch(), timeoutMs: 5_000 });
+    const ctrl = new AbortController();
+    const p = client.agent("hi", {}, { signal: ctrl.signal });
+    ctrl.abort();
+    await expect(p).rejects.toMatchObject({ code: "aborted", status: 0 });
+  });
+});
