@@ -1,16 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { useWindowVirtualizer } from "@tanstack/react-virtual";
+import { useVirtualizer } from "@tanstack/react-virtual";
 
-/* Window virtualization (spec §6.4 — "virtualize long lists"). Mounts only the visible window
- * of a long list while it scrolls with the *page* (not an inner scroll container), so the
- * demo's page-flow layout is unchanged. Row heights are measured (variable-height rows like
- * wrapped transcript lines are fine). Used past a threshold only — short lists render plainly,
- * so the common case (and every screen the demo shows) is byte-identical to before.
- *
- * Each item's own markup is rendered verbatim inside an absolutely-positioned, full-width
- * wrapper, so the rows look identical — only the off-screen ones aren't in the DOM. */
+/* List virtualization (spec §6.4 — "virtualize long lists"). The studio shell scrolls
+ * inside `.main` (overflow-y: auto) — NOT the window — so this must be an ELEMENT
+ * virtualizer. The previous window virtualizer watched a scroll that never happened and
+ * mounted only the first viewport: every long transcript was unreachable past the fold.
+ * Rows are measured (variable heights fine) and rendered verbatim in absolutely-
+ * positioned full-width wrappers. Falls back to the document scroller when no `.main`
+ * ancestor exists (tests, future standalone layouts). */
 export function WindowList<T>({
   items,
   getKey,
@@ -25,15 +24,25 @@ export function WindowList<T>({
   children: (item: T, index: number) => ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  // The list's offset from the document top — read in an effect (never during render) and fed
-  // to the window virtualizer so item positions land correctly within the page scroll.
+  const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
+  // The list's offset within the scroller — read in an effect (never during render) so
+  // item positions land correctly when content precedes the list.
   const [scrollMargin, setScrollMargin] = useState(0);
   useEffect(() => {
-    if (ref.current) setScrollMargin(ref.current.offsetTop);
+    const el =
+      (ref.current?.closest(".main") as HTMLElement | null) ??
+      (document.scrollingElement as HTMLElement | null);
+    setScrollEl(el);
+    if (ref.current && el) {
+      setScrollMargin(
+        ref.current.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop,
+      );
+    }
   }, []);
 
-  const v = useWindowVirtualizer({
+  const v = useVirtualizer({
     count: items.length,
+    getScrollElement: () => scrollEl,
     estimateSize: () => estimateSize,
     overscan,
     getItemKey: (i) => getKey(items[i]!, i),

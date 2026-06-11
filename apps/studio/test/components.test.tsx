@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { Chip, Progress } from "@spool/ui";
 import { CandidateCard } from "@/components/spool/work";
@@ -57,5 +57,33 @@ describe("CandidateCard (glass-box = real signals + excerpt)", () => {
     render(<CandidateCard c={scored} selected={false} onToggle={() => {}} dynScore={42} />);
     expect(screen.getByText("42")).toBeInTheDocument();
     expect(screen.queryByText("71")).not.toBeInTheDocument();
+  });
+});
+
+import { WindowList } from "@/components/spool/virtual";
+
+describe("WindowList", () => {
+  it("subscribes to the .main scroll container, not the window", async () => {
+    const main = document.createElement("div");
+    main.className = "main";
+    document.body.appendChild(main);
+    const spy = vi.spyOn(main, "addEventListener");
+    const winSpy = vi.spyOn(window, "addEventListener");
+    const host = document.createElement("div");
+    main.appendChild(host);
+    render(
+      <WindowList items={Array.from({ length: 200 }, (_, i) => i)} getKey={(i) => i}>
+        {(i) => <div>{`row ${i}`}</div>}
+      </WindowList>,
+      { container: host },
+    );
+    await new Promise((r) => setTimeout(r, 0)); // let the mount effect resolve .main
+    const mainScroll = spy.mock.calls.some(([ev]) => ev === "scroll");
+    const windowScroll = winSpy.mock.calls.some(([ev]) => ev === "scroll");
+    expect(mainScroll).toBe(true);
+    expect(windowScroll).toBe(false);
+    spy.mockRestore();
+    winSpy.mockRestore();
+    main.remove();
   });
 });
