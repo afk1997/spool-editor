@@ -21,7 +21,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -118,7 +118,11 @@ class ClipJobManager:
                 payload = {
                     "schema_version": 1,
                     "jobs": {
-                        jid: {**{k: v for k, v in asdict(j).items() if k in _PERSISTENT_FIELDS},
+                        # Explicit getattr allowlist — NOT dataclasses.asdict, which
+                        # deep-copies every field and raises TypeError on a live Popen
+                        # in process_handle, silently dropping this persist (e.g. the
+                        # CANCELLED write while ffmpeg is still running).
+                        jid: {**{k: getattr(j, k) for k in _PERSISTENT_FIELDS if k != "status"},
                               "status": j.status.value}
                         for jid, j in self._jobs.items()
                     },

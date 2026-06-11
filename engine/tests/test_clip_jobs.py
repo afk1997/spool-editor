@@ -190,6 +190,30 @@ def test_lookups_by_clip_and_source(tmp_path):
     jm.shutdown()
 
 
+def test_cancel_with_live_process_handle_still_persists(tmp_path):
+    """asdict() used to deep-copy process_handle (a live Popen → TypeError: cannot
+    pickle _thread.lock), silently dropping the CANCELLED write — the store kept
+    'running' and the job resurfaced as a spurious error after restart."""
+    import json as _json
+    class _FakeProc:
+        def __init__(self):
+            self._lock = threading.Lock()   # undeepcopyable, like a real Popen
+        def kill(self):
+            pass
+    store = tmp_path / "clip.json"
+    mgr = ClipJobManager(store_path=store)
+    gate = threading.Event()
+    def target(job):
+        job.process_handle = _FakeProc()
+        gate.wait(5)
+    jid = mgr.submit(kind="cut", source_id="src1", params={}, target=target)
+    _await(mgr, jid, ClipStatus.RUNNING)
+    assert mgr.cancel(jid) is True
+    gate.set()
+    data = _json.loads(store.read_text())
+    assert data["jobs"][jid]["status"] == "cancelled"   # the write must survive the live handle
+
+
 def _await(jm, jid, status, tries=100):
     for _ in range(tries):
         j = jm.get(jid)

@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -116,13 +116,15 @@ class TranscribeJobManager:
                 payload = {
                     "schema_version": 1,
                     "jobs": {
-                        jid: {k: v for k, v in asdict(j).items() if k in _PERSISTENT_FIELDS}
+                        # Explicit getattr allowlist — NOT dataclasses.asdict, which
+                        # deep-copies every field and raises TypeError on a live Popen
+                        # in process_handle, silently dropping this persist (e.g. the
+                        # CANCELLED write while ffmpeg is still running).
+                        jid: {**{k: getattr(j, k) for k in _PERSISTENT_FIELDS if k != "status"},
+                              "status": j.status.value}
                         for jid, j in self._jobs.items()
                     },
                 }
-                # asdict converts enum to "queued" via str enum; ensure status is a string
-                for jid, raw in payload["jobs"].items():
-                    raw["status"] = self._jobs[jid].status.value
 
             self._store_path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(prefix=".tj.", dir=str(self._store_path.parent))

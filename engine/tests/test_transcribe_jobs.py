@@ -132,3 +132,29 @@ def test_dismiss_refuses_running(tmp_path):
     time.sleep(0.1)
     assert jm.dismiss(jid) is False
     jm.shutdown()
+
+
+def test_cancel_with_live_process_handle_still_persists(tmp_path):
+    """asdict() used to deep-copy process_handle (a live Popen → TypeError: cannot
+    pickle _thread.lock), silently dropping the CANCELLED write — the store kept
+    'running' and the job resurfaced as a spurious error after restart."""
+    import threading as _threading
+    class _FakeProc:
+        def __init__(self):
+            self._lock = _threading.Lock()   # undeepcopyable, like a real Popen
+        def kill(self):
+            pass
+    store = tmp_path / "tj.json"
+    mgr = TranscribeJobManager(store_path=store)
+    gate = _threading.Event()
+    def target(job, model_path):
+        job.process_handle = _FakeProc()
+        gate.wait(5)
+    jid = mgr.submit(parent_job_id="p", model_path="m.bin", target=target)
+    deadline = time.time() + 5
+    while mgr.get(jid).status is not TranscribeStatus.RUNNING and time.time() < deadline:
+        time.sleep(0.01)
+    assert mgr.cancel(jid) is True
+    gate.set()
+    data = json.loads(store.read_text())
+    assert data["jobs"][jid]["status"] == "cancelled"   # the write must survive the live handle
