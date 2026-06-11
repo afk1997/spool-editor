@@ -2,7 +2,7 @@ flask>=3.0
 # yt-dlp pinned to a released version: the master tarball made builds non-reproducible
 # and shipped unreviewed upstream changes straight into the binary that processes
 # user-supplied URLs. Bump deliberately (YouTube breakage is the usual trigger).
-yt-dlp==2025.10.14
+yt-dlp==2026.6.9
 pytest>=8.0
 pytest-timeout>=2.3
 pywhispercpp>=1.2.0
