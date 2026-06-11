@@ -2208,10 +2208,12 @@ def agent_message():
     and CLI use (the golden rule) — so the in-app agent can do everything the app can: inspect the
     render queue, download, transcribe, discover, produce, manage recipes/watches/brand-kits, etc.
 
-    Body: ``{message, source_id?}``. Returns ``{reply, action, jobs[], tools[], question?, options?,
-    kind?}`` — ``tools`` is the real per-step tool trace, ``jobs`` any jobs started this turn, and a
-    ``clarify`` action carries the question/options/kind for the studio's elicitation card. Blocks
-    while the loop runs (each step is an LLM call), so the client shows a thinking state."""
+    Body: ``{message, source_id?, confirm_tool?}``. Returns ``{reply, action, jobs[], tools[],
+    question?, options?, kind?}`` — ``tools`` is the real per-step tool trace, ``jobs`` any jobs
+    started this turn, and a ``clarify`` action carries the question/options/kind for the studio's
+    elicitation card. An export/destructive tool returns ``action="confirm"`` with a ``pending``
+    ``{tool,args}`` until the next turn echoes it back as ``confirm_tool`` (a one-shot human gate).
+    Blocks while the loop runs (each step is an LLM call), so the client shows a thinking state."""
     from clip import agent as clip_agent, llm as clip_llm, moments as clip_moments
     from trove_client import TroveClient
 
@@ -2220,6 +2222,7 @@ def agent_message():
     if not message:
         return jsonify({"error": "missing_message"}), 400
     source_id = (data.get("source_id") or "").strip() or None
+    confirmed = (data.get("confirm_tool") or "").strip() or None
 
     # Source context: feed the transcript to the loop when we have one (so the agent can quote
     # timestamps for moments/clips without an extra fetch).
@@ -2238,16 +2241,19 @@ def agent_message():
     # agent's tools drive the same HTTP surface as every other client, so nothing can diverge.
     client = TroveClient()
     try:
-        result = clip_agent.run_agent(message, client=client, transcript_lines=lines)
+        result = clip_agent.run_agent(message, client=client, transcript_lines=lines,
+                                      confirmed_tool=confirmed)
     except (clip_llm.OfflineError, clip_llm.ProviderUnavailableError) as e:
         return jsonify({"error": "llm_unavailable", "message": str(e)}), 503
 
     resp = {"reply": result.get("reply", ""), "action": result.get("action", "reply"),
             "jobs": result.get("jobs", []), "tools": result.get("tools", [])}
-    if result.get("action") == "clarify":
+    if result.get("action") in ("clarify", "confirm"):
         resp["question"] = result.get("question", "")
         resp["options"] = result.get("options", [])
         resp["kind"] = result.get("kind", "enum")
+    if result.get("action") == "confirm":
+        resp["pending"] = result.get("pending") or {}
     return jsonify(resp)
 
 

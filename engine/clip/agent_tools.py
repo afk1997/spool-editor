@@ -187,6 +187,16 @@ TOOLS: list[Tool] = [
 
 CATALOG: dict[str, Tool] = {t.name: t for t in TOOLS}
 
+# Tools that must not run without an explicit human go-ahead: anything that EXPORTS a
+# finished file (past the review gate) or permanently deletes/rewrites config. The agent's
+# plan is steered by an UNTRUSTED transcript (whisper output of arbitrary downloaded
+# media), so a prompt-injection payload must never reach these unconfirmed. The loop
+# returns action="confirm" until the turn carries confirm_tool=<name>.
+CONFIRM_REQUIRED: frozenset = frozenset(
+    {t.name for t in TOOLS if t.exports}
+    | {"delete_recipe", "delete_watch", "delete_brand_kit", "remove_model", "update_settings"}
+)
+
 # Tools whose result is a freshly-started job (id + status) — surfaced to the studio as job chips +
 # a "started N jobs" toast, and tracked in the render queue.
 JOB_STARTING = {

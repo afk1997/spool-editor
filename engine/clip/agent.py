@@ -207,12 +207,16 @@ def run_agent(
     provider: "str | llm.LLMProvider | None" = None,
     env: dict | None = None,
     max_steps: int = _MAX_STEPS,
+    confirmed_tool: "str | None" = None,
 ) -> dict:
     """Run a bounded ReAct tool-loop for one user message. ``client`` is a TroveClient pointed at
     the engine (so tools hit the SAME /api/v1 surface as the UI). ``elapsed`` is an optional
-    ``() -> float`` ms clock for trace timing (injectable for tests). Returns
-    ``{reply, action, jobs[], tools[], question?, options?, kind?}``. Propagates the LLM bridge's
-    OfflineError / ProviderUnavailableError; never raises on bad model output or tool errors."""
+    ``() -> float`` ms clock for trace timing (injectable for tests). ``confirmed_tool`` is a single
+    tool name pre-approved by the caller for ONE invocation this turn (the /agent route's
+    ``confirm_tool``): tools in :data:`agent_tools.CONFIRM_REQUIRED` (exports + destructive config)
+    otherwise return ``action="confirm"`` instead of running. Returns
+    ``{reply, action, jobs[], tools[], question?, options?, kind?, pending?}``. Propagates the LLM
+    bridge's OfflineError / ProviderUnavailableError; never raises on bad model output or tool errors."""
     import time as _time
     clock = elapsed or (lambda: _time.monotonic() * 1000.0)
     if provider is None:                              # default the in-app agent to higher reasoning
@@ -258,6 +262,18 @@ def run_agent(
             continue
 
         args = step.get("args") if isinstance(step.get("args"), dict) else {}
+        if tool.name in agent_tools.CONFIRM_REQUIRED and tool.name != confirmed_tool:
+            return {
+                "action": "confirm",
+                "reply": f"I'm ready to run {tool.name} — it needs your confirmation.",
+                "question": (f"Allow {tool.name} {_short_arg(args)}".rstrip() + "?"),
+                "options": ["Confirm", "Cancel"],
+                "kind": "confirm",
+                "pending": {"tool": tool.name, "args": args},
+                "tools": tools_trace, "jobs": jobs,
+            }
+        if tool.name == confirmed_tool:
+            confirmed_tool = None   # single-use: one confirmation buys exactly one call
         t0 = clock()
         try:
             result = tool.run(client, args)

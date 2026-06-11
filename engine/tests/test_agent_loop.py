@@ -170,3 +170,69 @@ def test_catalog_tools_map_to_real_troveclient_methods():
         assert callable(getattr(TroveClient, m, None)), f"TroveClient.{m} missing — agent catalog would break"
     assert agent_tools.JOB_STARTING <= set(agent_tools.CATALOG)            # job-starting set is valid
     assert agent_tools.catalog_prompt().count("\n") >= 40                  # full surface, not a toy
+
+
+# ---- confirmation gate: exports + destructive config must not run un-confirmed ----
+# The plan is steered by an UNTRUSTED transcript (whisper of arbitrary media), so a
+# prompt-injection payload must never reach a delete/export tool without a human go-ahead.
+
+class _DeleteClient(_FakeClient):
+    """Records delete_recipe calls so we can assert NOTHING ran behind the gate."""
+
+    def delete_recipe(self, rid):
+        self.calls.append(("delete_recipe", rid))
+        return {"ok": True}
+
+
+def test_gated_tool_returns_confirm_instead_of_running():
+    c = _DeleteClient()
+    out = agent.run_agent(
+        "delete my recipe",
+        client=c,
+        provider=_provider(json.dumps({"tool": "delete_recipe", "args": {"recipe_id": "r1"}})),
+    )
+    assert out["action"] == "confirm"
+    assert out["pending"] == {"tool": "delete_recipe", "args": {"recipe_id": "r1"}}
+    assert out["kind"] == "confirm"
+    assert [x for x in c.calls if x[0] == "delete_recipe"] == []     # NOTHING ran
+
+
+def test_confirmed_tool_runs_once():
+    c = _DeleteClient()
+    out = agent.run_agent(
+        "delete my recipe",
+        client=c,
+        provider=_provider(
+            json.dumps({"tool": "delete_recipe", "args": {"recipe_id": "r1"}}),
+            json.dumps({"final": {"reply": "deleted"}}),
+        ),
+        confirmed_tool="delete_recipe",
+        elapsed=iter([0.0, 1.0, 1.0]).__next__,
+    )
+    assert out["action"] == "reply"
+    assert [x for x in c.calls if x[0] == "delete_recipe"] == [("delete_recipe", "r1")]
+
+
+def test_confirmation_is_single_use():
+    # One confirmation buys exactly ONE call; a model that tries a SECOND delete is re-gated.
+    c = _DeleteClient()
+    out = agent.run_agent(
+        "delete my recipes",
+        client=c,
+        provider=_provider(
+            json.dumps({"tool": "delete_recipe", "args": {"recipe_id": "r1"}}),
+            json.dumps({"tool": "delete_recipe", "args": {"recipe_id": "r2"}}),
+        ),
+        confirmed_tool="delete_recipe",
+        elapsed=iter([0.0, 1.0, 1.0]).__next__,
+    )
+    assert [x for x in c.calls if x[0] == "delete_recipe"] == [("delete_recipe", "r1")]  # first ran
+    assert out["action"] == "confirm"                                # second re-gated
+    assert out["pending"]["args"] == {"recipe_id": "r2"}
+
+
+def test_confirm_required_covers_exports_and_destructive_config():
+    assert {"render_clip", "render_pipeline", "delete_recipe", "delete_watch",
+            "delete_brand_kit", "remove_model", "update_settings"} <= set(agent_tools.CONFIRM_REQUIRED)
+    # make_clips lands in the review queue (writes, NOT exports) → must stay UN-gated.
+    assert "make_clips" not in agent_tools.CONFIRM_REQUIRED
