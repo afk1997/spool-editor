@@ -1,7 +1,7 @@
 # Spool engine · clip back-half primitive (vendored, adapted from an MIT-licensed
-# upstream). The algorithm is preserved verbatim per "reuse, don't rebuild"; Spool's
-# reframe.py / captioner.py wrap these in Phase 1. Full license + attribution live in
-# THIRD_PARTY_LICENSES.md at the repo root.
+# upstream). Algorithm preserved; Spool patched the hardcoded-30fps timeline (uses
+# parsed pts_time) and added empty/mismatch guards — see docs/CODE_REVIEW.md §3.2.
+# Full license + attribution live in THIRD_PARTY_LICENSES.md at the repo root.
 #!/usr/bin/env python3
 """Build speaker timeline from two ROI motion files.
 
@@ -29,7 +29,15 @@ MIN_DUR = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0
 
 t_l, v_l = parse(LZ)
 t_d, v_d = parse(DZ)
-assert len(v_l) == len(v_d), f"len mismatch: {len(v_l)} vs {len(v_d)}"
+# The two ROI passes can decode one extra frame at EOF; truncate to the common
+# length instead of asserting (a one-frame mismatch failed the whole reframe).
+n = min(len(v_l), len(v_d))
+t_l, v_l, v_d = t_l[:n], v_l[:n], v_d[:n]
+if n == 0:
+    # Degenerate clip (no decodable motion frames): no segments, not a crash.
+    print("[]")
+    print("0 segments, total 0.00s", file=sys.stderr)
+    sys.exit(0)
 
 def norm(v):
     m = sum(v) / max(len(v), 1)
@@ -55,14 +63,24 @@ for i in range(len(s_l)):
     elif cur == 1 and s_l[i] > s_d[i] * MARGIN: cur = 0
     speaker.append(cur)
 
-fps = 30.0
+# Boundaries come from the frames' REAL pts_time (parsed above): frame_index/30
+# stretched/compressed the timeline for anything that isn't exactly 30fps.
+if len(t_l) > 1:
+    deltas = sorted(b - a for a, b in zip(t_l, t_l[1:]))
+    frame_dt = max(1e-6, deltas[len(deltas) // 2])  # median inter-frame delta (VFR-safe)
+else:
+    frame_dt = 1 / 30.0
+
+def t_at(i):
+    return t_l[i] if i < len(t_l) else t_l[-1] + frame_dt
+
 segments = []
 i = 0
 while i < len(speaker):
     j = i
     while j + 1 < len(speaker) and speaker[j + 1] == speaker[i]:
         j += 1
-    segments.append({"start": i / fps, "end": (j + 1) / fps,
+    segments.append({"start": t_at(i), "end": t_at(j + 1),
                      "speaker": "left" if speaker[i] == 0 else "right"})
     i = j + 1
 
@@ -81,4 +99,5 @@ for seg in merged:
         collapsed.append(seg)
 
 print(json.dumps(collapsed, indent=2))
-print(f"{len(collapsed)} segments, total {collapsed[-1]['end']:.2f}s", file=sys.stderr)
+total = collapsed[-1]["end"] if collapsed else 0.0
+print(f"{len(collapsed)} segments, total {total:.2f}s", file=sys.stderr)
