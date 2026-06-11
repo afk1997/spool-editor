@@ -26,10 +26,18 @@ def list_playlist_items(url: str, *, limit: int = 30, ytdlp: str = "yt-dlp") -> 
     """Canonical video URLs on a channel/playlist via a yt-dlp FLAT listing (metadata only, no
     download), newest-first and capped. We print ``url`` (the per-entry webpage URL), NOT the bare
     ``id`` — the reconciler hands each item straight to ``enqueue_download(url=…)`` and a bare id is
-    not a reliable download target across extractors. Failures (offline / bad URL) degrade to []."""
+    not a reliable download target across extractors. Failures (offline / bad URL) degrade to [].
+
+    The target is user-controlled config: reject option-shaped values and pass it after ``--``
+    so it can never be parsed as a yt-dlp flag (mirrors runner.build_*_argv — the original
+    download path's argv-injection guard, which this late-added path previously skipped)."""
+    target = (url or "").strip()
+    if not target or target.startswith("-"):
+        return []
     try:
         out = subprocess.run(
-            [ytdlp, "--flat-playlist", "--print", "url", "--playlist-end", str(int(limit)), url],
+            [ytdlp, "--flat-playlist", "--print", "url",
+             "--playlist-end", str(int(limit)), "--", target],
             capture_output=True, text=True, timeout=90,
         ).stdout
     except Exception:

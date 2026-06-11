@@ -3,6 +3,8 @@
 produce once transcribed — is tested without real downloads, jobs, or yt-dlp."""
 from __future__ import annotations
 
+import types
+
 import watcher
 from watcher import reconcile_watch, list_folder_items, list_playlist_items
 
@@ -209,3 +211,21 @@ def test_list_folder_items_finds_videos(tmp_path):
     (tmp_path / "notes.txt").write_text("x")
     assert list_folder_items(str(tmp_path)) == ["a.mp4", "b.mkv"]    # videos only, sorted
     assert list_folder_items(str(tmp_path / "missing")) == []        # missing dir → []
+
+
+def test_list_playlist_items_uses_separator_and_rejects_option_shaped(monkeypatch):
+    calls = []
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return types.SimpleNamespace(stdout="https://youtu.be/x\n", returncode=0)
+    monkeypatch.setattr(watcher.subprocess, "run", fake_run)
+
+    items = watcher.list_playlist_items("https://example.com/playlist")
+    assert items == ["https://youtu.be/x"]
+    argv = calls[0]
+    sep = argv.index("--")
+    assert argv[sep + 1] == "https://example.com/playlist"  # target can never parse as a flag
+
+    # an option-shaped target (e.g. --config-location=...) must never reach a subprocess
+    assert watcher.list_playlist_items("--config-location=/tmp/evil") == []
+    assert len(calls) == 1

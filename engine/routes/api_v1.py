@@ -2073,7 +2073,7 @@ def delete_recipe(recipe_id):
 
 # ---- watches (Phase 3): folder / channel / playlist automations → the review queue ----
 
-def _validate_watch(data, *, require_name: bool):
+def _validate_watch(data, *, require_name: bool, current: dict | None = None):
     """Validate a watch body; return an error response tuple, or None if OK."""
     bad = (jsonify({"error": "bad_watch"}), 400)
     if not isinstance(data, dict):
@@ -2095,6 +2095,19 @@ def _validate_watch(data, *, require_name: bool):
         return bad
     if data.get("recipe_id") is not None and not isinstance(data["recipe_id"], str):
         return bad
+    # Watch targets feed a yt-dlp subprocess (channel/playlist) — enforce the same
+    # URL-shape + SSRF guard the download path applies (safety.is_safe_url), and refuse
+    # option-shaped targets for every kind.
+    if "target" in data or "kind" in data:
+        kind = data.get("kind") or (current or {}).get("kind")
+        target = data.get("target") if "target" in data else (current or {}).get("target")
+        tgt = target.strip() if isinstance(target, str) else ""
+        if tgt.startswith("-"):
+            return (jsonify({"error": "unsafe_target"}), 400)
+        if kind in ("channel", "playlist"):
+            from safety import is_safe_url
+            if not tgt or not is_safe_url(tgt):
+                return (jsonify({"error": "unsafe_target"}), 400)
     return None
 
 
@@ -2127,7 +2140,7 @@ def get_watch(watch_id):
 @token_required
 def update_watch(watch_id):
     data = request.get_json(silent=True) or {}
-    err = _validate_watch(data, require_name=False)
+    err = _validate_watch(data, require_name=False, current=_ws().get(watch_id))
     if err:
         return err
     w = _ws().update(watch_id, data)

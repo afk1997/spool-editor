@@ -1566,3 +1566,28 @@ def test_watch_scan_ingests_new_folder_videos(client, tmp_path, monkeypatch):
 def test_watch_scan_unknown_404(client):
     _, c = client
     assert c.post("/api/v1/watches/ghost/scan").status_code == 404
+
+
+def test_create_watch_rejects_unsafe_channel_target(client):
+    _, c = client
+    r = c.post("/api/v1/watches", json={
+        "name": "evil", "kind": "channel", "target": "--config-location=/tmp/evil"})
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "unsafe_target"
+
+    r = c.post("/api/v1/watches", json={
+        "name": "internal", "kind": "playlist", "target": "http://169.254.169.254/latest"})
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "unsafe_target"
+
+
+def test_update_watch_rejects_unsafe_retarget(client):
+    # IP-literal public address: is_safe_url checks it without a DNS lookup (offline-safe test)
+    _, c = client
+    r = c.post("/api/v1/watches", json={
+        "name": "w", "kind": "playlist", "target": "https://93.184.216.34/list"})
+    assert r.status_code == 201
+    wid = r.get_json()["id"]
+    r = c.patch(f"/api/v1/watches/{wid}", json={"target": "-o/tmp/pwn"})
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "unsafe_target"
