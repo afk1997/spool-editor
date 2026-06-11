@@ -3,6 +3,8 @@
 produce once transcribed — is tested without real downloads, jobs, or yt-dlp."""
 from __future__ import annotations
 
+import os
+import time
 import types
 
 import watcher
@@ -206,9 +208,14 @@ def test_reconcile_disabled_watch_is_a_noop():
 
 
 def test_list_folder_items_finds_videos(tmp_path):
-    (tmp_path / "a.mp4").write_bytes(b"x")
-    (tmp_path / "b.mkv").write_bytes(b"x")
-    (tmp_path / "notes.txt").write_text("x")
+    old = time.time() - 3600
+    for name, content in [("a.mp4", b"x"), ("b.mkv", b"x"), ("notes.txt", None)]:
+        p = tmp_path / name
+        if content is not None:
+            p.write_bytes(content)
+        else:
+            p.write_text("x")
+        os.utime(p, (old, old))
     assert list_folder_items(str(tmp_path)) == ["a.mp4", "b.mkv"]    # videos only, sorted
     assert list_folder_items(str(tmp_path / "missing")) == []        # missing dir → []
 
@@ -229,3 +236,18 @@ def test_list_playlist_items_uses_separator_and_rejects_option_shaped(monkeypatc
     # an option-shaped target (e.g. --config-location=...) must never reach a subprocess
     assert watcher.list_playlist_items("--config-location=/tmp/evil") == []
     assert len(calls) == 1
+
+
+def test_list_folder_items_skips_files_still_being_written(tmp_path):
+    settled = tmp_path / "done.mp4"
+    settled.write_bytes(b"x" * 64)
+    old = time.time() - 3600
+    os.utime(settled, (old, old))
+    fresh = tmp_path / "copying.mp4"
+    fresh.write_bytes(b"x" * 64)                       # mtime = now → still settling
+    partial = tmp_path / "grab.mp4.part"
+    partial.write_bytes(b"x")
+
+    assert watcher.list_folder_items(str(tmp_path)) == ["done.mp4"]
+    # the fresh file is only deferred — it appears once its mtime stops moving
+    assert watcher.list_folder_items(str(tmp_path), settle_seconds=0) == ["copying.mp4", "done.mp4"]

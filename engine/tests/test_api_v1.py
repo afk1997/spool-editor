@@ -1555,7 +1555,10 @@ def test_watch_scan_ingests_new_folder_videos(client, tmp_path, monkeypatch):
     app, c = client
     indir = tmp_path / "incoming"
     indir.mkdir()
-    (indir / "talk.mp4").write_bytes(b"x")
+    p = indir / "talk.mp4"
+    p.write_bytes(b"x")
+    old = time.time() - 3600
+    os.utime(p, (old, old))
     wid = c.post("/api/v1/watches", json={"name": "F", "kind": "folder",
                                           "target": str(indir), "recipe_id": "r1"}).get_json()["id"]
     r = c.post(f"/api/v1/watches/{wid}/scan")

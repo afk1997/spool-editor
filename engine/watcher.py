@@ -10,16 +10,37 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 
 _VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi")
 
+_SETTLE_SECONDS = 30.0
 
-def list_folder_items(folder: str) -> list[str]:
-    """Sorted video filenames in a local folder (a missing/unreadable dir → [])."""
+
+def list_folder_items(folder: str, *, settle_seconds: float = _SETTLE_SECONDS,
+                      now: float | None = None) -> list[str]:
+    """Sorted video filenames in a local folder (a missing/unreadable dir → []).
+
+    A file whose mtime is still moving is mid-copy: ingesting it produced a truncated
+    source that was then permanently marked seen. Defer anything modified within
+    ``settle_seconds`` (it shows up whole on a later tick). Downloader partials
+    (.part/.crdownload) never match _VIDEO_EXTS, so the extension filter already
+    excludes them."""
+    t = time.time() if now is None else now
+    out: list[str] = []
     try:
-        return sorted(f for f in os.listdir(folder) if f.lower().endswith(_VIDEO_EXTS))
+        for f in os.listdir(folder):
+            if not f.lower().endswith(_VIDEO_EXTS):
+                continue
+            try:
+                if os.path.getmtime(os.path.join(folder, f)) > t - settle_seconds:
+                    continue   # still settling — re-check next tick
+            except OSError:
+                continue       # vanished between listdir and stat
+            out.append(f)
     except OSError:
         return []
+    return sorted(out)
 
 
 def list_playlist_items(url: str, *, limit: int = 30, ytdlp: str = "yt-dlp") -> list[str]:
