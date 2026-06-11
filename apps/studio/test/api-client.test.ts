@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { SpoolApiClient } from "@spool/api-client";
+import { describe, it, expect, vi } from "vitest";
+import { SpoolApiClient, SpoolApiError } from "@spool/api-client";
 
 /* The typed REST client mirrors the engine's api_v1. Here we inject a fake fetch and assert the
  * wire shape (path / method / body) — the contract the studio relies on. */
@@ -41,5 +41,43 @@ describe("SpoolApiClient.produce", () => {
       caption_preset: "minimal", platform: "reels", fast: true, brand_kit_id: "kitX",
       weights: { hook: 5 },
     });
+  });
+});
+
+// ── SSE clean-close reconnect (HIGH finding 3.4) ─────────────────────────────
+// A clean EOF (engine restart, idle proxy timeout) must route through onError so
+// callers (EngineProvider) can reconnect with backoff — not silently freeze.
+
+function sseResponse(frames: string[]): Response {
+  const stream = new ReadableStream<Uint8Array>({
+    start(c) {
+      const enc = new TextEncoder();
+      for (const f of frames) c.enqueue(enc.encode(`data: ${f}\n\n`));
+      c.close(); // clean EOF — the engine restarted / proxy idled out
+    },
+  });
+  return new Response(stream, { status: 200 });
+}
+
+describe("subscribeEvents clean close", () => {
+  it("routes a clean EOF through onError so callers reconnect", async () => {
+    const fetchImpl = vi.fn(async () => sseResponse(['{"ts":1,"jobs":[],"transcripts":[],"clips":[]}']));
+    const client = new SpoolApiClient({ baseUrl: "http://x", fetch: fetchImpl as unknown as typeof fetch });
+    const snaps: unknown[] = [];
+    const errors: unknown[] = [];
+    client.subscribeEvents((s) => snaps.push(s), { onError: (e) => errors.push(e) });
+    await vi.waitFor(() => expect(errors.length).toBe(1));
+    expect(snaps.length).toBe(1);
+    expect((errors[0] as SpoolApiError).code).toBe("events_closed");
+  });
+
+  it("does NOT fire onError when the caller unsubscribed", async () => {
+    const fetchImpl = vi.fn(async () => sseResponse([]));
+    const client = new SpoolApiClient({ baseUrl: "http://x", fetch: fetchImpl as unknown as typeof fetch });
+    const errors: unknown[] = [];
+    const stop = client.subscribeEvents(() => {}, { onError: (e) => errors.push(e) });
+    stop();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(errors.length).toBe(0);
   });
 });

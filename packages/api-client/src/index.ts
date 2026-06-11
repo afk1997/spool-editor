@@ -518,6 +518,10 @@ export class SpoolApiClient {
             }
           }
         }
+        // A clean EOF (engine restart in local dev, idle proxy close, graceful teardown)
+        // must route through the SAME reconnect path as a thrown error — otherwise the
+        // studio freezes on stale data behind a green "online" badge.
+        if (!ctrl.signal.aborted) opts.onError?.(new SpoolApiError(0, "events_closed"));
       } catch (e) {
         if (!ctrl.signal.aborted) opts.onError?.(e);
       }
