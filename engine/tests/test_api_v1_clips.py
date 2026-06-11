@@ -296,6 +296,17 @@ def test_brand_kit_update_404(client):
     assert c.patch("/api/v1/brand-kits/ghost", json={"name": "x"}).status_code == 404
 
 
+def test_caption_override_font_is_sanitized(client):
+    _, c = client
+    r = c.post("/api/v1/brand-kits", json={
+        "name": "k", "caption_overrides": {"font": "Bad,Font{\\evil}\x01Name"}})
+    assert r.status_code == 201
+    font = r.get_json()["caption_overrides"]["font"]
+    for ch in (",", "{", "}", "\\", "\x01"):
+        assert ch not in font
+    assert "BadFont" in font
+
+
 # ---- renders (export) ------------------------------------------------
 
 def test_render_export_creates_job_and_file(client):

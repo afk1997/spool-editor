@@ -241,3 +241,20 @@ def test_burn_invokes_subtitles_filter(monkeypatch, tmp_path):
     assert vf.startswith("subtitles=") and str(ass) in vf
     assert "-c:a" in argv and "copy" in argv
     assert str(clip) in argv and str(out) in argv
+
+
+def test_word_text_cannot_inject_ass_override_tags(tmp_path):
+    words = {"schema_version": 2, "words": [
+        {"idx": 0, "w": "evil{\\fs500}big", "original_w": "evil", "start": 0.1, "end": 0.4,
+         "edited": False, "deleted": False},
+        {"idx": 1, "w": "next", "original_w": "next", "start": 0.5, "end": 0.9,
+         "edited": False, "deleted": False},
+    ], "segments": []}
+    wj = tmp_path / "w.words.json"
+    wj.write_text(json.dumps(words))
+    out = tmp_path / "out.ass"
+    captioner.generate(str(wj), clip_start=0.0, clip_end=1.0, style="opus", out_ass_path=str(out))
+    content = out.read_text()
+    assert "{\\fs500}" not in content          # the injected override never reaches ASS
+    assert "(\\fs500)" in content              # ...neutralized, text preserved
+    assert "{\\c" in content                   # generated highlight tags still intact

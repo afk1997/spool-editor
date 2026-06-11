@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import uuid
 from collections import OrderedDict
@@ -439,7 +440,11 @@ def _validate_caption_overrides(ov):
     if "allcaps" in ov:
         clean["allcaps"] = bool(ov["allcaps"])
     if ov.get("font"):
-        clean["font"] = str(ov["font"])[:60]
+        # The font name lands raw in the ASS Style line (comma-separated fields inside
+        # an override-capable format): strip separators, braces, escapes, and controls.
+        font = re.sub(r"[{}\\,\x00-\x1f]", "", str(ov["font"]))[:60].strip()
+        if font:
+            clean["font"] = font
     return clean
 
 
@@ -454,8 +459,11 @@ def _validate_brand_kit(data, *, require_name: bool):
         return bad
     if data.get("caption_preset") is not None and data["caption_preset"] not in _CAPTION_STYLES:
         return bad
-    if data.get("caption_overrides") is not None and _validate_caption_overrides(data["caption_overrides"]) is None:
-        return bad
+    if data.get("caption_overrides") is not None:
+        clean_ov = _validate_caption_overrides(data["caption_overrides"])
+        if clean_ov is None:
+            return bad
+        data["caption_overrides"] = clean_ov
     pal = data.get("palette")
     if pal is not None and (not isinstance(pal, list) or not all(_is_hex_color(x) for x in pal)):
         return bad

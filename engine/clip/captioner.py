@@ -132,7 +132,10 @@ def generate(
         # keep any word overlapping the window
         if end <= clip_start or start >= clip_end:
             continue
-        text = (w.get("w") or "").strip()
+        # Transcript text is untrusted (whisper output of arbitrary downloaded media):
+        # neutralize ASS-structural chars HERE, before the vendored generator wraps the
+        # word in its own {\...} override tags (which must stay intact).
+        text = _ass_escape((w.get("w") or ""))
         if not text:
             continue
         sliced.append({
