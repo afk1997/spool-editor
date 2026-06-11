@@ -207,7 +207,7 @@ def test_submit_job_calls_enqueue_with_supplied_title(client, monkeypatch):
 
     app.extensions["trove.actions"]["enqueue_download"] = fake_enqueue
     r = c.post("/api/v1/jobs", json={
-        "url": "https://example.com/video",
+        "url": "https://93.184.216.34/video",
         "format": "audio",
         "title": "My clip",
         "auto_transcribe": True,
@@ -234,7 +234,7 @@ def test_submit_job_forwards_download_opts(client):
 
     app.extensions["trove.actions"]["enqueue_download"] = fake_enqueue
     r = c.post("/api/v1/jobs", json={
-        "url": "https://example.com/v", "title": "t",
+        "url": "https://93.184.216.34/v", "title": "t",
         "subtitles": True, "chapters": True, "embed": True,
     })
     assert r.status_code == 201
@@ -596,9 +596,9 @@ def test_submit_bulk_partial_failure(client):
     app.extensions["trove.actions"]["enqueue_download"] = fake_enqueue
     r = c.post("/api/v1/jobs/bulk", json={
         "urls": [
-            "https://example.com/ok-1",
+            "https://93.184.216.34/ok-1",
             "--exec=evil",                # rejected by safety
-            "https://example.com/ok-2",
+            "https://93.184.216.34/ok-2",
         ],
         "format": "audio",
     })
@@ -673,7 +673,7 @@ def test_idempotency_replays_same_job(client):
         jm._jobs["only-id"] = j
         return "only-id"
     app.extensions["trove.actions"]["enqueue_download"] = fake_enqueue
-    body = {"url": "https://example.com/a", "title": "T"}
+    body = {"url": "https://93.184.216.34/a", "title": "T"}
     headers = {"Idempotency-Key": "deadbeef-1"}
     r1 = c.post("/api/v1/jobs", json=body, headers=headers)
     assert r1.status_code == 201
@@ -694,7 +694,7 @@ def test_idempotency_different_keys_create_distinct_jobs(client):
         jm._jobs[jid] = Job(id=jid, url=url, title="t", status=JobStatus.QUEUED)
         return jid
     app.extensions["trove.actions"]["enqueue_download"] = fake_enqueue
-    body = {"url": "https://example.com/x", "title": "X"}
+    body = {"url": "https://93.184.216.34/x", "title": "X"}
     a = c.post("/api/v1/jobs", json=body, headers={"Idempotency-Key": "k1"})
     b = c.post("/api/v1/jobs", json=body, headers={"Idempotency-Key": "k2"})
     assert a.get_json()["id"] != b.get_json()["id"]
@@ -1598,7 +1598,7 @@ def test_watch_crud(client):
     _, c = client
     assert c.get("/api/v1/watches").get_json() == {"watches": []}
     w = c.post("/api/v1/watches", json={"name": "Chan", "kind": "channel",
-                                        "target": "https://youtube.com/@x", "recipe_id": "r1"})
+                                        "target": "https://93.184.216.34/@x", "recipe_id": "r1"})
     assert w.status_code == 201
     wid = w.get_json()["id"]
     assert w.get_json()["enabled"] is True and w.get_json()["seen"] == []
