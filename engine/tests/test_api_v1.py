@@ -248,7 +248,9 @@ def test_submit_job_busy_returns_503(client, monkeypatch):
         raise RuntimeError("pool full")
 
     app.extensions["trove.actions"]["enqueue_download"] = fake_enqueue
-    r = c.post("/api/v1/jobs", json={"url": "https://e.com", "title": "x"})
+    # IP-literal: is_safe_url checks it without DNS (offline-safe); what this test
+    # proves is that a busy enqueue raises and the route returns 503, not URL validity.
+    r = c.post("/api/v1/jobs", json={"url": "https://93.184.216.34/video", "title": "x"})
     assert r.status_code == 503
     assert r.get_json()["error"] == "busy"
 
@@ -1192,7 +1194,9 @@ def test_idempotent_failed_enqueue_releases_slot(client, monkeypatch):
         raise RuntimeError("queue full")
     app.extensions["trove.actions"]["enqueue_download"] = boom
     h = {"Idempotency-Key": "fail-key"}
-    r = c.post("/api/v1/jobs", json={"url": "https://x", "title": "T"}, headers=h)
+    # IP-literal: is_safe_url checks it without DNS (offline-safe); what this test
+    # proves is the idempotency-key placeholder is released on enqueue failure.
+    r = c.post("/api/v1/jobs", json={"url": "https://93.184.216.34/v", "title": "T"}, headers=h)
     assert r.status_code == 503
     # Recovery: a real enqueue with the same key now succeeds (i.e. the
     # placeholder didn't stick around).
@@ -1202,7 +1206,7 @@ def test_idempotent_failed_enqueue_releases_slot(client, monkeypatch):
                                      status=JobStatus.QUEUED)
         return "recovered"
     app.extensions["trove.actions"]["enqueue_download"] = ok
-    r2 = c.post("/api/v1/jobs", json={"url": "https://x", "title": "T"}, headers=h)
+    r2 = c.post("/api/v1/jobs", json={"url": "https://93.184.216.34/v", "title": "T"}, headers=h)
     assert r2.status_code == 201
     assert r2.get_json()["id"] == "recovered"
 
@@ -1220,7 +1224,9 @@ def test_idempotent_stale_key_after_eviction_submits_fresh(client):
         return jid
     app.extensions["trove.actions"]["enqueue_download"] = fake_enqueue
     h = {"Idempotency-Key": "stale-key"}
-    body = {"url": "https://x", "title": "T"}
+    # IP-literal: is_safe_url checks it without DNS (offline-safe); what this test
+    # proves is a TTL-evicted idempotency key re-submits a fresh job.
+    body = {"url": "https://93.184.216.34/v", "title": "T"}
 
     r1 = c.post("/api/v1/jobs", json=body, headers=h)
     assert r1.status_code == 201

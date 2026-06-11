@@ -42,10 +42,16 @@ def _is_blocked_ip(addr: str) -> bool:
 
 
 def is_safe_url(url: str) -> bool:
-    """Return True only if url is a public http(s) URL we're willing to fetch.
+    """Return True only if url is a public http(s) URL we're willing to hand to a fetcher.
 
-    Rejects: non-http schemes, anything beginning with '-' (CLI option-shaped),
-    private/loopback/link-local IPs, hostnames that resolve to those.
+    Rejects: non-http schemes, option-shaped strings (argv-injection guard), localhost,
+    private/loopback/link-local/metadata IP literals, and hostnames that fail to resolve
+    or resolve to those ranges.
+
+    Best-effort, not a hard SSRF boundary: DNS is resolved ONCE here, while the actual
+    fetch (yt-dlp) re-resolves and follows redirects on its own — a DNS rebind or a
+    redirect to an internal address after validation is not caught. Acceptable in the
+    default loopback single-user posture; do not rely on it alone on a public bind.
     """
     if not url or not isinstance(url, str):
         return False
@@ -75,8 +81,9 @@ def is_safe_url(url: str) -> bool:
     try:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror:
-        # Unresolvable — let yt-dlp surface the network error rather than block here.
-        return True
+        # Fail CLOSED: an unresolvable host can't be vetted, and "let the fetcher find
+        # out" previously meant resolution failure skipped this check entirely.
+        return False
     for info in infos:
         addr = info[4][0]
         if _is_blocked_ip(addr):

@@ -308,3 +308,9 @@ def test_attach_security_headers_includes_per_request_nonce():
     nonce2 = r2.get_data(as_text=True)
     assert nonce1 and nonce2 and nonce1 != nonce2
     assert f"'nonce-{nonce1}'" in r1.headers["Content-Security-Policy"]
+
+
+def test_unresolvable_host_fails_closed():
+    """An unresolvable host can't be vetted; returning True meant DNS failure (or a
+    rebinding setup) bypassed the whole check. .invalid never resolves (RFC 2606)."""
+    assert safety.is_safe_url("https://definitely-not-real.invalid/video") is False
