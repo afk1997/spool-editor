@@ -71,7 +71,7 @@ export default function RecipesScreen() {
   const [saving, setSaving] = useState(false);
 
   // Load the first recipe into the editor once it arrives (set-state-during-render sync, once).
-  if (!synced && sel === null && recipes.length) { setSel(recipes[0].id); setF(toForm(recipes[0])); setSynced(true); }
+  if (!synced && sel === null && recipes[0]) { setSel(recipes[0].id); setF(toForm(recipes[0])); setSynced(true); }
 
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setF((s) => ({ ...s, [k]: v }));
   const selectRecipe = (r: Recipe) => { setSel(r.id); setF(toForm(r)); };

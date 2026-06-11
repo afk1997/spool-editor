@@ -62,16 +62,17 @@ export default function CaptionScreen() {
   const hasReal = realWords.length > 0;
   const words = hasReal ? realWords : (clip?.title || "your captions here").split(" ");
 
+  const OPUS = PRESETS.opus!; // the "opus" key is statically present in PRESETS
   const [preset, setPreset] = useState("opus");
-  const [font, setFont] = useState(PRESETS.opus.font);
-  const [size, setSize] = useState(PRESETS.opus.size);
-  const [weight, setWeight] = useState(PRESETS.opus.weight);
-  const [outline, setOutline] = useState(PRESETS.opus.outline);
-  const [fill, setFill] = useState(PRESETS.opus.fill);
-  const [highlight, setHighlight] = useState<string | null>(PRESETS.opus.highlight);
-  const [allcaps, setAllcaps] = useState(PRESETS.opus.allcaps);
-  const [position, setPosition] = useState(PRESETS.opus.position);
-  const [wpl, setWpl] = useState(PRESETS.opus.words);
+  const [font, setFont] = useState(OPUS.font);
+  const [size, setSize] = useState(OPUS.size);
+  const [weight, setWeight] = useState(OPUS.weight);
+  const [outline, setOutline] = useState(OPUS.outline);
+  const [fill, setFill] = useState(OPUS.fill);
+  const [highlight, setHighlight] = useState<string | null>(OPUS.highlight);
+  const [allcaps, setAllcaps] = useState(OPUS.allcaps);
+  const [position, setPosition] = useState(OPUS.position);
+  const [wpl, setWpl] = useState(OPUS.words);
   // Caption craft (item D) — additive engine options; off by default. The engine applies
   // speaker color only when the clip window actually has 2+ diarized speakers (else a no-op).
   const [colorSpeakers, setColorSpeakers] = useState(false);
@@ -107,7 +108,7 @@ export default function CaptionScreen() {
       const data = g.getImageData(0, 0, s, s).data;
       let best = { score: -1, hex: highlight ?? "#FFE94D" };
       for (let i = 0; i < data.length; i += 4) {
-        const r = data[i], gg = data[i + 1], b = data[i + 2];
+        const r = data[i]!, gg = data[i + 1]!, b = data[i + 2]!; // RGBA buffer length is a multiple of 4, so i, i+1, i+2 are in range
         const mx = Math.max(r, gg, b), mn = Math.min(r, gg, b);
         const sat = mx === 0 ? 0 : (mx - mn) / mx, bright = mx / 255;
         const score = sat * bright;

@@ -34,7 +34,7 @@ describe("mapCandidates", () => {
     const c = mapCandidates(snapshotWithMoments(), "src1");
     expect(c).toHaveLength(2);
     expect(c[0]).toMatchObject({ title: "A funny bit", start: 10, end: 30, mode: "Funny", why: "punchy", signals: ["punchline", "reversal"], source_id: "src1", sel: true });
-    expect(c[1].mode).toBe("Insightful"); // capitalized
+    expect(c[1]!.mode).toBe("Insightful"); // capitalized
   });
 
   it("fills the excerpt from transcript words inside the moment window", () => {
@@ -45,14 +45,14 @@ describe("mapCandidates", () => {
       { idx: 3, w: "after", start: 80, end: 80.4 },
     ];
     const c = mapCandidates(snapshotWithMoments(), "src1", words);
-    expect(c[0].excerpt).toBe("punchline here"); // only words inside [10,30]
+    expect(c[0]!.excerpt).toBe("punchline here"); // only words inside [10,30]
   });
 
   it("carries the real glass-box score + named factors + effective weights", () => {
     const c = mapCandidates(snapshotWithMoments(), "src1");
-    expect(c[0].score).toBe(71);
-    expect(c[0].factors).toMatchObject({ hook: 0.71, self_contained: 0.55, arc: 0.36, energy: 0.52, length_fit: 1.0 });
-    expect(c[0].weights?.hook).toBe(0.3);
+    expect(c[0]!.score).toBe(71);
+    expect(c[0]!.factors).toMatchObject({ hook: 0.71, self_contained: 0.55, arc: 0.36, energy: 0.52, length_fit: 1.0 });
+    expect(c[0]!.weights?.hook).toBe(0.3);
   });
 
   it("returns [] for an unknown source or a null snapshot", () => {

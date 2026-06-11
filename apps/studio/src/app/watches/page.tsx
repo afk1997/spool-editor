@@ -36,7 +36,7 @@ export default function WatchesScreen() {
   const [synced, setSynced] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  if (!synced && sel === null && watches.length) { setSel(watches[0].id); setF(toForm(watches[0])); setSynced(true); }
+  if (!synced && sel === null && watches[0]) { setSel(watches[0].id); setF(toForm(watches[0])); setSynced(true); }
 
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setF((s) => ({ ...s, [k]: v }));
   const selectWatch = (w: Watch) => { setSel(w.id); setF(toForm(w)); };

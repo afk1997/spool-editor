@@ -159,7 +159,7 @@ export function Timeline({
           <LaneRow name="Speaker" h={16}>
             {runs.map((r, i) => (
               <div key={i} title={`Speaker ${r.sp}`}
-                style={{ position: "absolute", left: pct(r.s), width: pct(r.e - r.s), top: 0, bottom: 0, background: SPEAKER_COLORS[spIdx[r.sp] % SPEAKER_COLORS.length], opacity: 0.85, borderRight: "2px solid var(--bg-1)" }} />
+                style={{ position: "absolute", left: pct(r.s), width: pct(r.e - r.s), top: 0, bottom: 0, background: SPEAKER_COLORS[spIdx[r.sp]! % SPEAKER_COLORS.length], opacity: 0.85, borderRight: "2px solid var(--bg-1)" }} />
             ))}
           </LaneRow>
 

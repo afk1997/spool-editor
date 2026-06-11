@@ -121,7 +121,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   const deletedInWin = allWords.filter((w) => w.deleted && inWin(w)).length;
   // Real timeline lanes for the clip window: Energy (loudness envelope) + Scenes (cut markers).
   // hiSafe falls back to the last word's end when the clip has no explicit out point.
-  const hiSafe = isFinite(hi) ? hi : (tlWords.length ? (tlWords[tlWords.length - 1].end ?? lo + 60) : lo + 60);
+  const hiSafe = isFinite(hi) ? hi : (tlWords.length ? (tlWords[tlWords.length - 1]!.end ?? lo + 60) : lo + 60);
   const energyQ = useEngineQuery((c) => (src ? c.sourceEnergy(clip.src, 80, { start: lo, end: hiSafe }) : Promise.resolve({ bars: [], buckets: 0 })), [clip.src, lo, hiSafe]);
   const scenesQ = useEngineQuery((c) => (src ? c.sourceScenes(clip.src, { start: lo, end: hiSafe }) : Promise.resolve({ cuts: [] })), [clip.src, lo, hiSafe]);
   const filmstripQ = useEngineQuery((c) => (src ? c.sourceFilmstrip(clip.src, { start: lo, end: hiSafe }, 14) : Promise.resolve({ strip: null, frames: 0 })), [clip.src, lo, hiSafe]);
@@ -153,7 +153,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   const previewFit: "contain" | "cover" = renderSrc || showReframed || usePreview ? "contain" : "cover";
   const hl = ({ opus: "var(--caption-hl)", karaoke: "#37E2A0", minimal: "#ffffff" } as Record<string, string>)[style] || "var(--caption-hl)";
   let activeIdx = -1;
-  for (let i = 0; i < tlWords.length; i++) { if (((tlWords[i].start ?? lo) - lo) <= cur) activeIdx = i; else break; }
+  for (let i = 0; i < tlWords.length; i++) { if (((tlWords[i]!.start ?? lo) - lo) <= cur) activeIdx = i; else break; }
   const lineStart = Math.max(0, activeIdx - 2);
   const capLine = tlWords.slice(lineStart, lineStart + 6);
   const activeWordIdx = tlWords[activeIdx]?.idx;

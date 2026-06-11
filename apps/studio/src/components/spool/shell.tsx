@@ -143,7 +143,7 @@ function StatusBar() {
       {lead ? (
         <div className="row" style={{ gap: 10 }}>
           <div style={{ width: 90, height: 5 }} className="bar striped"><i style={{ width: lead.prog + "%" }} /></div>
-          <span className="mono">{lead.type} “{lead.label.split("·")[0].trim().slice(0, 26)}” {Math.round(lead.prog)}%</span>
+          <span className="mono">{lead.type} “{lead.label.split("·")[0]!.trim().slice(0, 26)}” {Math.round(lead.prog)}%</span>
         </div>
       ) : (
         <span className="mono">{connection === "online" ? "idle" : connection}</span>

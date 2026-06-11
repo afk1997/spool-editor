@@ -55,7 +55,7 @@ export default function BrandScreen() {
 
   // Auto-load the first kit into the editor once it arrives — set-state-during-render is the
   // supported React pattern for syncing to async data (no effect, runs once via the guard).
-  if (!synced && sel === null && kits.length) { setSel(kits[0].id); setF(toForm(kits[0])); setSynced(true); }
+  if (!synced && sel === null && kits[0]) { setSel(kits[0].id); setF(toForm(kits[0])); setSynced(true); }
 
   const selectKit = (k: BrandKit) => { setSel(k.id); setF(toForm(k)); };
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setF((s) => ({ ...s, [k]: v }));

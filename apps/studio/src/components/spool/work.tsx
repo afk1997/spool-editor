@@ -166,7 +166,7 @@ export function DiscoveryBody({ candidates, sourceId, finding }: { candidates: C
   const [weights, setWeights] = useState<Record<string, number>>(() => ({ ...ENGINE_DEFAULT_WEIGHTS }));
 
   // merge saved in/out adjustments so the cards, footage total, and the render all use them
-  const merged = candidates.map((c) => (ranges[c.id] ? { ...c, start: ranges[c.id].start, end: ranges[c.id].end } : c));
+  const merged = candidates.map((c) => { const r = ranges[c.id]; return r ? { ...c, start: r.start, end: r.end } : c; });
   const isSel = (c: Candidate) => overrides[c.id] ?? c.sel;
   const sel = merged.filter(isSel);
   const toggle = (id: string) => setOverrides((o) => { const c = candidates.find((x) => x.id === id); return { ...o, [id]: !(o[id] ?? c?.sel ?? false) }; });

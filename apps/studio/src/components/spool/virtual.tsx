@@ -36,7 +36,7 @@ export function WindowList<T>({
     count: items.length,
     estimateSize: () => estimateSize,
     overscan,
-    getItemKey: (i) => getKey(items[i], i),
+    getItemKey: (i) => getKey(items[i]!, i),
     scrollMargin,
   });
 
@@ -55,7 +55,7 @@ export function WindowList<T>({
             transform: `translateY(${vi.start - scrollMargin}px)`,
           }}
         >
-          {children(items[vi.index], vi.index)}
+          {children(items[vi.index]!, vi.index)}
         </div>
       ))}
     </div>

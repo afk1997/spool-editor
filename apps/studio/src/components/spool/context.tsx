@@ -93,7 +93,7 @@ function originOf(url: string | null | undefined): string {
   if (u.includes("x.com") || u.includes("twitter")) return "x";
   return "file";
 }
-const cap = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 const ago = (sec: number) => {
   if (!sec || sec < 0) return "just now";
   const m = sec / 60, h = m / 60, d = h / 24;
@@ -260,7 +260,7 @@ export function buildTranscript(words: TranscriptWord[] | undefined): { lines: T
   const live = words.filter((w) => !w.deleted && w.w.trim());
   const speakerKeys = [...new Set(live.map((w) => w.speaker || "A"))];
   const speakers: Record<string, SpeakerInfo> = {};
-  speakerKeys.forEach((k, i) => (speakers[k] = { name: k.length <= 2 ? `Speaker ${k}` : k, color: ROI_COLORS[i % ROI_COLORS.length] }));
+  speakerKeys.forEach((k, i) => (speakers[k] = { name: k.length <= 2 ? `Speaker ${k}` : k, color: ROI_COLORS[i % ROI_COLORS.length]! }));
   const lines: TranscriptLine[] = [];
   let cur: TranscriptLine | null = null;
   let id = 0;
@@ -401,7 +401,7 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
         client.renderPipeline(c.source_id!, { start: c.start!, end: c.end!, aspect, mode, stop_after: "reframe" }).catch(() => {});
       pushToast({ icon: "scissors", tone: "info", title: `Cutting ${fresh.length} clip${fresh.length > 1 ? "s" : ""}`,
         body: "Auto-reframing to 9:16 — review each in the Clips tab, then render when you're happy." });
-      nav("project", { id: fresh[0].source_id!, tab: "Clips" });
+      nav("project", { id: fresh[0]!.source_id!, tab: "Clips" });
       return;
     }
     if (!existing.length) { pushToast({ icon: "alert", tone: "warn", title: "Nothing to render", body: "No clip or moment range to act on." }); return; }

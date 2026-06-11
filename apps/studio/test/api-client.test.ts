@@ -24,9 +24,9 @@ describe("SpoolApiClient.produce", () => {
     const r = await client.produce("src9", { recipe_id: "r1" });
     expect(r).toMatchObject({ id: "job1", kind: "produce" });
     expect(calls).toHaveLength(1);
-    expect(calls[0].url).toBe("http://x/api/v1/sources/src9/produce");
-    expect(calls[0].method).toBe("POST");
-    expect(calls[0].body).toEqual({ recipe_id: "r1" });
+    expect(calls[0]!.url).toBe("http://x/api/v1/sources/src9/produce");
+    expect(calls[0]!.method).toBe("POST");
+    expect(calls[0]!.body).toEqual({ recipe_id: "r1" });
   });
 
   it("POSTs an inline recipe (no id) for an unsaved recipe — all settings ride along", async () => {
@@ -36,7 +36,7 @@ describe("SpoolApiClient.produce", () => {
       caption_preset: "minimal", platform: "reels", fast: true, brand_kit_id: "kitX",
       weights: { hook: 5 },
     });
-    expect(calls[0].body).toEqual({
+    expect(calls[0]!.body).toEqual({
       content_mode: "funny", count: 3, aspect: "1:1", reframe_mode: "center",
       caption_preset: "minimal", platform: "reels", fast: true, brand_kit_id: "kitX",
       weights: { hook: 5 },
