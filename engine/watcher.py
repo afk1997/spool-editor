@@ -43,7 +43,28 @@ def list_folder_items(folder: str, *, settle_seconds: float = _SETTLE_SECONDS,
     return sorted(out)
 
 
-def list_playlist_items(url: str, *, limit: int = 30, ytdlp: str = "yt-dlp") -> list[str]:
+# A playlist listing spawns a yt-dlp subprocess that can block ~90s; per-tick spawning
+# with no cache or backoff hammered remote hosts and re-probed dead URLs forever.
+_LISTING_TTL = 300.0            # a fresh listing is reused for this long
+_LISTING_BACKOFF_MAX = 3600.0   # consecutive empty/failed listings back off up to this
+_listing_cache: dict[tuple[str, int], dict] = {}
+
+
+def clear_listing_cache() -> None:
+    """Drop every cached listing (tests + full resets)."""
+    _listing_cache.clear()
+
+
+def invalidate_listing(target: str | None) -> None:
+    """Drop cached listings for one target — a user's manual "Scan now" means
+    "look again NOW", not "serve me the 5-minute cache"."""
+    t = (target or "").strip()
+    for k in [k for k in _listing_cache if k[0] == t]:
+        _listing_cache.pop(k, None)
+
+
+def list_playlist_items(url: str, *, limit: int = 30, ytdlp: str = "yt-dlp",
+                        now: float | None = None) -> list[str]:
     """Canonical video URLs on a channel/playlist via a yt-dlp FLAT listing (metadata only, no
     download), newest-first and capped. We print ``url`` (the per-entry webpage URL), NOT the bare
     ``id`` — the reconciler hands each item straight to ``enqueue_download(url=…)`` and a bare id is
@@ -51,19 +72,36 @@ def list_playlist_items(url: str, *, limit: int = 30, ytdlp: str = "yt-dlp") -> 
 
     The target is user-controlled config: reject option-shaped values and pass it after ``--``
     so it can never be parsed as a yt-dlp flag (mirrors runner.build_*_argv — the original
-    download path's argv-injection guard, which this late-added path previously skipped)."""
+    download path's argv-injection guard, which this late-added path previously skipped).
+
+    Listings are cached for ``_LISTING_TTL`` per (target, limit); empty/failed listings
+    back off exponentially (x2 per consecutive failure, capped at ``_LISTING_BACKOFF_MAX``)
+    so a dead URL doesn't spawn a ~90s subprocess every tick. A manual scan calls
+    ``invalidate_listing`` first (app.py), so "Scan now" always re-fetches."""
     target = (url or "").strip()
     if not target or target.startswith("-"):
         return []
+    t = time.time() if now is None else now
+    key = (target, int(limit))
+    hit = _listing_cache.get(key)
+    if hit is not None and t < hit["expires"]:
+        return list(hit["items"])
     try:
         out = subprocess.run(
             [ytdlp, "--flat-playlist", "--print", "url",
              "--playlist-end", str(int(limit)), "--", target],
             capture_output=True, text=True, timeout=90,
         ).stdout
+        items = [ln.strip() for ln in out.splitlines() if ln.strip()]
     except Exception:
-        return []
-    return [ln.strip() for ln in out.splitlines() if ln.strip()]
+        items = []
+    if items:
+        _listing_cache[key] = {"items": items, "expires": t + _LISTING_TTL, "fails": 0}
+    else:
+        fails = (hit or {}).get("fails", 0) + 1
+        backoff = min(_LISTING_BACKOFF_MAX, _LISTING_TTL * (2 ** (fails - 1)))
+        _listing_cache[key] = {"items": [], "expires": t + backoff, "fails": fails}
+    return list(items)
 
 
 # A produce job that ERRORs is retried (codex/network hiccups are transient), but bounded so a

@@ -733,7 +733,11 @@ def create_app() -> Flask:
 
     def _reconcile_watch_by_id(watch_id: str):
         w = watch_store.get(watch_id)
-        return _reconcile_one(w) if w else None
+        if w is None:
+            return None
+        # Manual scan = explicit "look again now": bypass the listing TTL for this target.
+        watcher.invalidate_listing(w.get("target"))
+        return _reconcile_one(w)
 
     def _reconcile_all() -> None:
         for w in watch_store.list():

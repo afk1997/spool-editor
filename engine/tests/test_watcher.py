@@ -7,6 +7,7 @@ import os
 import time
 import types
 
+import pytest
 import watcher
 from watcher import reconcile_watch, list_folder_items, list_playlist_items
 
@@ -251,3 +252,55 @@ def test_list_folder_items_skips_files_still_being_written(tmp_path):
     assert watcher.list_folder_items(str(tmp_path)) == ["done.mp4"]
     # the fresh file is only deferred — it appears once its mtime stops moving
     assert watcher.list_folder_items(str(tmp_path), settle_seconds=0) == ["copying.mp4", "done.mp4"]
+
+
+@pytest.fixture(autouse=True)
+def _fresh_listing_cache():
+    watcher.clear_listing_cache()
+    yield
+    watcher.clear_listing_cache()
+
+
+def test_playlist_listing_is_cached_within_ttl(monkeypatch):
+    calls = []
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return types.SimpleNamespace(stdout="https://youtu.be/a\n", returncode=0)
+    monkeypatch.setattr(watcher.subprocess, "run", fake_run)
+    url = "https://93.184.216.34/list"
+    assert watcher.list_playlist_items(url, now=1000.0) == ["https://youtu.be/a"]
+    assert watcher.list_playlist_items(url, now=1100.0) == ["https://youtu.be/a"]
+    assert len(calls) == 1                                  # second tick hit the cache
+    watcher.list_playlist_items(url, now=1000.0 + watcher._LISTING_TTL + 1)
+    assert len(calls) == 2                                  # expired → refetched
+
+
+def test_failed_listing_backs_off_exponentially(monkeypatch):
+    calls = []
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return types.SimpleNamespace(stdout="", returncode=0)   # dead URL: empty listing
+    monkeypatch.setattr(watcher.subprocess, "run", fake_run)
+    url = "https://93.184.216.34/dead"
+    t0 = 1000.0
+    assert watcher.list_playlist_items(url, now=t0) == []
+    assert watcher.list_playlist_items(url, now=t0 + 10) == []
+    assert len(calls) == 1                                  # inside the first backoff window
+    watcher.list_playlist_items(url, now=t0 + watcher._LISTING_TTL + 1)   # window over → retry
+    assert len(calls) == 2
+    # second consecutive failure doubles the window
+    watcher.list_playlist_items(url, now=t0 + watcher._LISTING_TTL + 2)
+    assert len(calls) == 2
+
+
+def test_invalidate_listing_forces_a_fresh_fetch(monkeypatch):
+    calls = []
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return types.SimpleNamespace(stdout="https://youtu.be/a\n", returncode=0)
+    monkeypatch.setattr(watcher.subprocess, "run", fake_run)
+    url = "https://93.184.216.34/list"
+    watcher.list_playlist_items(url, now=1000.0)
+    watcher.invalidate_listing(url)
+    watcher.list_playlist_items(url, now=1001.0)
+    assert len(calls) == 2
