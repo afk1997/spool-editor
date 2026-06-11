@@ -500,10 +500,11 @@ def _validate_settings(data):
             if data[key] not in allowed:
                 return None, bad
             clean[key] = data[key]
-    if "fast_default" in data:
-        if not isinstance(data["fast_default"], bool):
-            return None, bad
-        clean["fast_default"] = data["fast_default"]
+    for bkey in ("fast_default", "offline"):
+        if bkey in data:
+            if not isinstance(data[bkey], bool):
+                return None, bad
+            clean[bkey] = data[bkey]
     return clean, None
 
 
@@ -2217,13 +2218,17 @@ def get_settings():
 @api_v1_bp.patch("/settings")
 @token_required
 def patch_settings():
-    """Persist a partial settings change. fast/preset/aspect apply immediately (read per
-    render); concurrency + MCP transport apply on the next restart."""
+    """Persist a partial settings change. fast/preset/aspect + offline apply immediately
+    (offline drives SPOOL_OFFLINE in-process); concurrency + MCP transport apply on restart."""
     data = request.get_json(silent=True) or {}
     clean, err = _validate_settings(data)
     if err:
         return err
-    return jsonify(_settings().update(clean))
+    out = _settings().update(clean)
+    apply_cb = current_app.extensions.get("trove.apply_settings")
+    if apply_cb:
+        apply_cb(out)
+    return jsonify(out)
 
 
 @api_v1_bp.post("/agent")
@@ -2386,8 +2391,8 @@ _OPENAPI_DOC = {
         "/watches":             {"get": {"summary": "List watches (folder/channel/playlist automations)"}, "post": {"summary": "Create a watch"}},
         "/watches/{watch_id}":  {"get": {"summary": "Get one watch"}, "patch": {"summary": "Update a watch"}, "delete": {"summary": "Delete a watch"}},
         "/watches/{watch_id}/scan": {"post": {"summary": "Reconcile a watch now: ingest new videos → produce ranked clips per its recipe"}},
-        "/settings":            {"get":   {"summary": "Read writable engine config (fast/preset/aspect defaults, concurrency, MCP transport)"},
-                                 "patch": {"summary": "Update engine config (fast/preset/aspect apply immediately; concurrency + MCP transport apply on restart)"}},
+        "/settings":            {"get":   {"summary": "Read writable engine config (fast/preset/aspect defaults, offline, concurrency, MCP transport)"},
+                                 "patch": {"summary": "Update engine config (fast/preset/aspect + offline apply immediately; concurrency + MCP transport apply on restart)"}},
         "/clip-jobs":          {"get":  {"summary": "List clip/render jobs (the render queue)",
                                           "parameters": [
                                               {"name": "kind", "in": "query",

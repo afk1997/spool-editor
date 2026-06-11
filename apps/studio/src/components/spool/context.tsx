@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { SpoolApiClient } from "@spool/api-client";
 import type { ClipJobView, EventsSnapshot, RankFactors, TranscriptWord } from "@spool/types";
@@ -317,7 +317,16 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [agentMessages, setAgentMessages] = useState<AgentMessage[]>(INITIAL_AGENT);
   const [working, setWorking] = useState(false);
-  const [offline, setOffline] = useState(true);
+  // Offline mode is the persisted engine setting (drives SPOOL_OFFLINE), NOT local state —
+  // the toggle has to actually gate egress, and the badge must show engine-truth. Honest
+  // default is false (the Codex bridge IS egress) until the user opts in.
+  const settingsQ = useEngineQuery((c) => c.getSettings());
+  const offline = settingsQ.data?.offline ?? false;
+  // useEngineQuery returns a fresh `reload` each render; hold the latest in a ref (written in
+  // an effect, not in render) so toggleOffline stays referentially stable — only `offline`
+  // should churn the context value, not reload's identity.
+  const reloadSettingsRef = useRef(settingsQ.reload);
+  useEffect(() => { reloadSettingsRef.current = settingsQ.reload; });
   const elicitSeq = useRef(0); // monotonic, collision-free ids for elicitation cards
 
   const pushToast = useCallback((t: Omit<Toast, "id">) => {
@@ -325,6 +334,13 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
     setToasts((ts) => [...ts, { ...t, id }]);
     setTimeout(() => setToasts((ts) => ts.filter((x) => x.id !== id)), 4200);
   }, []);
+
+  const toggleOffline = useCallback(() => {
+    void client
+      .updateSettings({ offline: !offline })
+      .then(() => reloadSettingsRef.current())
+      .catch(() => pushToast({ icon: "alert", tone: "warn", title: "Couldn't update offline mode" }));
+  }, [client, offline, pushToast]);
 
   const nav = useCallback((screen: string, params: { id?: string; tab?: string } = {}) => {
     const id = params.id;
@@ -448,11 +464,12 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
       paletteOpen, openPalette: () => setPaletteOpen(true), closePalette: () => setPaletteOpen(false),
       shortcutsOpen, openShortcuts: () => setShortcutsOpen(true), closeShortcuts: () => setShortcutsOpen(false),
       agentMessages, working, askAgent, answerElicit, makeClipsFrom,
-      toasts, pushToast, offline, toggleOffline: () => setOffline((o) => !o),
+      toasts, pushToast, offline, toggleOffline,
     }),
     [
       client, sources, clips, jobs, downloads, deps, snapshot, nav, agentOpen, paletteOpen,
-      shortcutsOpen, agentMessages, working, askAgent, answerElicit, makeClipsFrom, toasts, pushToast, offline,
+      shortcutsOpen, agentMessages, working, askAgent, answerElicit, makeClipsFrom, toasts, pushToast,
+      offline, toggleOffline,
     ],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

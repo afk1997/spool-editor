@@ -13,6 +13,8 @@ Two reads matter:
 
 Which keys apply when:
   * ``fast_default`` / ``default_preset`` / ``default_aspect`` — **hot** (read per render).
+  * ``offline`` — **hot** (the apply-hook drives ``SPOOL_OFFLINE`` in-process the moment it's
+    patched; ``clip.llm.is_offline`` reads that env to refuse egress providers).
   * ``clip_workers`` / ``max_workers`` — **restart** (the thread pools size at ``create_app``).
   * ``mcp_transport`` — **restart** (read by ``mcp_server.main`` when the MCP server boots).
 """
@@ -27,6 +29,7 @@ import os
 DEFAULTS = {
     "fast_default": True,        # export fast vs quality when a render omits `fast` (hot)
     "default_preset": "tiktok",  # platform preset when a render omits `preset` (hot)
+    "offline": False,            # block LLM egress (drives SPOOL_OFFLINE; hot)
     "clip_workers": 2,           # render-queue concurrency (applies on restart)
     "max_workers": 4,            # download-queue concurrency (applies on restart)
     "mcp_transport": "stdio",    # MCP server transport (applies on restart)

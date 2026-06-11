@@ -1316,6 +1316,41 @@ def test_create_app_applies_persisted_concurrency_at_startup(tmp_path, monkeypat
     assert application.extensions["trove.jobs"].max_workers == 7    # download pool
 
 
+def test_offline_setting_drives_spool_offline_env(client, monkeypatch):
+    """The studio's Offline toggle must ENFORCE — patching ``offline`` flips the one switch
+    clip.llm.is_offline() reads (``SPOOL_OFFLINE``), so egress providers refuse in-process."""
+    monkeypatch.delenv("SPOOL_OFFLINE", raising=False)
+    _, c = client
+    r = c.get("/api/v1/settings")
+    assert r.get_json()["offline"] is False
+
+    r = c.patch("/api/v1/settings", json={"offline": True})
+    assert r.status_code == 200 and r.get_json()["offline"] is True
+    assert os.environ.get("SPOOL_OFFLINE") == "1"     # llm.is_offline() now blocks egress
+
+    r = c.patch("/api/v1/settings", json={"offline": False})
+    assert r.get_json()["offline"] is False
+    assert os.environ.get("SPOOL_OFFLINE") is None
+
+    # bool only — don't silently coerce ("yes-please" is truthy, a privacy footgun)
+    r = c.patch("/api/v1/settings", json={"offline": "yes-please"})
+    assert r.status_code == 400
+
+
+def test_create_app_seeds_offline_from_env_at_boot(tmp_path, monkeypatch):
+    """A launch with ``SPOOL_OFFLINE=1`` already set must seed the persisted setting so the
+    studio badge reflects reality (offline-true) at boot — not the honest default of false."""
+    import app as _app_module
+    dl = tmp_path / "downloads"
+    dl.mkdir(parents=True)
+    monkeypatch.setattr(_app_module, "DOWNLOAD_DIR", dl)
+    monkeypatch.setenv("TROVE_RATE_LIMIT", "0")
+    monkeypatch.setenv("SPOOL_OFFLINE", "1")
+    application = _app_module.create_app()
+    body = application.test_client().get("/api/v1/settings").get_json()
+    assert body["offline"] is True
+
+
 # ---- glass-box re-rank (POST /sources/<id>/rank) ------------------------
 # Stateless re-rank: the client posts the candidates it already holds + the desired weights;
 # the engine re-scores ON the attached features and returns them sorted (MCP/CLI/agent parity —

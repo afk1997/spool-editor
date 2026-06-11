@@ -135,7 +135,7 @@ export default function SettingsScreen() {
           {sec === "Privacy" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
               <SettingCard title="Privacy">
-                <Row l="Offline mode" r={<Switch on={ctx.offline} onClick={ctx.toggleOffline} />} sub="Blocks network calls except explicit downloads/publishes (SPOOL_OFFLINE)." />
+                <Row l="Offline mode" r={<Switch on={ctx.offline} onClick={ctx.toggleOffline} />} sub="Blocks LLM egress (agent + find-moments). Downloads you start explicitly still run. Applies immediately (SPOOL_OFFLINE)." />
               </SettingCard>
               <SettingCard title="What leaves your machine">
                 <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.9 }}>

@@ -154,6 +154,8 @@ export interface CaptionOverrides {
 export interface EngineSettings {
   fast_default: boolean;
   default_preset: string;
+  /** Block LLM egress (SPOOL_OFFLINE). Applies immediately. */
+  offline: boolean;
   clip_workers: number;
   max_workers: number;
   mcp_transport: string;

@@ -578,7 +578,7 @@ def _build_server():
 
     @mcp.tool()
     def get_settings() -> dict:
-        """Read writable engine config (render defaults: fast/preset/aspect, concurrency, MCP transport)."""
+        """Read writable engine config (render defaults: fast/preset/aspect, offline egress switch, concurrency, MCP transport)."""
         return _safe(lambda: _client.get_settings())
 
     @mcp.tool()
