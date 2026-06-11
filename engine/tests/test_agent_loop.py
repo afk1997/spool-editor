@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from clip import agent, agent_tools, llm
 
 
@@ -236,3 +238,66 @@ def test_confirm_required_covers_exports_and_destructive_config():
             "delete_brand_kit", "remove_model", "update_settings"} <= set(agent_tools.CONFIRM_REQUIRED)
     # make_clips lands in the review queue (writes, NOT exports) → must stay UN-gated.
     assert "make_clips" not in agent_tools.CONFIRM_REQUIRED
+
+
+# ---- LLM retry + partial-result degradation ----
+
+def test_transient_llm_failure_is_retried(monkeypatch):
+    attempts = []
+    script = ['{"final":{"reply":"ok"}}']
+
+    def flaky(*a, **kw):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError("codex bridge hiccup")
+        return script.pop(0)
+
+    monkeypatch.setattr(agent.llm, "complete", flaky)
+    monkeypatch.setattr(agent.time, "sleep", lambda s: None)
+    out = agent.run_agent("hi", client=object())
+    assert out["action"] == "reply" and out["reply"] == "ok"
+    assert len(attempts) == 2
+
+
+def test_mid_loop_llm_death_finishes_with_partial_results(monkeypatch):
+    class FakeClient:
+        def list_jobs(self, **kw):
+            return {"jobs": []}
+
+    state = {"n": 0}
+
+    def dying(*a, **kw):
+        state["n"] += 1
+        if state["n"] == 1:
+            return '{"tool":"list_jobs","args":{}}'
+        raise RuntimeError("bridge died")
+
+    monkeypatch.setattr(agent.llm, "complete", dying)
+    monkeypatch.setattr(agent.time, "sleep", lambda s: None)
+    out = agent.run_agent("what's downloading?", client=FakeClient())
+    assert out["action"] == "reply"
+    assert out["tools"] and out["tools"][0]["name"] == "list_jobs"   # partial trace kept
+
+
+def test_llm_dead_before_any_tool_reraises_for_the_route(monkeypatch):
+    def dead(*a, **kw):
+        raise RuntimeError("codex not working at all")
+
+    monkeypatch.setattr(agent.llm, "complete", dead)
+    monkeypatch.setattr(agent.time, "sleep", lambda s: None)
+    with pytest.raises(RuntimeError):
+        agent.run_agent("hi", client=object())
+
+
+def test_offline_error_propagates_immediately_without_retry(monkeypatch):
+    attempts = []
+
+    def offline(*a, **kw):
+        attempts.append(1)
+        raise agent.llm.OfflineError("offline mode on")
+
+    monkeypatch.setattr(agent.llm, "complete", offline)
+    monkeypatch.setattr(agent.time, "sleep", lambda s: None)
+    with pytest.raises(agent.llm.OfflineError):
+        agent.run_agent("hi", client=object())
+    assert len(attempts) == 1     # policy, not weather — never retried

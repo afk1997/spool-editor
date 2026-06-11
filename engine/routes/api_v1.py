@@ -2245,6 +2245,10 @@ def agent_message():
                                       confirmed_tool=confirmed)
     except (clip_llm.OfflineError, clip_llm.ProviderUnavailableError) as e:
         return jsonify({"error": "llm_unavailable", "message": str(e)}), 503
+    except RuntimeError as e:
+        # The bridge died before the loop ran any tool (post-retry): a 503 with the
+        # message beats an opaque 500 stack trace.
+        return jsonify({"error": "llm_failed", "message": str(e)[:300]}), 503
 
     resp = {"reply": result.get("reply", ""), "action": result.get("action", "reply"),
             "jobs": result.get("jobs", []), "tools": result.get("tools", [])}

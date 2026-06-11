@@ -12,7 +12,10 @@ unit-testable with the LLM mocked — no codex needed in tests.
 from __future__ import annotations
 
 import json
+import os  # noqa: E401 — kept here so the import block is contiguous
 import re
+import subprocess
+import time
 
 from . import llm
 
@@ -136,8 +139,6 @@ def _normalize(data: dict | None, *, fallback: str) -> dict:
 # model finishes or the step budget runs out. The LLM bridge is stateless single-shot, so we
 # re-send the accumulated step transcript each call.
 
-import os  # noqa: E402
-
 from . import agent_tools  # noqa: E402  (kept next to run_agent for locality)
 
 _MAX_STEPS = 8
@@ -198,6 +199,24 @@ def _short_arg(args: dict) -> str:
     return "· " + " ".join(bits)
 
 
+def _complete_with_retry(prompt: str, *, system, provider, env, attempts: int = 2) -> str:
+    """llm.complete with one retry for transient bridge failures (codex crash, timeout,
+    broken pipe). OfflineError is policy, not weather — re-raised immediately."""
+    last: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return llm.complete(prompt, system=system, provider=provider, env=env)
+        except llm.OfflineError:
+            raise
+        except (llm.ProviderUnavailableError, RuntimeError, OSError,
+                subprocess.TimeoutExpired) as e:
+            last = e
+            if attempt + 1 < attempts:
+                time.sleep(0.5 * (attempt + 1))
+    assert last is not None
+    raise last
+
+
 def run_agent(
     message: str,
     *,
@@ -217,10 +236,11 @@ def run_agent(
     Confirmation matches by TOOL NAME only and is single-use; the confirmed run re-plans, so
     its args may differ from the ``pending.args`` the user was shown -- the gate's contract is
     "no gated tool without a human click", NOT arg-exact replay. Returns
-    ``{reply, action, jobs[], tools[], question?, options?, kind?, pending?}``. Propagates the LLM
-    bridge's OfflineError / ProviderUnavailableError; never raises on bad model output or tool errors."""
-    import time as _time
-    clock = elapsed or (lambda: _time.monotonic() * 1000.0)
+    ``{reply, action, jobs[], tools[], question?, options?, kind?, pending?}``. Propagates
+    OfflineError always, and ProviderUnavailableError / RuntimeError when no tools have run yet
+    (a setup problem); mid-loop transient failures after at least one tool ran are retried once
+    then degraded to a partial-result _finish instead of an unhandled exception."""
+    clock = elapsed or (lambda: time.monotonic() * 1000.0)
     if provider is None:                              # default the in-app agent to higher reasoning
         provider = _default_agent_provider(env)
 
@@ -234,7 +254,15 @@ def run_agent(
 
     for _ in range(max(1, max_steps)):
         prompt = "\n\n".join(transcript) + "\n\nYour next JSON:"
-        raw = llm.complete(prompt, system=_LOOP_SYSTEM, provider=provider, env=env)
+        try:
+            raw = _complete_with_retry(prompt, system=_LOOP_SYSTEM, provider=provider, env=env)
+        except llm.OfflineError:
+            raise
+        except Exception:
+            if not tools_trace:
+                raise   # nothing ran yet → a setup problem; let the route surface it as 503
+            return _finish("The model provider dropped out mid-turn after a retry; "
+                           "here's what completed so far.", tools_trace, jobs)
         step = _parse_obj(raw)
 
         if not isinstance(step, dict):                       # unparseable → treat as the final reply
@@ -296,7 +324,10 @@ def run_agent(
     # Step budget exhausted → ask the model to summarize what it found into a final reply.
     summary_prompt = ("\n\n".join(transcript) +
                       "\n\nStep budget reached. Reply now with {\"final\":{\"reply\":\"...\"}} summarizing for the user.")
-    raw = llm.complete(summary_prompt, system=_LOOP_SYSTEM, provider=provider, env=env)
+    try:
+        raw = _complete_with_retry(summary_prompt, system=_LOOP_SYSTEM, provider=provider, env=env)
+    except Exception:
+        return _finish("Step budget reached and the provider dropped out — here's what I gathered.", tools_trace, jobs)
     fin = _parse_obj(raw) or {}
     reply = ""
     if isinstance(fin, dict):
