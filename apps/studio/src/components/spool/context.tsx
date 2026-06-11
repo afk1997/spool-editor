@@ -294,6 +294,8 @@ interface SpoolCtx {
   askAgent: (text: string, sourceId?: string) => void;
   answerElicit: (msg: AgentMessage, answer: unknown) => void;
   makeClipsFrom: (sel: { source_id?: string; start?: number; end?: number; id?: string; title?: string }[], opts?: { aspect?: string; mode?: string; style?: string; preset?: string }) => void;
+  /** Poll a clip job to a terminal state — pages sequence dependent jobs with it. */
+  awaitClipJob: (id?: string) => Promise<void>;
   toasts: Toast[]; pushToast: (t: Omit<Toast, "id">) => void;
   offline: boolean; toggleOffline: () => void;
 }
@@ -413,8 +415,18 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
     const existing = sel.filter((c) => c.id && !(c.source_id && c.start != null && c.end != null));
 
     if (fresh.length) {
-      for (const c of fresh)
-        client.renderPipeline(c.source_id!, { start: c.start!, end: c.end!, aspect, mode, stop_after: "reframe" }).catch(() => {});
+      // Fire all the cut+reframe pipelines, then count rejections — a failed START (e.g. a 409)
+      // used to vanish into `.catch(() => {})`; surface it so the user knows N of M didn't begin.
+      void Promise.allSettled(
+        fresh.map((c) =>
+          client.renderPipeline(c.source_id!, { start: c.start!, end: c.end!, aspect, mode, stop_after: "reframe" }),
+        ),
+      ).then((results) => {
+        const failed = results.filter((r) => r.status === "rejected").length;
+        if (failed)
+          pushToast({ icon: "alert", tone: "warn", title: `${failed} of ${results.length} clips failed to start`,
+            body: "The rest are cutting — see the Clips tab." });
+      });
       pushToast({ icon: "scissors", tone: "info", title: `Cutting ${fresh.length} clip${fresh.length > 1 ? "s" : ""}`,
         body: "Auto-reframing to 9:16 — review each in the Clips tab, then render when you're happy." });
       nav("project", { id: fresh[0]!.source_id!, tab: "Clips" });
@@ -431,7 +443,10 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
           if (opts.aspect || opts.mode) await awaitClipJob((await client.reframe(c.id!, { aspect, mode }))?.id);
           await awaitClipJob((await client.caption(c.id!, { style }))?.id);
           await client.render(c.id!, { preset });
-        } catch { /* surfaced as an errored job in the queue */ }
+        } catch {
+          pushToast({ icon: "alert", tone: "warn", title: "Render chain failed",
+            body: "A step couldn't start or finish — check the Render Queue for the errored job." });
+        }
       })();
     }
     pushToast({ icon: "film", tone: "info", title: `Rendering ${existing.length} clip${existing.length > 1 ? "s" : ""}`, body: "Burning captions + exporting — track it in the Render Queue" });
@@ -463,13 +478,13 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
       nav, agentOpen, openAgent: () => setAgentOpen(true), toggleAgent: () => setAgentOpen((o) => !o), closeAgent: () => setAgentOpen(false),
       paletteOpen, openPalette: () => setPaletteOpen(true), closePalette: () => setPaletteOpen(false),
       shortcutsOpen, openShortcuts: () => setShortcutsOpen(true), closeShortcuts: () => setShortcutsOpen(false),
-      agentMessages, working, askAgent, answerElicit, makeClipsFrom,
+      agentMessages, working, askAgent, answerElicit, makeClipsFrom, awaitClipJob,
       toasts, pushToast, offline, toggleOffline,
     }),
     [
       client, sources, clips, jobs, downloads, deps, snapshot, nav, agentOpen, paletteOpen,
-      shortcutsOpen, agentMessages, working, askAgent, answerElicit, makeClipsFrom, toasts, pushToast,
-      offline, toggleOffline,
+      shortcutsOpen, agentMessages, working, askAgent, answerElicit, makeClipsFrom, awaitClipJob,
+      toasts, pushToast, offline, toggleOffline,
     ],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

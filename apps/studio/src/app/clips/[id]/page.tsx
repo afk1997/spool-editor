@@ -44,10 +44,23 @@ function BrandInspector({ clipId, preset }: { clipId: string; preset: string }) 
   const apply = () => {
     const k = kits.find((x) => x.id === sel);
     if (!k) return;
-    ctx.client.caption(clipId, { style: k.caption_preset || "opus", overrides: k.caption_overrides, watermark: k.watermark || undefined, lower_third: k.lower_third || undefined })
-      .then(() => ctx.client.render(clipId, { preset }).catch(() => {})).catch(() => {});
     ctx.pushToast({ icon: "palette", tone: "info", title: `Applying “${k.name}”`, body: "Caption + render queued — track it in the queue" });
-    ctx.nav("queue");
+    void (async () => {
+      try {
+        // Caption first (this is where a no_transcript 409 surfaces), then render once the caption
+        // job finishes — the old chain swallowed both failures and toasted success regardless.
+        const cap = await ctx.client.caption(clipId, {
+          style: k.caption_preset || "opus", overrides: k.caption_overrides,
+          watermark: k.watermark || undefined, lower_third: k.lower_third || undefined,
+        });
+        ctx.nav("queue");
+        await ctx.awaitClipJob(cap.id);
+        await ctx.client.render(clipId, { preset });
+      } catch {
+        ctx.pushToast({ icon: "alert", tone: "warn", title: "Brand apply failed",
+          body: "Caption or render couldn't start — check the Render Queue." });
+      }
+    })();
   };
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>

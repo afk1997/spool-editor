@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { useSpool } from "@/components/spool/context";
 import { useEngineQuery } from "@/lib/engine-context";
+import { SpoolApiError } from "@spool/api-client";
 import { Btn, Icon, Switch } from "@spool/ui";
 
 /* S8 Caption Studio — 1:1 port of the demo (05), fully wired (Phase 2). Fine styling
@@ -123,11 +124,27 @@ export default function CaptionScreen() {
   };
 
   const burn = () => {
-    ctx.client.caption(id, { style: preset, overrides: { size, outline, words: wpl, fill, highlight, position, allcaps, weight, font }, color_speakers: colorSpeakers, emphasis, balance_lines: balanceLines })
-      .then(() => ctx.client.render(id, { preset: clip?.platform || "tiktok" }).catch(() => {}))
-      .catch(() => {});
     ctx.pushToast({ icon: "zap", tone: "info", title: "Burning captions", body: `${preset} · custom style · track it in the queue` });
-    ctx.nav("queue");
+    void (async () => {
+      try {
+        // Submit captions FIRST: the common failure (409 no_transcript) surfaces here, where the
+        // old fire-and-forget toasted success and navigated to an empty queue regardless. Render
+        // waits for the caption job to finish (it reads caption's output file).
+        const cap = await ctx.client.caption(id, {
+          style: preset,
+          overrides: { size, outline, words: wpl, fill, highlight, position, allcaps, weight, font },
+          color_speakers: colorSpeakers, emphasis, balance_lines: balanceLines,
+        });
+        ctx.nav("queue");
+        await ctx.awaitClipJob(cap.id);
+        await ctx.client.render(id, { preset: clip?.platform || "tiktok" });
+      } catch (e) {
+        ctx.pushToast({ icon: "alert", tone: "warn", title: "Caption failed",
+          body: e instanceof SpoolApiError && e.code === "no_transcript"
+            ? "Transcribe the source first — captions need words."
+            : "See the Render Queue for details." });
+      }
+    })();
   };
 
   return (
