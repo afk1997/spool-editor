@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   studio:
-    name: studio (typecheck · lint · build)
+    name: studio (typecheck · lint · test · build)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +23,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm lint
+      - run: pnpm test
       - run: pnpm build
 
   engine:
