@@ -789,6 +789,24 @@ DONE** — the long-clip crop-expression overflow is now fixed too (see the ✅ 
 remaining reframe work is *framing quality* on wide/audience shots, not correctness. Then Phase 3
 after more manual testing.
 
+### 2026-06-12 (later) — editor caption overlay pages like the burn (live-feedback)
+
+Reported live: **preview subtitles are unreadable** — every spoken word pushed a new word into
+the line and shifted the whole subtitle (wanted: "a bunch of words appear, the highlight moves
+across them as spoken, then the next bunch"). Diagnosis: the **burned ASS already does paged
+karaoke** (`build_events` renders the full chunk per word-event, only the highlight color
+moves — proven by generating events from sample words); the **editor's live overlay was the
+only slider** (`lineStart = activeIdx - 2` in `clips/[id]/page.tsx`). Caption Studio's preview
+already paged. **Fix:** pure `captionPage()` (`apps/studio/src/lib/caption-page.ts`) mirroring
+the engine's chunk/event semantics — fixed `STYLE_CHUNK` pages (opus 3 / karaoke 4 / minimal 6),
+page on screen `[first.start, last.end)`, active word = last with `start ≤ t` (stays lit through
+mid-page silence), hidden in inter-page gaps, 50 ms degenerate-end guard — wired into the editor
+overlay (`lo + cur` source-time rebase). **TDD:** 11-test vitest suite (`test/caption-page.test.ts`)
+incl. the literal regression ("page stays fixed while the highlight advances"); studio suite
+48/48, typecheck + lint clean (1 pre-existing `virtual.tsx` warning). Spec + plan under
+`docs/superpowers/`. Process: Fable orchestrated + two-stage-reviewed each task; Opus built the
+helper, Sonnet wired the editor.
+
 ## What's verified now
 
 - `pnpm install` → 6 workspace projects, 354 packages, clean.

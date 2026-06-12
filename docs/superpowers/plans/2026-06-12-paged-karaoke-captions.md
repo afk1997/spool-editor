@@ -18,7 +18,7 @@
 - Test: `apps/studio/test/caption-page.test.ts` (create)
 - Create: `apps/studio/src/lib/caption-page.ts`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `apps/studio/test/caption-page.test.ts` with exactly:
 
@@ -115,12 +115,12 @@ describe("captionPage", () => {
 });
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `pnpm --filter @spool/studio test test/caption-page.test.ts`
 Expected: FAIL — cannot resolve `@/lib/caption-page` (module does not exist yet).
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `apps/studio/src/lib/caption-page.ts` with exactly:
 
@@ -167,12 +167,12 @@ export function captionPage<W extends TimedWord>(
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `pnpm --filter @spool/studio test test/caption-page.test.ts`
 Expected: PASS — 11 tests (2 describe blocks), 0 failures.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/studio/src/lib/caption-page.ts apps/studio/test/caption-page.test.ts
@@ -186,7 +186,7 @@ git commit -m "feat(studio): captionPage helper — paged karaoke math mirroring
 **Files:**
 - Modify: `apps/studio/src/app/clips/[id]/page.tsx` (import block at top; caption math at lines 168–173)
 
-- [ ] **Step 1: Add the import**
+- [x] **Step 1: Add the import**
 
 In `apps/studio/src/app/clips/[id]/page.tsx`, directly after the line:
 
@@ -200,7 +200,7 @@ add:
 import { captionPage, STYLE_CHUNK } from "@/lib/caption-page";
 ```
 
-- [ ] **Step 2: Replace the sliding-window math**
+- [x] **Step 2: Replace the sliding-window math**
 
 In the same file, find this block (inside `EditorBody`, after the `previewFit` line):
 
@@ -227,12 +227,12 @@ and replace it with:
 
 The overlay JSX below (`capLine.length > 0 && …`, `w.idx === activeWordIdx`) is untouched — `capLine` is still a slice of `tlWords`, and an empty page hides the overlay exactly as before.
 
-- [ ] **Step 3: Typecheck, run the full suite, lint**
+- [x] **Step 3: Typecheck, run the full suite, lint**
 
 Run: `pnpm --filter @spool/studio typecheck && pnpm --filter @spool/studio test && pnpm --filter @spool/studio lint`
 Expected: typecheck clean; all vitest files pass (existing suites + `caption-page.test.ts`); lint clean.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add "apps/studio/src/app/clips/[id]/page.tsx"
