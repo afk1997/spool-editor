@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { useSpool, type SpoolClip } from "@/components/spool/context";
 import { useEngineQuery, useLive } from "@/lib/engine-context";
 import { useClipSeededState } from "@/lib/use-clip-seeded-state";
+import { captionPage, STYLE_CHUNK } from "@/lib/caption-page";
 import { Timeline } from "@/components/spool/timeline";
 import { Btn, Chip, Empty, Icon, Seg, Switch } from "@spool/ui";
 
@@ -166,11 +167,12 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
     : ctx.client.clipArtifactUrl(id, previewKind);
   const previewFit: "contain" | "cover" = renderSrc || showReframed || usePreview ? "contain" : "cover";
   const hl = ({ opus: "var(--caption-hl)", karaoke: "#37E2A0", minimal: "#ffffff" } as Record<string, string>)[style] || "var(--caption-hl)";
-  let activeIdx = -1;
-  for (let i = 0; i < tlWords.length; i++) { if (((tlWords[i]!.start ?? lo) - lo) <= cur) activeIdx = i; else break; }
-  const lineStart = Math.max(0, activeIdx - 2);
-  const capLine = tlWords.slice(lineStart, lineStart + 6);
-  const activeWordIdx = tlWords[activeIdx]?.idx;
+  // Paged karaoke, mirroring the burn: the page stays fixed while the highlight
+  // transfers word-by-word, and swaps only after its last word ends (words are in
+  // source time; `cur` is clip-relative, hence lo + cur).
+  const capPage = captionPage(tlWords, lo + cur, STYLE_CHUNK[style] ?? 3);
+  const capLine = capPage?.page ?? [];
+  const activeWordIdx = capPage?.page[capPage.activeInPage]?.idx;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }} className="fadein">
