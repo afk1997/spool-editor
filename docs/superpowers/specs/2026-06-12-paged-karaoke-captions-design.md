@@ -47,7 +47,8 @@ rule, for **all caption styles, as the only behavior** (user requirement — no 
 export const STYLE_CHUNK: Record<string, number> = { opus: 3, karaoke: 4, minimal: 6 };
 // mirrors engine PRESETS chunk sizes (engine/clip/backhalf/ass_captions.py)
 
-export interface CaptionWord { idx: number; w: string; start: number | null; end: number | null }
+export interface TimedWord { start: number | null; end: number | null }
+// generic over the caller's word type — the editor passes @spool/types TranscriptWord
 
 /** Paged-karaoke caption state at time t (same timebase as the words' start/end).
  *  Mirrors the engine's build_chunks/build_events semantics:
@@ -57,8 +58,8 @@ export interface CaptionWord { idx: number; w: string; start: number | null; end
  *    (it stays active through mid-page silence — ASS events tile start→next start)
  *  - returns null before the first word and in gaps between pages (render shows nothing)
  */
-export function captionPage(words: CaptionWord[], t: number, chunk: number):
-  { page: CaptionWord[]; activeInPage: number } | null
+export function captionPage<W extends TimedWord>(words: W[], t: number, chunk: number):
+  { page: W[]; activeInPage: number } | null
 ```
 
 Algorithm: find `activeIdx` = last index with non-null `start <= t` (words are
