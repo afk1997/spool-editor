@@ -144,7 +144,11 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   const recut = () => { if (!src) return; ctx.client.cut(src.id, { start: lo, end: hi }).then(() => { ctx.pushToast({ icon: "scissors", tone: "info", title: "Re-cutting clip", body: `${deletedInWin} deleted word${deletedInWin === 1 ? "" : "s"} rippled out — a new version is in the queue` }); ctx.nav("queue"); }).catch(() => {}); };
   // Trim → re-cut to a new [start, end] window from the timeline's trim handles.
   const trimRecut = (s: number, e: number) => { if (!src) return; ctx.client.cut(src.id, { start: s, end: e }).then(() => { ctx.pushToast({ icon: "scissors", tone: "info", title: "Re-cutting clip", body: `Trimmed to ${Math.round(e - s)}s — a new version is in the queue` }); ctx.nav("queue"); }).catch(() => {}); };
-  const togglePlay = () => { const v = videoRef.current; if (v) { if (v.paused) void v.play(); else v.pause(); setPlaying(!v.paused); } else setPlaying((p) => !p); };
+  // play() rejects (NotSupportedError) when the source can't load yet — e.g. a cut clip's
+  // preview momentarily points at the not-yet-existent "reframed" artifact before onError
+  // falls back to the raw cut. That's expected and recoverable, so swallow it instead of
+  // leaving an unhandled rejection (which surfaces as a Next.js runtime error overlay).
+  const togglePlay = () => { const v = videoRef.current; if (v) { if (v.paused) v.play().catch(() => {}); else v.pause(); setPlaying(!v.paused); } else setPlaying((p) => !p); };
   const others = ctx.clips.filter((c) => c.src === clip.src && c.id !== clip.id).slice(0, 4);
 
   // Live preview source + framing:
