@@ -255,6 +255,50 @@ def test_submit_job_busy_returns_503(client, monkeypatch):
     assert r.get_json()["error"] == "busy"
 
 
+def test_submit_job_does_not_probe_on_the_request_thread(client, monkeypatch):
+    """A single-URL submit with NO title must enqueue immediately without
+    running yt-dlp's ``run_info`` probe on the request thread.
+
+    A slow/auth-gated host (e.g. x.com) makes that probe take many seconds,
+    so a synchronous probe leaves the studio's Download POST pending and the
+    button looks dead. Like the bulk path, the worker resolves the real title
+    afterwards (``resolve_title=True``); the placeholder title is the URL.
+    """
+    import runner
+    calls = {"n": 0}
+
+    class _FakeInfo:
+        error_category = None
+        title = "RESOLVED BY PROBE"
+        thumbnail = "t.jpg"
+
+    def spy(_url):
+        calls["n"] += 1
+        return _FakeInfo()
+
+    # _submit_one does `from runner import run_info` at call time, so patching
+    # the module attribute intercepts any request-thread probe.
+    monkeypatch.setattr(runner, "run_info", spy)
+
+    app, c = client
+    captured = {}
+
+    def fake_enqueue(url, fmt, fmt_id, title, thumbnail="", *, auto_transcribe=False,
+                     subtitles=False, chapters=False, embed=False, resolve_title=False):
+        captured.update(title=title, resolve_title=resolve_title)
+        jm = app.extensions["trove.jobs"]
+        jm._jobs["noprobe1"] = Job(id="noprobe1", url=url, title=title, status=JobStatus.QUEUED)
+        return "noprobe1"
+
+    app.extensions["trove.actions"]["enqueue_download"] = fake_enqueue
+    r = c.post("/api/v1/jobs", json={"url": "https://93.184.216.34/v"})  # NO title
+
+    assert r.status_code == 201
+    assert calls["n"] == 0, "run_info must not be called on the request thread"
+    assert captured["title"] == "https://93.184.216.34/v"  # placeholder; worker resolves
+    assert captured["resolve_title"] is True
+
+
 def test_pause_resume_cancel_dismiss(client):
     app, c = client
     jm = app.extensions["trove.jobs"]
@@ -1374,8 +1418,8 @@ def test_rank_endpoint_rescores_and_sorts(client, tmp_path):
     body = r.get_json()
     assert body["count"] == 2
     assert body["candidates"][0]["title"] == "hooky"                    # ranked best-first
-    assert set(body["candidates"][0]["factors"]) == {"hook", "self_contained", "arc", "energy", "length_fit"}
-    assert set(body["weights"]) == {"hook", "self_contained", "arc", "energy", "length_fit"}
+    assert set(body["candidates"][0]["factors"]) == {"hook", "self_contained", "arc", "energy", "length_fit", "boundary_quality"}
+    assert set(body["weights"]) == {"hook", "self_contained", "arc", "energy", "length_fit", "boundary_quality"}
 
 
 def test_rank_endpoint_honors_weight_overrides(client, tmp_path):

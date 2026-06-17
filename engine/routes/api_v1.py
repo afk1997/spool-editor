@@ -790,11 +790,13 @@ def _submit_one(url: str, *, format_choice: str = "video",
     failure. The caller is responsible for HTTP status mapping (single
     posts surface 4xx; bulk posts return per-URL errors in the array).
 
-    ``probe=True`` (default, single-URL path): call ``run_info`` synchronously
-    to resolve the title/thumbnail before enqueuing — one probe is acceptable.
-    ``probe=False`` (bulk path): skip the synchronous probe to avoid blocking
-    the request thread on up to 50 sequential network calls; the worker
-    resolves the real title just before downloading (``resolve_title=True``).
+    ``probe=False`` (both HTTP submit paths — single POST /jobs and bulk):
+    skip the synchronous ``run_info`` probe so the request thread never blocks
+    on a slow or auth-gated host (one such probe can take 10s+; the bulk path
+    also avoids up to 50 of them). The worker resolves the real title/thumbnail
+    just before downloading (``resolve_title=True``); the placeholder is the URL.
+    ``probe=True`` (default) keeps the synchronous resolution for callers that
+    want the real title in the response and accept the latency.
     """
     from safety import is_safe_url
     from runner import run_info
@@ -814,9 +816,10 @@ def _submit_one(url: str, *, format_choice: str = "video",
             if not thumbnail:
                 thumbnail = info.thumbnail or ""
         else:
-            # Bulk path: up to 50 sequential seconds-long probes would block
-            # the request thread.  Submit with the URL as a placeholder; the
-            # worker resolves the real title/thumbnail just before downloading.
+            # Deferred probe: a synchronous run_info can take seconds-to-minutes
+            # on a slow/auth-gated host (and bulk would do up to 50 of them),
+            # blocking the request thread. Submit with the URL as a placeholder;
+            # the worker resolves the real title/thumbnail just before downloading.
             title = url
 
     try:
@@ -879,6 +882,11 @@ def submit_job():
             subtitles=bool(data.get("subtitles")),
             chapters=bool(data.get("chapters")),
             embed=bool(data.get("embed")),
+            # Defer the yt-dlp run_info probe to the worker (as the bulk path
+            # does): a slow/auth-gated host (e.g. x.com) otherwise blocks the
+            # request thread for many seconds, leaving the UI's Download button
+            # pending with no feedback. The worker resolves the real title.
+            probe=False,
         )
     except BaseException:
         _idempotency_store.release(idem_key)
