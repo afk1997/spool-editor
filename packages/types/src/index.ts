@@ -303,6 +303,9 @@ export interface RankFactors {
   arc?: number;
   energy?: number;
   length_fit?: number;
+  /** How cleanly the clip starts AND ends on a real sentence boundary (after the engine's
+   *  deterministic snap). A light tie-breaker — see clip.moments.DEFAULT_WEIGHTS. */
+  boundary_quality?: number;
 }
 
 /** One moment from a `find_moments` job's `result.candidates`. The engine attaches the

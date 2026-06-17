@@ -41,19 +41,20 @@ export interface Candidate {
   score?: number; factors?: RankFactors; weights?: RankFactors;
 }
 
-/** The five glass-box ranking factors (engine snake_case keys), in display order. */
-export const RANK_FACTORS = ["hook", "self_contained", "arc", "energy", "length_fit"] as const;
+/** The six glass-box ranking factors (engine snake_case keys), in display order. */
+export const RANK_FACTORS = ["hook", "self_contained", "arc", "energy", "length_fit", "boundary_quality"] as const;
 
 /** The engine's DEFAULT_WEIGHTS (clip.moments.DEFAULT_WEIGHTS: hook .30 / self_contained .25 /
- *  energy .20 / arc .15 / length_fit .10), expressed as INTEGER ratios that fit the 0–5 sliders and
- *  normalize to the same proportions. The single source of truth for both reweight panels (Discovery
- *  + Recipes) and the all-zero fallback below, so the studio's initial ranking matches the engine. */
+ *  energy .20 / arc .15 / length_fit .05 / boundary_quality .05), expressed as INTEGER ratios that
+ *  fit the sliders and normalize to the same proportions (6:5:4:3:1:1 → the engine's weights). The
+ *  single source of truth for both reweight panels (Discovery + Recipes) and the all-zero fallback
+ *  below, so the studio's initial ranking matches the engine. */
 export const ENGINE_DEFAULT_WEIGHTS: Record<string, number> = {
-  hook: 6, self_contained: 5, energy: 4, arc: 3, length_fit: 2,
+  hook: 6, self_contained: 5, energy: 4, arc: 3, length_fit: 1, boundary_quality: 1,
 };
 
 /** Client mirror of the engine's transparent score: round(100 · Σ(factorₖ·weightₖ) / Σweightₖ)
- *  over all five RANK_FACTORS (engine-consistent normalization), factors in [0,1]. Same math as
+ *  over all six RANK_FACTORS (engine-consistent normalization), factors in [0,1]. Same math as
  *  `clip.moments.rank`, so the Discovery reweight slider stays instant (no server round-trip per
  *  tick, spec §6.4); this mirrors the engine's ordering, integer-rounded for display (the engine
  *  rounds to 1 decimal). An all-zero weight vector falls back to ENGINE_DEFAULT_WEIGHTS, exactly as

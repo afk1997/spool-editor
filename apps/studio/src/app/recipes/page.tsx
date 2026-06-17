@@ -21,6 +21,7 @@ const PLATFORMS = ["tiktok", "reels", "shorts", "youtube", "linkedin", "x"];
 const FACTORS: { key: string; label: string }[] = [
   { key: "hook", label: "Hook" }, { key: "self_contained", label: "Self-contained" },
   { key: "arc", label: "Arc" }, { key: "energy", label: "Energy" }, { key: "length_fit", label: "Length-fit" },
+  { key: "boundary_quality", label: "Boundary" },
 ];
 
 interface Form {

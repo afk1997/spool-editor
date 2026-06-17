@@ -30,6 +30,7 @@ const FACTOR_META: { key: keyof RankFactors; label: string; color: string }[] = 
   { key: "arc", label: "Arc", color: "var(--warn)" },
   { key: "energy", label: "Energy", color: "var(--ok)" },
   { key: "length_fit", label: "Length-fit", color: "#b98cff" },
+  { key: "boundary_quality", label: "Boundary", color: "#6fb1ff" },
 ];
 
 function ScoreBar({ factors }: { factors: RankFactors }) {

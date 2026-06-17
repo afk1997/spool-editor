@@ -104,6 +104,7 @@ def find_moments(
         raise ValueError(f"no transcript words to scan{where}")
 
     clamp_max = float(data.get("duration") or max(e for _, e, _ in lines))
+    words = data.get("words") or []
     system, prompt = _build_prompt(lines, mode=mode, count=count)
     reply = llm.complete(prompt, system=system, provider=provider, env=env)
 
@@ -111,39 +112,249 @@ def find_moments(
     for item in _parse_array(reply):
         cand = _shape(item, mode=mode, clamp_max=clamp_max, source_id=source_id)
         if cand is not None:
-            out.append(_tighten_to_window(cand, lines))
-            if len(out) >= count:
-                break
+            snapped = _tighten_to_window(cand, lines, words, clamp_max=clamp_max)
+            if snapped is not None:   # None → too close to the media end to make a >=_MIN_CLIP clip
+                snapped = _snap_start_to_window(snapped, lines, words)   # open on a sentence too
+            if snapped is not None:
+                out.append(snapped)
+                if len(out) >= count:
+                    break
     return out
 
 
-# Trim over-long candidates into the short-form sweet spot. The moment-finder occasionally proposes
-# whole-topic spans (40–140 s); a vertical clip wants ~10–30 s. The prompt asks for this, but the
-# trim is the deterministic guarantee (no extra LLM call).
-_TARGET_MAX = 30.0      # cap at the top of the length_fit plateau
-_MIN_CLIP = 10.0        # never trim a clip below this — it needs room to land
+# Snap candidate ends into the short-form sweet spot AND onto a natural speech boundary. The
+# moment-finder's ``end`` is imprecise (LLM timestamps drift, so clips "end abruptly" mid-word
+# or mid-sentence) and it occasionally proposes whole-topic spans (40–140 s). This deterministic
+# pass (no extra LLM call) keeps the hook (the start) and pulls the end back to the nearest
+# sentence boundary within range, with a small tail pad so the last word's audio isn't clipped.
+_TARGET_MAX = 30.0          # cap at the top of the length_fit plateau
+_MIN_CLIP = 10.0            # never end a clip sooner than this — it needs room to land
+_END_SNAP_TOLERANCE = 2.5   # search this far (s) either side of the proposed end for a boundary
+_TAIL_PAD = 0.180           # keep this much audio past the last word so it isn't clipped
+_SENTENCE_END = (".", "?", "!", "…")   # strong boundary — a complete thought
+_CLAUSE_END = (",", ";", ":")               # soft boundary — a clause break (beats mid-word)
+_CLOSERS = "\"')]}”’»"        # trailing quotes/brackets to look past for punctuation
 
 
-def _tighten_to_window(cand: dict, lines, *, target_max: float = _TARGET_MAX) -> dict:
-    """Return ``cand`` trimmed into ``[start, ≤ start+target_max]`` when it runs long, else
-    unchanged. Keeps the hook (the start) and ends on the latest clean transcript-line boundary
-    within range (and ≥ ``_MIN_CLIP`` from the start) so the cut lands on a speech beat; falls
-    back to a hard cap at ``start + target_max`` when no boundary fits (one unbroken line)."""
-    start, end = float(cand["start"]), float(cand["end"])
-    if end - start <= target_max:
-        return cand
-    cap = start + target_max
-    boundaries = [le for (_ls, le, _t) in lines if start + _MIN_CLIP <= le <= cap]
+def _tighten_to_window(cand: dict, lines, words=None, *, target_max: float = _TARGET_MAX,
+                       clamp_max: float | None = None, tolerance: float = _END_SNAP_TOLERANCE,
+                       tail_pad: float = _TAIL_PAD) -> dict | None:
+    """Snap ``cand``'s end onto a natural speech boundary inside ``[start+_MIN_CLIP,
+    start+target_max]`` so clips never end mid-utterance or mid-word.
+
+    Within ``tolerance`` seconds of the (length-clamped) proposed end, preference is:
+      1. a sentence end — a word ending in ``. ? ! …`` (nearest wins);
+      2. a clause end — a word ending in ``, ; :`` (nearest wins);
+      3. otherwise the nearest clean word end in range (never a mid-word cut);
+      4. and when no per-word timing is available at all, the latest transcript-line end (legacy).
+    The chosen end gets a ``tail_pad`` so the final word isn't clipped, clamped to the next word's
+    start, the source end, and ``start+target_max``.
+
+    Note: clipify's "largest silence gap" idea is intentionally NOT used — whisper.cpp word
+    timings are contiguous (each word's end == the next word's start), so there are no usable
+    gaps to snap to; punctuation is the reliable boundary signal on this data.
+
+    Returns the updated candidate, or ``None`` when the source can't yield a ``>= _MIN_CLIP``
+    clip from this start (the candidate sits too close to the end of the media)."""
+    start, proposed = float(cand["start"]), float(cand["end"])
+    source_end = _source_end(lines, words, proposed, clamp_max)
+    min_end = start + _MIN_CLIP
+    max_end = min(start + float(target_max), source_end)
+    if max_end < min_end:
+        return None
+    anchor = _clamp(proposed, min_end, max_end)
+
+    boundaries = _word_end_boundaries(words or [], min_end, max_end)
+    if boundaries:
+        lo, hi = max(min_end, anchor - tolerance), min(max_end, anchor + tolerance)
+        near = [b for b in boundaries if lo <= b["end"] <= hi]
+        sentence = [b for b in near if _ends_with(b["text"], _SENTENCE_END)]
+        clause = [b for b in near if _ends_with(b["text"], _CLAUSE_END)]
+        if sentence:
+            chosen, kind = min(sentence, key=lambda b: abs(b["end"] - anchor)), "sentence"
+        elif clause:
+            chosen, kind = min(clause, key=lambda b: abs(b["end"] - anchor)), "clause"
+        elif near:
+            chosen, kind = min(near, key=lambda b: abs(b["end"] - anchor)), "word"   # nearest clean word end
+        else:
+            chosen, kind = min(boundaries, key=lambda b: abs(b["end"] - anchor)), "word"   # one long word run
+        boundary_at = chosen["end"]
+        end = _pad_word_end(chosen, max_end=max_end, source_end=source_end, tail_pad=tail_pad)
+    else:
+        end = _line_boundary_end(lines, min_end, max_end)   # legacy: no per-word timing
+        kind, boundary_at = "line", end
+
     out = dict(cand)
-    out["end"] = round(max(boundaries) if boundaries else cap, 3)
+    out["end"] = round(_clamp(end, min_end, max_end), 3)
+    _set_boundary(out, "end", kind, proposed, out["end"], boundary_at)
     return out
+
+
+def _visible_words(words) -> list[dict]:
+    """Non-deleted words with valid ``start < end``, sorted by time. Defensive: the model
+    output / editor state can carry deletions, blanks, or malformed timings."""
+    out = []
+    for w in words or []:
+        if w.get("deleted") or not (w.get("w") or "").strip():
+            continue
+        try:
+            s, e = float(w["start"]), float(w["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if e <= s:
+            continue
+        out.append({"start": s, "end": e, "w": w.get("w") or ""})
+    return sorted(out, key=lambda w: (w["start"], w["end"]))
+
+
+def _word_end_boundaries(words, min_end: float, max_end: float) -> list[dict]:
+    """Candidate end points: every visible word end in ``[min_end, max_end]``, tagged with its
+    token text (for punctuation) and the next word's start (for tail-pad clamping)."""
+    vis = _visible_words(words)
+    out = []
+    for i, w in enumerate(vis):
+        if min_end <= w["end"] <= max_end:
+            out.append({"end": w["end"], "text": w["w"],
+                        "next_start": vis[i + 1]["start"] if i + 1 < len(vis) else None})
+    return out
+
+
+def _ends_with(text: str, suffixes: tuple[str, ...]) -> bool:
+    return str(text or "").strip().rstrip(_CLOSERS).endswith(suffixes)
+
+
+def _pad_word_end(boundary: dict, *, max_end: float, source_end: float, tail_pad: float) -> float:
+    end = float(boundary["end"])
+    padded = min(end + max(0.0, float(tail_pad)), max_end, source_end)
+    nxt = boundary.get("next_start")
+    if nxt is not None and float(nxt) > end:
+        padded = min(padded, float(nxt))   # don't bleed into the next word
+    return max(end, padded)
+
+
+def _line_boundary_end(lines, min_end: float, max_end: float) -> float:
+    """Legacy fallback when no per-word timing is available: the latest transcript-line end in
+    range, else a hard cap at ``max_end``."""
+    ends = []
+    for _ls, le, _t in lines or []:
+        try:
+            le = float(le)
+        except (TypeError, ValueError):
+            continue
+        if min_end <= le <= max_end:
+            ends.append(le)
+    return max(ends) if ends else max_end
+
+
+def _source_end(lines, words, fallback: float, clamp_max: float | None) -> float:
+    if clamp_max is not None:
+        return max(0.0, float(clamp_max))
+    ends = [float(fallback)]
+    ends.extend(w["end"] for w in _visible_words(words or []))
+    for _ls, le, _t in lines or []:
+        try:
+            ends.append(float(le))
+        except (TypeError, ValueError):
+            pass
+    return max(ends)
+
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return lo if x < lo else hi if x > hi else x
+
+
+# --- start-boundary snapping: mirror the end snap so the hook doesn't begin mid-thought ---
+_START_SNAP_TOLERANCE = _END_SNAP_TOLERANCE
+
+
+def _snap_start_to_window(cand: dict, lines, words=None, *, target_max: float = _TARGET_MAX,
+                          clamp_min: float = 0.0, tolerance: float = _START_SNAP_TOLERANCE) -> dict | None:
+    """Snap ``cand``'s start onto a sentence start (the first word after a sentence end), else a
+    clause start, else the nearest clean word start — within ``tolerance`` of the proposed start —
+    so the hook opens on a complete thought. Runs AFTER the end snap (it needs the final end to keep
+    ``end - start >= _MIN_CLIP``). Returns the updated candidate, or ``None`` if it can't keep a
+    ``>= _MIN_CLIP`` clip."""
+    start, end = float(cand["start"]), float(cand["end"])
+    min_start = max(float(clamp_min), end - float(target_max))
+    max_start = end - _MIN_CLIP
+    if max_start < min_start:
+        return None
+    anchor = _clamp(start, min_start, max_start)
+
+    boundaries = _word_start_boundaries(words or [], min_start, max_start)
+    chosen = None
+    if boundaries:
+        lo, hi = max(min_start, anchor - tolerance), min(max_start, anchor + tolerance)
+        near = [b for b in boundaries if lo <= b["start"] <= hi]
+        for kind in ("sentence", "clause", "word"):
+            opts = [b for b in near if b["kind"] == kind]
+            if opts:
+                chosen = min(opts, key=lambda b: abs(b["start"] - anchor))
+                break
+    else:
+        chosen = _line_boundary_start(lines, min_start, max_start, anchor, tolerance)
+
+    out = dict(cand)
+    if chosen is not None:
+        out["start"] = round(float(chosen["start"]), 3)
+        _set_boundary(out, "start", chosen["kind"], start, out["start"], chosen["start"])
+    else:
+        out["start"] = round(anchor, 3)
+        _set_boundary(out, "start", "none", start, out["start"], None)
+    if float(out["end"]) - float(out["start"]) < _MIN_CLIP:
+        return None
+    return out
+
+
+def _word_start_boundaries(words, min_start: float, max_start: float) -> list[dict]:
+    """Word starts in ``[min_start, max_start]``, each tagged: ``sentence`` (first word, or the word
+    after a sentence end), ``clause`` (after a clause end), else ``word``."""
+    vis = _visible_words(words)
+    out = []
+    for i, w in enumerate(vis):
+        prev = vis[i - 1]["w"] if i else ""
+        if i == 0 or _ends_with(prev, _SENTENCE_END):
+            kind = "sentence"
+        elif _ends_with(prev, _CLAUSE_END):
+            kind = "clause"
+        else:
+            kind = "word"
+        if min_start <= w["start"] <= max_start:
+            out.append({"start": w["start"], "kind": kind, "text": w["w"]})
+    return out
+
+
+def _line_boundary_start(lines, min_start: float, max_start: float, anchor: float, tolerance: float):
+    """Legacy fallback (no per-word timing): the transcript-line start nearest the anchor, in range."""
+    starts = [{"start": float(ls), "kind": "line"} for ls, _le, _t in (lines or [])
+              if _is_num(ls) and min_start <= float(ls) <= max_start]
+    lo, hi = max(min_start, anchor - tolerance), min(max_start, anchor + tolerance)
+    near = [b for b in starts if lo <= b["start"] <= hi]
+    return min(near, key=lambda b: abs(b["start"] - anchor)) if near else None
+
+
+def _is_num(x) -> bool:
+    return isinstance(x, (int, float))
+
+
+def _set_boundary(cand: dict, side: str, kind: str, proposed: float, actual: float,
+                  boundary_time: float | None) -> None:
+    """Record on ``cand['boundary'][side]`` which kind of boundary the snap landed on (sentence /
+    clause / word / line / none) — read by the ``boundary_quality`` ranking factor. Survives
+    :func:`signals.annotate` because it lives at the top level, not under ``features``."""
+    meta = dict(cand.get("boundary") or {})
+    item = {"kind": kind, "snapped": abs(float(actual) - float(proposed)) > 0.001, "time": round(float(actual), 3)}
+    if boundary_time is not None:
+        item["boundary_time"] = round(float(boundary_time), 3)
+    meta[side] = item
+    cand["boundary"] = meta
 
 
 def rank(candidates: list[dict], *, weights: dict[str, float] | None = None) -> list[dict]:
     """Attach a glass-box opportunity score to each candidate and sort best-first.
 
-    The score is a **transparent** linear combination of five named, reweightable factors
-    (``hook`` / ``self_contained`` / ``arc`` / ``energy`` / ``length_fit``), each in ``[0, 1]``::
+    The score is a **transparent** linear combination of six named, reweightable factors
+    (``hook`` / ``self_contained`` / ``arc`` / ``energy`` / ``length_fit`` / ``boundary_quality``), each in ``[0, 1]``::
 
         score = 100 · Σ(factorₖ · normalized-weightₖ)
 
@@ -166,18 +377,21 @@ def rank(candidates: list[dict], *, weights: dict[str, float] | None = None) -> 
 
 # --- glass-box ranking ---------------------------------------------------
 
-#: The five named factors, in display order. Visible + reweightable (spec §5 Phase 3).
-RANK_FACTORS = ("hook", "self_contained", "arc", "energy", "length_fit")
+#: The six named factors, in display order. Visible + reweightable (spec §5 Phase 3).
+RANK_FACTORS = ("hook", "self_contained", "arc", "energy", "length_fit", "boundary_quality")
 
 #: Default factor weights (sum to 1). What makes a short-form clip land: a strong open and a
-#: self-contained thought first, then energy/arc, with length a gentle nudge. The studio
-#: reweight panel and ``discover.rank`` pass a ``weights`` override.
+#: self-contained thought first, then energy/arc, with length a gentle nudge. ``boundary_quality``
+#: is a light 5% tie-breaker — it rewards clips that start AND end on a real sentence boundary
+#: (after the deterministic snap, ends are almost always clean, so it mostly discriminates on the
+#: start). The studio reweight panel and ``discover.rank`` pass a ``weights`` override.
 DEFAULT_WEIGHTS = {
     "hook": 0.30,
     "self_contained": 0.25,
     "energy": 0.20,
     "arc": 0.15,
-    "length_fit": 0.10,
+    "length_fit": 0.05,
+    "boundary_quality": 0.05,
 }
 
 # LLM ``signals`` cues that imply each factor (case-insensitive substring match). The
@@ -243,7 +457,7 @@ def _normalized_weights(weights: dict | None) -> dict:
 
 
 def _candidate_factors(cand: dict) -> dict:
-    """The five named factors in ``[0, 1]`` for one candidate, from its attached signals."""
+    """The six named factors in ``[0, 1]`` for one candidate, from its attached signals."""
     feats = cand.get("features") or {}
     text = feats.get("text") or {}
     audio = feats.get("audio")
@@ -269,17 +483,47 @@ def _candidate_factors(cand: dict) -> dict:
         "arc": 0.60 * _b(_has_cue(cues, _ARC_CUES)) + 0.25 * audio_t + 0.15 * room_t,
         "energy": 0.45 * audio_t + 0.25 * intensity_t + 0.15 * rate_t + 0.15 * scene_t,
         "length_fit": _length_fit(duration),
+        "boundary_quality": _boundary_quality(cand),
     }
     return {k: round(_clip01(v), 4) for k, v in factors.items()}
 
 
+#: How clean a snapped boundary is, per kind (set by the start/end snappers via ``_set_boundary``).
+_BOUNDARY_KIND_SCORE = {"sentence": 1.0, "clause": 0.65, "word": 0.35, "line": 0.25, "none": 0.0}
+
+
+def _boundary_quality(cand: dict) -> float:
+    """Glass-box factor in ``[0, 1]``: how cleanly the clip starts AND ends on a real boundary,
+    from the ``boundary`` metadata the snappers attach. Candidates with no metadata (a direct
+    :func:`rank` caller that never ran the snappers) are neutral (``1.0``) — never penalized."""
+    meta = cand.get("boundary")
+    if not meta:
+        return 1.0
+
+    def side(name: str) -> float:
+        kind = str((meta.get(name) or {}).get("kind") or "").lower()
+        return _BOUNDARY_KIND_SCORE.get(kind, 1.0) if kind else 1.0
+
+    return round(_clip01(side("start") * side("end")), 4)
+
+
 # --- transcript → prompt -------------------------------------------------
 
-def _transcript_lines(data: dict, window: tuple[float, float] | None) -> list[tuple[float, float, str]]:
-    """Timestamped ``(start, end, text)`` lines, segment-grouped, deletions excluded.
+# Sentence-sized lines for the prompt: break on sentence-ending punctuation so the model
+# reasons over whole thoughts, with caps (segment end / words / seconds) so a punctuation-sparse
+# run never collapses into one giant line.
+_LINE_MAX_WORDS = 12
+_LINE_MAX_SECONDS = 8.0
 
-    Word timing is authoritative (``transcript_io``), so each line's start/end is the
-    first/last *visible* word — tighter and more accurate than the nominal segment bounds.
+
+def _transcript_lines(data: dict, window: tuple[float, float] | None) -> list[tuple[float, float, str]]:
+    """Timestamped ``(start, end, text)`` lines, split into sentences, deletions excluded.
+
+    Lines break at a sentence end (a word ending in ``. ? ! …``), at a whisper-segment end, or
+    at a length cap (``_LINE_MAX_WORDS`` / ``_LINE_MAX_SECONDS``) — whichever comes first — so the
+    model sees sentence-sized units instead of arbitrary segment spans, and a long punctuation-less
+    run still degrades to capped chunks rather than one mega-line. Word timing is authoritative:
+    each line's start/end is its first/last *visible* word.
     """
     words = data.get("words") or []
     by_idx = {w["idx"]: w for w in words if isinstance(w.get("idx"), int)}
@@ -290,26 +534,37 @@ def _transcript_lines(data: dict, window: tuple[float, float] | None) -> list[tu
             and w.get("start") is not None and w.get("end") is not None
         )
 
-    def in_window(s, e):
-        return window is None or (e > window[0] and s < window[1])
+    def in_window(w):
+        return window is None or (float(w["end"]) > window[0] and float(w["start"]) < window[1])
 
-    def line_from(vis):
-        s = min(w["start"] for w in vis)
-        e = max(w["end"] for w in vis)
-        return (s, e, " ".join((w["w"] or "").strip() for w in vis)) if in_window(s, e) else None
+    flat = [w for w in words if visible(w) and in_window(w)]
+    flat.sort(key=lambda w: (float(w["start"]), float(w["end"]), int(w.get("idx", 0))))
+    if not flat:
+        return []
+
+    # Last visible+in-window word of each segment — a secondary (paragraph) break point.
+    seg_ends = set()
+    for seg in data.get("segments") or []:
+        vis = [by_idx[i] for i in (seg.get("word_idxs") or [])
+               if i in by_idx and visible(by_idx[i]) and in_window(by_idx[i])]
+        if vis:
+            seg_ends.add(vis[-1].get("idx"))
+
+    def make_line(buf):
+        return (float(buf[0]["start"]), float(buf[-1]["end"]),
+                " ".join((w.get("w") or "").strip() for w in buf))
 
     lines: list[tuple[float, float, str]] = []
-    segments = data.get("segments") or []
-    if segments:
-        for seg in segments:
-            vis = [by_idx[i] for i in (seg.get("word_idxs") or []) if i in by_idx and visible(by_idx[i])]
-            if vis and (ln := line_from(vis)):
-                lines.append(ln)
-    else:  # no paragraphs (rare) — chunk the visible words into ~sentence-sized lines
-        flat = [w for w in words if visible(w)]
-        for i in range(0, len(flat), 12):
-            if ln := line_from(flat[i:i + 12]):
-                lines.append(ln)
+    buf: list[dict] = []
+    for w in flat:
+        buf.append(w)
+        span = float(buf[-1]["end"]) - float(buf[0]["start"])
+        if (_ends_with(w.get("w") or "", _SENTENCE_END) or w.get("idx") in seg_ends
+                or len(buf) >= _LINE_MAX_WORDS or span >= _LINE_MAX_SECONDS):
+            lines.append(make_line(buf))
+            buf = []
+    if buf:
+        lines.append(make_line(buf))
     return lines
 
 

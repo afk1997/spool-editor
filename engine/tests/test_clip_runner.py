@@ -148,7 +148,7 @@ def test_find_moments_target_ranks_candidates(runner, monkeypatch):
 
     cands = job.result["candidates"]
     assert all({"score", "factors", "weights"} <= set(c) for c in cands)
-    assert set(cands[0]["factors"]) == {"hook", "self_contained", "arc", "energy", "length_fit"}
+    assert set(cands[0]["factors"]) == {"hook", "self_contained", "arc", "energy", "length_fit", "boundary_quality"}
     assert cands[0]["title"] == "hooky"                  # sorted best-first
     assert cands[0]["score"] >= cands[1]["score"]
     assert job.result["weights"]["hook"] > 0             # effective weights logged (no silent magic)

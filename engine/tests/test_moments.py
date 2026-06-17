@@ -63,7 +63,10 @@ def test_find_moments_returns_shaped_candidates(words_json):
     out = moments.find_moments(words_json, provider=_provider(_TWO))
     assert len(out) == 2
     first = out[0]
-    assert first["start"] == 2.0 and first["end"] == 14.0
+    # Shaping is this test's contract; the deterministic start/end boundary snap is covered by the
+    # dedicated snap tests. Here just assert the snapped clip stays sane and in the sweet spot.
+    assert first["start"] >= 0.0
+    assert 10.0 <= first["end"] - first["start"] <= 30.0
     assert first["title"] == "The setup"
     assert first["rationale"] == "strong hook"
     assert first["mode"] == "funny"
@@ -176,13 +179,15 @@ def test_find_moments_tightens_overlong_spans(words_json):
     out = moments.find_moments(words_json, provider=_provider(resp))
     assert out[0]["start"] == 0.0                          # hook (the start) preserved
     assert out[0]["end"] - out[0]["start"] <= 30.0         # trimmed into the short-form sweet spot
-    assert out[0]["end"] == 27.8                           # last clean line-end within 30 s of the start
+    assert out[0]["end"] == 27.98                          # nearest word end within 30 s (27.8) + tail pad
 
 
 def test_find_moments_keeps_well_sized_spans(words_json):
+    # A well-sized clip is NOT force-trimmed to the 30 s cap — its length stays in the sweet spot.
+    # (Both ends still snap onto clean boundaries; exact snap values live in the snap tests.)
     resp = json.dumps([{"start": 2.0, "end": 24.0, "title": "good clip", "why": "x"}])
     out = moments.find_moments(words_json, provider=_provider(resp))
-    assert out[0]["start"] == 2.0 and out[0]["end"] == 24.0   # 22 s — already short-form, untouched
+    assert 10.0 <= out[0]["end"] - out[0]["start"] <= 30.0
 
 
 def test_tighten_to_window_hard_caps_when_no_clean_boundary():
@@ -201,6 +206,89 @@ def test_prompt_demands_short_self_contained_windows(words_json):
     assert "a little longer is fine" not in blob                       # the hedge that invited topic spans is gone
 
 
+# ---- end-boundary snapping: clips must end on a natural speech boundary, not mid-utterance ----
+#
+# The user-visible bug: clips "end abruptly". The LLM's `end` is imprecise and lands
+# mid-sentence/mid-word. A deterministic snapper pulls the end back to the nearest sentence
+# boundary (word ending in . ? ! …) within a tolerance window, with a small tail pad so the
+# last word's audio isn't clipped — for EVERY clip, not just over-long ones.
+
+@pytest.fixture()
+def punctuated_words_json(tmp_path):
+    """Realistic whisper.cpp-style transcript: contiguous word times (each word's end == the
+    next word's start, so there are no usable silence gaps), sentence-final tokens carry a
+    period. Engineered sentence ends: A→8.0, B→16.0, C→25.0, with a natural 0.3 s gap B→C."""
+    def W(idx, w, s, e):
+        return {"idx": idx, "w": w, "original_w": w, "start": s, "end": e, "edited": False, "deleted": False}
+    A = [("We", 0.5, 2.0), ("tried", 2.0, 3.5), ("three", 3.5, 5.0), ("new", 5.0, 6.5), ("approaches.", 6.5, 8.0)]
+    B = [("The", 8.0, 9.5), ("first", 9.5, 11.0), ("one", 11.0, 12.5), ("totally", 12.5, 14.0), ("flopped.", 14.0, 16.0)]
+    C = [("But", 16.3, 17.8), ("the", 17.8, 19.3), ("second", 19.3, 21.0), ("one", 21.0, 23.0), ("scaled.", 23.0, 25.0)]
+    words, segments, idx = [], [], 0
+    for toks in (A, B, C):
+        wi = []
+        for w, s, e in toks:
+            words.append(W(idx, w, s, e)); wi.append(idx); idx += 1
+        segments.append({"start": toks[0][1], "end": toks[-1][2], "text": " ".join(t[0] for t in toks),
+                         "word_idxs": wi, "speaker": None})
+    data = {"schema_version": 2, "language": "en", "duration": 25.0, "edited_at": None,
+            "words": words, "segments": segments, "bookmarks": []}
+    p = tmp_path / "punct.words.json"
+    p.write_text(json.dumps(data))
+    return str(p)
+
+
+def test_find_moments_snaps_abrupt_end_to_sentence_boundary(punctuated_words_json):
+    # The LLM ends the clip at 17.4 — mid-sentence C ("But the…"), an abrupt cut. The nearest
+    # sentence end within tolerance is B's "flopped." at 16.0; the snapper must land there plus
+    # the 180 ms tail pad (clamped under C's first word at 16.3) → 16.18, NOT the raw 17.4.
+    resp = json.dumps([{"start": 0.5, "end": 17.4, "title": "abrupt", "why": "x", "signals": ["hook"]}])
+    out = moments.find_moments(punctuated_words_json, provider=_provider(resp))
+    assert len(out) == 1
+    assert out[0]["start"] == 0.5
+    assert out[0]["end"] == 16.18      # snapped to the sentence boundary + tail pad, not 17.4
+
+
+# ---- sentence-split prompt lines: feed the LLM sentence-sized lines, not raw whisper segments ----
+
+def test_transcript_lines_split_one_segment_into_sentences():
+    # A single whisper segment carrying TWO sentences must become TWO prompt lines, split at the
+    # period — so the model reasons over sentences, not arbitrary segment spans.
+    words = [
+        {"idx": 0, "w": "First", "start": 0.0, "end": 1.0, "deleted": False},
+        {"idx": 1, "w": "sentence.", "start": 1.0, "end": 2.0, "deleted": False},
+        {"idx": 2, "w": "Second", "start": 2.0, "end": 3.0, "deleted": False},
+        {"idx": 3, "w": "one.", "start": 3.0, "end": 4.0, "deleted": False},
+    ]
+    data = {"words": words, "segments": [{"start": 0.0, "end": 4.0, "word_idxs": [0, 1, 2, 3]}], "duration": 4.0}
+    lines = moments._transcript_lines(data, None)
+    assert [t for _s, _e, t in lines] == ["First sentence.", "Second one."]
+    assert lines[0][0] == 0.0 and lines[0][1] == 2.0   # timestamps from first/last word of the sentence
+
+
+def test_transcript_lines_cap_punctuationless_runs_no_mega_line():
+    # A long run with no punctuation must not collapse into one mega-line — it caps (≤12 words).
+    words = [{"idx": i, "w": f"w{i}", "start": i * 0.5, "end": i * 0.5 + 0.5, "deleted": False} for i in range(30)]
+    data = {"words": words, "segments": [], "duration": 15.0}
+    lines = moments._transcript_lines(data, None)
+    assert len(lines) >= 3
+    assert all(len(t.split()) <= 12 for _s, _e, t in lines)
+
+
+# ---- start-boundary snapping: the hook must begin on a sentence start, not mid-thought ----
+
+def test_find_moments_snaps_start_to_sentence_and_records_boundary(punctuated_words_json):
+    # The LLM starts at 7.3 (mid sentence A) and ends at 24.7 (mid sentence C). The end snaps to
+    # "scaled." (25.0); the start snaps forward to "The" (8.0 — the start of sentence B, right after
+    # "approaches."). Both sides record their boundary kind for the ranking factor.
+    resp = json.dumps([{"start": 7.3, "end": 24.7, "title": "mid", "why": "x", "signals": ["hook"]}])
+    out = moments.find_moments(punctuated_words_json, provider=_provider(resp))
+    assert out[0]["start"] == 8.0      # snapped to the sentence start, not 7.3
+    assert out[0]["end"] == 25.0       # snapped to the sentence end
+    b = out[0]["boundary"]
+    assert b["start"]["kind"] == "sentence"
+    assert b["end"]["kind"] == "sentence"
+
+
 # ---- rank: glass-box opportunity score (Phase 3 — spec §5 / §4 discover.rank) ----
 #
 # rank() scores ON the signals already attached by signals.annotate (the candidate's
@@ -208,7 +296,24 @@ def test_prompt_demands_short_self_contained_windows(words_json):
 # a TRANSPARENT linear combination of five named, reweightable factors, so every point
 # traces to a visible factor (spec §6.6 glass-box rule). No LLM, no media here — pure.
 
-_FACTOR_KEYS = {"hook", "self_contained", "arc", "energy", "length_fit"}
+_FACTOR_KEYS = {"hook", "self_contained", "arc", "energy", "length_fit", "boundary_quality"}
+
+
+def test_rank_boundary_quality_rewards_clean_sentence_boundaries():
+    # The 6th glass-box factor: clips that start AND end on a real sentence boundary score higher
+    # than ones snapped only to a bare word end. Candidates with no boundary metadata (direct
+    # rank() callers) are treated as neutral (1.0) so they aren't penalized.
+    clean = _rank_cand(0, 18, text="a complete thought")
+    clean["boundary"] = {"start": {"kind": "sentence"}, "end": {"kind": "sentence"}}
+    midword = _rank_cand(0, 18, text="a complete thought")
+    midword["boundary"] = {"start": {"kind": "word"}, "end": {"kind": "word"}}
+    [c1] = moments.rank([clean])
+    [c2] = moments.rank([midword])
+    [c3] = moments.rank([_rank_cand(0, 18, text="a complete thought")])   # no boundary metadata
+    assert "boundary_quality" in c1["factors"]
+    assert c1["factors"]["boundary_quality"] == 1.0
+    assert c2["factors"]["boundary_quality"] < 1.0
+    assert c3["factors"]["boundary_quality"] == 1.0    # neutral default, not a penalty
 
 
 def _rank_cand(start, end, *, cues=None, text="", audio=None, scene_density=None):
@@ -233,7 +338,7 @@ def test_rank_attaches_named_factors_weights_and_score():
 def test_rank_score_is_transparent_weighted_sum():
     # score == 100 * Σ(factor · normalized-weight) — no opaque model. This is the contract
     # the studio's instant-reweight slider mirrors client-side.
-    w = {"hook": 2, "self_contained": 1, "arc": 1, "energy": 1, "length_fit": 1}
+    w = {"hook": 2, "self_contained": 1, "arc": 1, "energy": 1, "length_fit": 1, "boundary_quality": 1}
     [c] = moments.rank([_rank_cand(0, 18, cues=["hook"], text="What a story, 3 times!")], weights=w)
     tot = sum(w.values())
     expected = 100.0 * sum(c["factors"][k] * (w[k] / tot) for k in c["factors"])
