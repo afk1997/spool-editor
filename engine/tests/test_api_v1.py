@@ -7,7 +7,9 @@ existing endpoint tests use.
 """
 from __future__ import annotations
 import os
+import threading
 import time
+from pathlib import Path
 import pytest
 from app import create_app
 from jobs import Job, JobStatus
@@ -351,6 +353,122 @@ def test_pause_404_for_unknown(client):
     assert r.status_code == 404
 
 
+def test_attempt_unwinding_resume_returns_structured_409(client):
+    from jobs import AttemptUnwindingError
+
+    app, c = client
+
+    def unwinding(_jid):
+        raise AttemptUnwindingError("old attempt is still unwinding")
+
+    app.extensions["trove.actions"]["resume_job"] = unwinding
+    app.extensions["trove.jobs"]._jobs["paused"] = Job(
+        id="paused", url="u", title="t", status=JobStatus.PAUSED,
+    )
+
+    response = c.post("/api/v1/jobs/paused/resume")
+
+    assert response.status_code == 409
+    assert response.get_json() == {"error": "attempt_unwinding"}
+
+
+def _wait_download_worker_inactive(manager, job_id, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = manager.get(job_id)
+        if job is not None and not job._worker_active:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_attempt_staging_cancelled_download_never_publishes_or_auto_transcribes(
+    client, monkeypatch,
+):
+    from runner import DownloadResult
+    import app as app_module
+
+    app, c = client
+    entered = threading.Event()
+    release = threading.Event()
+    observed = {}
+    transcribe_calls = []
+
+    def fake_download(**kwargs):
+        observed["template"] = kwargs["out_template"]
+        staged = Path(kwargs["out_template"].replace("%(ext)s", "mp4"))
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"candidate")
+        entered.set()
+        release.wait(5)
+        return DownloadResult(file_path=str(staged))
+
+    monkeypatch.setattr(app_module, "run_download", fake_download)
+    monkeypatch.setattr("models_store.get_active_path", lambda: Path("model.bin"))
+    monkeypatch.setattr(
+        app.extensions["trove.transcribe"], "submit",
+        lambda **kwargs: transcribe_calls.append(kwargs) or "t1",
+    )
+
+    response = c.post("/api/v1/jobs", json={
+        "url": "https://93.184.216.34/video", "title": "video", "auto_transcribe": True,
+    })
+    jid = response.get_json()["id"]
+    assert entered.wait(2)
+    assert "/.attempts/download/" in observed["template"]
+    assert c.post(f"/api/v1/jobs/{jid}/cancel").status_code == 200
+    release.set()
+    assert _wait_download_worker_inactive(app.extensions["trove.jobs"], jid)
+
+    job = app.extensions["trove.jobs"].get(jid)
+    assert job.status is JobStatus.CANCELLED
+    assert job.file_path is None and job.filename is None
+    assert not (app.extensions["trove.download_dir"] / f"{jid}.mp4").exists()
+    assert transcribe_calls == []
+
+
+def test_attempt_staging_successful_download_promotes_before_auto_transcribe(
+    client, monkeypatch,
+):
+    from runner import DownloadResult
+    import app as app_module
+
+    app, c = client
+    observed = {}
+    auto_state = []
+
+    def fake_download(**kwargs):
+        observed["template"] = kwargs["out_template"]
+        staged = Path(kwargs["out_template"].replace("%(ext)s", "mp4"))
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"download")
+        return DownloadResult(file_path=str(staged))
+
+    monkeypatch.setattr(app_module, "run_download", fake_download)
+    monkeypatch.setattr("models_store.get_active_path", lambda: Path("model.bin"))
+
+    def fake_transcribe_submit(**kwargs):
+        parent = app.extensions["trove.jobs"].get(kwargs["parent_job_id"])
+        auto_state.append((parent.status, parent.file_path, Path(parent.file_path).exists()))
+        return "t1"
+
+    monkeypatch.setattr(app.extensions["trove.transcribe"], "submit", fake_transcribe_submit)
+
+    response = c.post("/api/v1/jobs", json={
+        "url": "https://93.184.216.34/video", "title": "video", "auto_transcribe": True,
+    })
+    jid = response.get_json()["id"]
+    deadline = time.time() + 5
+    while app.extensions["trove.jobs"].get(jid).status is not JobStatus.DONE and time.time() < deadline:
+        time.sleep(0.01)
+
+    final = app.extensions["trove.download_dir"] / f"{jid}.mp4"
+    assert "/.attempts/download/" in observed["template"]
+    assert final.read_bytes() == b"download"
+    assert app.extensions["trove.jobs"].get(jid).file_path == str(final)
+    assert auto_state == [(JobStatus.DONE, str(final), True)]
+
+
 def test_dismiss_refuses_active_job(client):
     app, c = client
     jm = app.extensions["trove.jobs"]
@@ -416,6 +534,138 @@ def test_start_transcribe_idempotent_on_existing(client, monkeypatch, tmp_path):
     assert r.status_code == 200
     assert r.get_json()["id"] == "t1"
     assert called["n"] == 0  # idempotent
+
+
+def _wait_transcribe_worker_inactive(manager, tid, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = manager.get(tid)
+        if job is not None and not job._worker_active:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def _seed_transcribe_parent(app, tmp_path, parent_id="p"):
+    media = app.extensions["trove.download_dir"] / f"{parent_id}.mp4"
+    media.write_bytes(b"media")
+    app.extensions["trove.jobs"]._jobs[parent_id] = Job(
+        id=parent_id, url="u", title="t", status=JobStatus.DONE, file_path=str(media),
+    )
+    return media
+
+
+def test_cancel_diarization_preserves_published_transcript_and_skips_fts(
+    client, monkeypatch, tmp_path,
+):
+    import app as app_module
+    import diarizer
+    from transcriber import TranscriptResult
+
+    app, c = client
+    media = _seed_transcribe_parent(app, tmp_path)
+    base = media.with_suffix("")
+    published = [Path(str(base) + suffix) for suffix in (".words.json", ".txt", ".srt", ".vtt")]
+    for index, path in enumerate(published):
+        path.write_bytes(f"old-{index}".encode())
+    before = {path: path.read_bytes() for path in published}
+    entered = threading.Event()
+    release = threading.Event()
+    indexed = []
+
+    def fake_extract(_media, wav_path, **_kwargs):
+        Path(wav_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(wav_path).write_bytes(b"wav")
+
+    result = TranscriptResult(
+        language="en", duration=2.0,
+        words=[{"w": "hello", "start": 0.0, "end": 1.0}],
+        segments=[{"start": 0.0, "end": 1.0, "text": "hello",
+                   "words": [{"w": "hello", "start": 0.0, "end": 1.0}]}],
+    )
+    monkeypatch.setattr(app_module.transcriber, "extract_audio", fake_extract)
+    monkeypatch.setattr(app_module.transcriber, "run_transcribe", lambda **_: result)
+    monkeypatch.setattr(diarizer, "vad_available", lambda: False)
+    monkeypatch.setattr(diarizer, "available", lambda: True)
+
+    def blocked_diarize(**_):
+        entered.set()
+        release.wait(5)
+        return [type("Chunk", (), {
+            "start": 0.0, "end": 2.0, "speaker": "SPEAKER_00",
+        })()]
+
+    monkeypatch.setattr(diarizer, "diarize", blocked_diarize)
+    monkeypatch.setattr(app_module.transcript_index_mod, "index_words_file",
+                        lambda *args: indexed.append(args))
+    monkeypatch.setattr("models_store.get_active_path", lambda: tmp_path / "model.bin")
+
+    response = c.post("/api/v1/jobs/p/transcribe")
+    tid = response.get_json()["id"]
+    assert entered.wait(2)
+    assert c.post(f"/api/v1/transcripts/{tid}/cancel").status_code == 200
+    release.set()
+    assert _wait_transcribe_worker_inactive(app.extensions["trove.transcribe"], tid)
+
+    job = app.extensions["trove.transcribe"].get(tid)
+    assert job.status is transcribe_jobs.TranscribeStatus.CANCELLED
+    assert job.diarization_status is None and job.speaker_count is None
+    assert {path: path.read_bytes() for path in published} == before
+    assert indexed == []
+
+
+def test_attempt_staging_transcribe_promotes_before_fts_index(client, monkeypatch, tmp_path):
+    import app as app_module
+    import diarizer
+    from transcriber import TranscriptResult
+
+    app, c = client
+    media = _seed_transcribe_parent(app, tmp_path)
+    observed = {"bases": [], "indexed": []}
+
+    def fake_extract(_media, wav_path, **_kwargs):
+        observed["wav"] = wav_path
+        Path(wav_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(wav_path).write_bytes(b"wav")
+
+    result = TranscriptResult(
+        language="en", duration=2.0,
+        words=[{"w": "hello", "start": 0.0, "end": 1.0}],
+        segments=[{"start": 0.0, "end": 1.0, "text": "hello",
+                   "words": [{"w": "hello", "start": 0.0, "end": 1.0}]}],
+    )
+    real_write = app_module.transcriber.write_artifacts
+
+    def spy_write(result_value, base_path):
+        observed["bases"].append(base_path)
+        real_write(result_value, base_path)
+
+    def spy_index(_index, tid, words_path):
+        observed["indexed"].append((tid, words_path, Path(words_path).exists()))
+
+    monkeypatch.setattr(app_module.transcriber, "extract_audio", fake_extract)
+    monkeypatch.setattr(app_module.transcriber, "run_transcribe", lambda **_: result)
+    monkeypatch.setattr(app_module.transcriber, "write_artifacts", spy_write)
+    monkeypatch.setattr(app_module.transcript_index_mod, "index_words_file", spy_index)
+    monkeypatch.setattr(diarizer, "vad_available", lambda: False)
+    monkeypatch.setattr(diarizer, "available", lambda: False)
+    monkeypatch.setattr("models_store.get_active_path", lambda: tmp_path / "model.bin")
+
+    response = c.post("/api/v1/jobs/p/transcribe")
+    tid = response.get_json()["id"]
+    deadline = time.time() + 5
+    tm = app.extensions["trove.transcribe"]
+    while tm.get(tid).status not in {
+        transcribe_jobs.TranscribeStatus.DONE, transcribe_jobs.TranscribeStatus.ERROR,
+    } and time.time() < deadline:
+        time.sleep(0.01)
+
+    final_base = str(media.with_suffix(""))
+    assert "/.attempts/transcribe/" in observed["wav"]
+    assert observed["bases"] and "/.attempts/transcribe/" in observed["bases"][0]
+    assert all(Path(final_base + suffix).exists()
+               for suffix in (".words.json", ".txt", ".srt", ".vtt"))
+    assert observed["indexed"] == [(tid, final_base + ".words.json", True)]
 
 
 # ---- models ---------------------------------------------------------

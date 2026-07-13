@@ -6,6 +6,7 @@ lifecycle independent of the media Job's status.
 """
 from __future__ import annotations
 import enum
+import inspect
 import json
 import logging
 import os
@@ -18,6 +19,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+
+from attempt_staging import (
+    AttemptOutcome,
+    apply_updates,
+    attempt_root,
+    cleanup_attempt,
+    commit_outcome,
+)
 
 
 class TranscribeStatus(str, enum.Enum):
@@ -62,6 +71,9 @@ class TranscribeJob:
     _cancel_flag: bool = False
     dismissed_at: str | None = None
     last_accessed: float = field(default_factory=time.monotonic)
+    _attempt: int = field(default=0, repr=False, compare=False)
+    _worker_active: bool = field(default=False, repr=False, compare=False)
+    _staging_root: str = field(default="", repr=False, compare=False)
 
 
 _PERSISTENT_FIELDS = {
@@ -81,11 +93,16 @@ class TranscribeJobManager:
         self._jobs: dict[str, TranscribeJob] = {}
         # _persist() takes the persistence mutex before this state lock.
         # Lifecycle callers release the state lock before entering persistence.
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._persist_lock = threading.Lock()
         self._persist_dirty = False
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._store_path = Path(store_path) if store_path else None
+        self._attempt_base = (
+            self._store_path.parent
+            if self._store_path is not None
+            else Path(tempfile.mkdtemp(prefix="spool-transcribe-attempts-"))
+        )
         if self._store_path is not None:
             self._load_from_store()
 
@@ -167,6 +184,139 @@ class TranscribeJobManager:
             self._persist_dirty = False
             return True
 
+    def _prepare_attempt_locked(self, job: TranscribeJob) -> tuple[int, Path]:
+        root = attempt_root(self._attempt_base, "transcribe", job.id)
+        root.mkdir(parents=True, exist_ok=True)
+        job._staging_root = str(root)
+        job._attempt += 1
+        job._worker_active = True
+        return job._attempt, root
+
+    def _mutate_current(
+        self,
+        jid: str,
+        captured_job: TranscribeJob,
+        attempt: int,
+        expected: set[TranscribeStatus],
+        mutate: Callable[[TranscribeJob], None],
+    ) -> bool:
+        with self._lock:
+            current = self._jobs.get(jid)
+            valid = (
+                current is captured_job
+                and current._attempt == attempt
+                and current.status in expected
+                and current.dismissed_at is None
+            )
+            if not valid:
+                return False
+            mutate(current)
+            return True
+
+    def register_process(
+        self, jid: str, captured_job: TranscribeJob, attempt: int, process,
+    ) -> bool:
+        accepted = self._mutate_current(
+            jid, captured_job, attempt, {TranscribeStatus.RUNNING},
+            lambda current: setattr(current, "process_handle", process),
+        )
+        if not accepted and process is not None and hasattr(process, "kill"):
+            try:
+                process.kill()
+            except Exception:
+                pass
+        return accepted
+
+    def attempt_cancelled(self, jid: str, captured_job: TranscribeJob, attempt: int) -> bool:
+        with self._lock:
+            current = self._jobs.get(jid)
+            return not (
+                current is captured_job
+                and current._attempt == attempt
+                and current.status is TranscribeStatus.RUNNING
+                and current.dismissed_at is None
+            )
+
+    @staticmethod
+    def _set_error(current: TranscribeJob, exc: Exception) -> None:
+        current.status = TranscribeStatus.ERROR
+        current.error_category = current.error_category or getattr(exc, "error_category", "unknown")
+        current.error_message = current.error_message or str(exc)
+
+    @staticmethod
+    def _invoke_target(target, job: TranscribeJob, model_path: str, attempt: int):
+        try:
+            parameters = inspect.signature(target).parameters.values()
+            accepts_attempt = any(
+                parameter.name == "attempt"
+                or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            accepts_attempt = False
+        if accepts_attempt:
+            return target(job, model_path=model_path, attempt=attempt)
+        return target(job, model_path=model_path)
+
+    def _run_attempt(
+        self,
+        job: TranscribeJob,
+        attempt: int,
+        model_path: str,
+        target: Callable[[TranscribeJob], object],
+    ) -> None:
+        try:
+            started = self._mutate_current(
+                job.id, job, attempt, {TranscribeStatus.QUEUED},
+                lambda current: setattr(current, "status", TranscribeStatus.RUNNING),
+            )
+            if not started:
+                return
+            self._persist()
+
+            outcome = self._invoke_target(target, job, model_path, attempt)
+            after_commit = None
+
+            def finish(current: TranscribeJob) -> None:
+                nonlocal after_commit
+                if isinstance(outcome, AttemptOutcome):
+                    committed = commit_outcome(outcome)
+                    apply_updates(current, committed.updates)
+                    after_commit = committed.after_commit
+                current.status = TranscribeStatus.DONE
+                current.progress_pct = 100
+                current.process_handle = None
+
+            accepted = self._mutate_current(
+                job.id, job, attempt, {TranscribeStatus.RUNNING}, finish,
+            )
+            if accepted:
+                self._persist()
+                if after_commit is not None:
+                    try:
+                        self._mutate_current(
+                            job.id, job, attempt, {TranscribeStatus.DONE}, after_commit,
+                        )
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "transcribe post-commit hook failed for %s", job.id, exc_info=True,
+                        )
+        except Exception as exc:
+            accepted = self._mutate_current(
+                job.id, job, attempt, {TranscribeStatus.RUNNING},
+                lambda current: self._set_error(current, exc),
+            )
+            if accepted:
+                self._persist()
+        finally:
+            with self._lock:
+                current = self._jobs.get(job.id)
+                if current is job:
+                    if current._staging_root:
+                        cleanup_attempt(current._staging_root)
+                    current.process_handle = None
+                    current._worker_active = False
+
     # ----- lifecycle -----------------------------------------------------
 
     def submit(self, *, parent_job_id: str, model_path: str,
@@ -175,28 +325,18 @@ class TranscribeJobManager:
         model_name = Path(model_path).name if model_path else ""
         job = TranscribeJob(id=jid, parent_job_id=parent_job_id, model_used=model_name)
         with self._lock:
+            attempt, _root = self._prepare_attempt_locked(job)
             self._jobs[jid] = job
         self._persist()
-
-        def _run():
-            try:
-                with self._lock:
-                    job.status = TranscribeStatus.RUNNING
-                self._persist()
-                target(job, model_path=model_path)
-                with self._lock:
-                    if job.status not in {TranscribeStatus.CANCELLED, TranscribeStatus.ERROR}:
-                        job.status = TranscribeStatus.DONE
-                        job.progress_pct = 100
-                self._persist()
-            except Exception as e:
-                with self._lock:
-                    job.status = TranscribeStatus.ERROR
-                    job.error_category = job.error_category or "unknown"
-                    job.error_message = job.error_message or str(e)
-                self._persist()
-
-        self._executor.submit(_run)
+        try:
+            self._executor.submit(self._run_attempt, job, attempt, model_path, target)
+        except Exception:
+            with self._lock:
+                self._jobs.pop(jid, None)
+                job._worker_active = False
+                cleanup_attempt(job._staging_root)
+            self._persist()
+            raise
         return jid
 
     def cancel(self, jid: str) -> bool:
@@ -207,8 +347,11 @@ class TranscribeJobManager:
             if j.status in {TranscribeStatus.DONE, TranscribeStatus.ERROR, TranscribeStatus.CANCELLED}:
                 return False
             j._cancel_flag = True
+            j._attempt += 1
             j.status = TranscribeStatus.CANCELLED
             proc = j.process_handle
+            if not j._worker_active and j._staging_root:
+                cleanup_attempt(j._staging_root)
         if proc is not None and hasattr(proc, "kill"):
             try: proc.kill()
             except Exception: pass
@@ -251,11 +394,34 @@ class TranscribeJobManager:
         with self._lock:
             return list(self._jobs.values())
 
-    def update_progress(self, jid: str, pct: int) -> None:
-        with self._lock:
-            j = self._jobs.get(jid)
-            if j is not None and j.status == TranscribeStatus.RUNNING:
-                j.progress_pct = max(0, min(100, int(pct)))
+    def update_progress(self, jid: str, *args) -> bool:
+        """Guarded progress update.
+
+        Production callbacks pass ``(captured_job, attempt, pct)``.  The
+        two-argument legacy form remains for external callers and captures the
+        current identity/attempt while already under the same state lock.
+        """
+        if len(args) == 1:
+            pct = args[0]
+            with self._lock:
+                captured = self._jobs.get(jid)
+                if captured is None:
+                    return False
+                attempt = captured._attempt
+        elif len(args) == 3:
+            captured, attempt, pct = args
+        else:
+            raise TypeError("update_progress expects pct or captured_job, attempt, pct")
+
+        accepted = self._mutate_current(
+            jid, captured, attempt, {TranscribeStatus.RUNNING},
+            lambda current: setattr(
+                current, "progress_pct", max(0, min(100, int(pct))),
+            ),
+        )
+        if accepted:
+            self._persist()
+        return accepted
 
     def sweep(self) -> int:
         cutoff = time.monotonic() - self.ttl_seconds

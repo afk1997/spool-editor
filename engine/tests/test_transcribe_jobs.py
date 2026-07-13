@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import threading
 import pytest
 from pathlib import Path
 from transcribe_jobs import (
@@ -236,3 +237,194 @@ def test_get_by_parent_prefers_most_recent_across_restart(tmp_path):
     m2 = TranscribeJobManager(store_path=store)   # restart: ordering must survive the reload
     got = m2.get_by_parent("p")
     assert got is not None and got.id == b
+
+
+def _wait_worker_inactive(mgr, jid, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not mgr.get(jid)._worker_active:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_queued_cancel_transcribe_never_runs_target(tmp_path):
+    mgr = TranscribeJobManager(max_workers=1, store_path=tmp_path / "tj.json")
+    gate = threading.Event()
+    ran = []
+    first = mgr.submit(parent_job_id="a", model_path="m.bin",
+                       target=lambda job, **_: gate.wait(5))
+    cancelled = mgr.submit(parent_job_id="b", model_path="m.bin",
+                           target=lambda job, **_: ran.append(job.id))
+    assert mgr.get(cancelled).status is TranscribeStatus.QUEUED
+    assert mgr.cancel(cancelled) is True
+    gate.set()
+    _wait_tj(mgr, first)
+    assert _wait_worker_inactive(mgr, cancelled)
+    assert ran == []
+    assert mgr.get(cancelled).status is TranscribeStatus.CANCELLED
+    mgr.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_running_cancel_transcribe_rejects_result_error_and_progress(tmp_path, raises):
+    from attempt_staging import AttemptOutcome, Promotion
+
+    mgr = TranscribeJobManager(max_workers=1, store_path=tmp_path / "tj.json")
+    published = tmp_path / "source.words.json"
+    published.write_bytes(b"old-words")
+    started = threading.Event()
+    release = threading.Event()
+
+    def target(job, **_):
+        attempt = job._attempt
+        staged = Path(job._staging_root) / "source.words.json"
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"new-words")
+        started.set()
+        release.wait(5)
+        mgr.update_progress(job.id, job, attempt, 91)
+        if raises:
+            raise RuntimeError("late transcribe error")
+        return AttemptOutcome(
+            updates={
+                "duration_seconds": 12.0,
+                "language_detected": "en",
+                "diarization_status": "complete",
+                "speaker_count": 2,
+            },
+            promotions=(Promotion(staged, published),),
+        )
+
+    jid = mgr.submit(parent_job_id="source", model_path="m.bin", target=target)
+    assert started.wait(2)
+    assert mgr.cancel(jid) is True
+    release.set()
+    assert _wait_worker_inactive(mgr, jid)
+
+    job = mgr.get(jid)
+    assert job.status is TranscribeStatus.CANCELLED
+    assert job.progress_pct == 0
+    assert job.duration_seconds == 0.0 and job.language_detected == ""
+    assert job.diarization_status is None and job.speaker_count is None
+    assert job.error_category is None and job.error_message is None
+    assert published.read_bytes() == b"old-words"
+    assert not Path(job._staging_root).exists()
+    mgr.shutdown(wait=True)
+
+
+def test_stale_attempt_transcribe_late_process_registration_is_killed(tmp_path):
+    mgr = TranscribeJobManager(max_workers=1, store_path=tmp_path / "tj.json")
+    started = threading.Event()
+    release = threading.Event()
+    killed = []
+
+    class Proc:
+        def kill(self):
+            killed.append(True)
+
+    def target(job, **_):
+        attempt = job._attempt
+        started.set()
+        release.wait(5)
+        assert mgr.register_process(job.id, job, attempt, Proc()) is False
+
+    jid = mgr.submit(parent_job_id="source", model_path="m.bin", target=target)
+    assert started.wait(2)
+    assert mgr.cancel(jid) is True
+    release.set()
+    assert _wait_worker_inactive(mgr, jid)
+    assert killed == [True]
+    assert mgr.get(jid).process_handle is None
+    mgr.shutdown(wait=True)
+
+
+def test_stale_attempt_transcribe_target_receives_dispatch_token(tmp_path):
+    mgr = TranscribeJobManager(max_workers=1, store_path=tmp_path / "tj.json")
+    entered = threading.Event()
+    release = threading.Event()
+    observed = []
+
+    def target(job, *, model_path, attempt=None):
+        entered.set()
+        release.wait(5)
+        observed.append(attempt)
+
+    jid = mgr.submit(parent_job_id="source", model_path="m.bin", target=target)
+    assert entered.wait(2)
+    dispatched = mgr.get(jid)._attempt
+    assert mgr.cancel(jid) is True
+    release.set()
+    assert _wait_worker_inactive(mgr, jid)
+    assert observed == [dispatched]
+    mgr.shutdown(wait=True)
+
+
+def test_stale_attempt_transcribe_callback_cannot_mutate_dismissed_job(tmp_path):
+    mgr = TranscribeJobManager(max_workers=1, store_path=tmp_path / "tj.json")
+    started = threading.Event()
+    release = threading.Event()
+    callbacks = []
+
+    def target(job, **_):
+        attempt = job._attempt
+        callbacks.append(lambda: mgr.update_progress(job.id, job, attempt, 80))
+        started.set()
+        release.wait(5)
+
+    jid = mgr.submit(parent_job_id="source", model_path="m.bin", target=target)
+    assert started.wait(2)
+    assert mgr.cancel(jid) is True
+    assert mgr.dismiss(jid) is True
+    assert callbacks[0]() is False
+    release.set()
+    assert _wait_worker_inactive(mgr, jid)
+    job = mgr.get(jid)
+    assert job.status is TranscribeStatus.CANCELLED
+    assert job.dismissed_at is not None and job.progress_pct == 0
+    mgr.shutdown(wait=True)
+
+
+def test_attempt_staging_transcribe_success_promotes_all_sidecars(tmp_path):
+    from attempt_staging import AttemptOutcome, Promotion
+
+    mgr = TranscribeJobManager(max_workers=1, store_path=tmp_path / "tj.json")
+    finals = [tmp_path / f"source{suffix}" for suffix in (".words.json", ".txt", ".srt", ".vtt")]
+
+    def target(job, **_):
+        root = Path(job._staging_root)
+        promotions = []
+        for final in finals:
+            staged = root / final.name
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            staged.write_text(f"new:{final.suffix}")
+            promotions.append(Promotion(staged, final))
+        return AttemptOutcome(
+            updates={"duration_seconds": 4.0, "language_detected": "en"},
+            promotions=tuple(promotions),
+        )
+
+    jid = mgr.submit(parent_job_id="source", model_path="m.bin", target=target)
+    _wait_tj(mgr, jid)
+    assert mgr.get(jid).status is TranscribeStatus.DONE
+    assert all(path.exists() for path in finals)
+    assert mgr.get(jid).duration_seconds == 4.0
+    assert not Path(mgr.get(jid)._staging_root).exists()
+    mgr.shutdown(wait=True)
+
+
+def test_transcribe_attempt_runtime_fields_are_not_persisted(tmp_path):
+    store = tmp_path / "tj.json"
+    mgr = TranscribeJobManager(max_workers=1, store_path=store)
+    gate = threading.Event()
+    jid = mgr.submit(parent_job_id="source", model_path="m.bin",
+                     target=lambda job, **_: gate.wait(5))
+    deadline = time.time() + 2
+    while mgr.get(jid).status is not TranscribeStatus.RUNNING and time.time() < deadline:
+        time.sleep(0.01)
+    payload = json.loads(store.read_text())["jobs"][jid]
+    assert "_attempt" not in payload
+    assert "_worker_active" not in payload
+    assert "_staging_root" not in payload
+    gate.set()
+    mgr.shutdown(wait=True)

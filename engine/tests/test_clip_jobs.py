@@ -7,6 +7,7 @@ persistence + restart-downgrade machinery, extended with a ``kind`` and
 import json
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -275,3 +276,211 @@ def _await(jm, jid, status, tries=100):
             return
         time.sleep(0.02)
     raise AssertionError(f"job {jid} never reached {status}; last={jm.get(jid).status if jm.get(jid) else None}")
+
+
+def _wait_worker_inactive(mgr, jid, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not mgr.get(jid)._worker_active:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_queued_cancel_clip_never_runs_target(tmp_path):
+    mgr = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
+    gate = threading.Event()
+    ran = []
+    first = mgr.submit(kind="cut", target=lambda job: gate.wait(5))
+    cancelled = mgr.submit(kind="cut", target=lambda job: ran.append(job.id))
+    assert mgr.get(cancelled).status is ClipStatus.QUEUED
+    assert mgr.cancel(cancelled) is True
+    gate.set()
+    _await(mgr, first, ClipStatus.DONE)
+    assert _wait_worker_inactive(mgr, cancelled)
+    assert ran == []
+    assert mgr.get(cancelled).status is ClipStatus.CANCELLED
+    mgr.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_running_cancel_clip_rejects_result_error_progress_and_publication(tmp_path, raises):
+    from attempt_staging import AttemptOutcome, Promotion
+
+    mgr = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
+    published = tmp_path / "clips" / "clip-a" / "clip.mp4"
+    published.parent.mkdir(parents=True)
+    published.write_bytes(b"old-clip")
+    started = threading.Event()
+    release = threading.Event()
+
+    def target(job):
+        attempt = job._attempt
+        staged = Path(job._staging_root) / "clip-a" / "clip.mp4"
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"new-clip")
+        started.set()
+        release.wait(5)
+        mgr.update_progress(job.id, job, attempt, 92, stage="late")
+        if raises:
+            raise RuntimeError("late render failure")
+        return AttemptOutcome(
+            updates={"clip_id": "clip-a", "result": {"clip_path": str(staged)}},
+            promotions=(Promotion(staged, published),),
+        )
+
+    jid = mgr.submit(kind="cut", source_id="source", target=target)
+    assert started.wait(2)
+    assert mgr.cancel(jid) is True
+    release.set()
+    assert _wait_worker_inactive(mgr, jid)
+
+    job = mgr.get(jid)
+    assert job.status is ClipStatus.CANCELLED
+    assert job.progress_pct == 0 and job.stage == ""
+    assert job.clip_id is None and job.result == {}
+    assert job.error_category is None and job.error_message is None
+    assert published.read_bytes() == b"old-clip"
+    assert not Path(job._staging_root).exists()
+    mgr.shutdown(wait=True)
+
+
+def test_stale_attempt_clip_late_process_registration_is_killed(tmp_path):
+    mgr = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
+    started = threading.Event()
+    release = threading.Event()
+    killed = []
+
+    class Proc:
+        def kill(self):
+            killed.append(True)
+
+    def target(job):
+        attempt = job._attempt
+        started.set()
+        release.wait(5)
+        assert mgr.register_process(job.id, job, attempt, Proc()) is False
+
+    jid = mgr.submit(kind="cut", target=target)
+    assert started.wait(2)
+    assert mgr.cancel(jid) is True
+    release.set()
+    assert _wait_worker_inactive(mgr, jid)
+    assert killed == [True]
+    assert mgr.get(jid).process_handle is None
+    mgr.shutdown(wait=True)
+
+
+def test_stale_attempt_clip_target_receives_dispatch_token(tmp_path):
+    mgr = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
+    entered = threading.Event()
+    release = threading.Event()
+    observed = []
+
+    def target(job, *, attempt=None):
+        entered.set()
+        release.wait(5)
+        observed.append(attempt)
+
+    jid = mgr.submit(kind="cut", target=target)
+    assert entered.wait(2)
+    dispatched = mgr.get(jid)._attempt
+    assert mgr.cancel(jid) is True
+    release.set()
+    assert _wait_worker_inactive(mgr, jid)
+    assert observed == [dispatched]
+    mgr.shutdown(wait=True)
+
+
+def test_cancel_produce_before_atomic_fanout_submits_zero_children(tmp_path):
+    mgr = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
+    started = threading.Event()
+    release = threading.Event()
+    observed = []
+
+    def target(parent):
+        attempt = parent._attempt
+        started.set()
+        release.wait(5)
+        observed.extend(mgr.submit_children_if_current(parent, attempt, [
+            {"kind": "cut", "source_id": "source", "clip_id": "clip-a",
+             "params": {}, "target": lambda child: None},
+            {"kind": "cut", "source_id": "source", "clip_id": "clip-b",
+             "params": {}, "target": lambda child: None},
+        ]))
+
+    jid = mgr.submit(kind="produce", source_id="source", target=target)
+    assert started.wait(2)
+    assert mgr.cancel(jid) is True
+    release.set()
+    assert _wait_worker_inactive(mgr, jid)
+    assert observed == []
+    assert len(mgr.snapshot_jobs()) == 1
+    mgr.shutdown(wait=True)
+
+
+def test_cancel_produce_after_atomic_fanout_keeps_all_admitted_children(tmp_path):
+    mgr = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
+    admitted = threading.Event()
+    release = threading.Event()
+    child_gate = threading.Event()
+    observed = []
+
+    def target(parent):
+        observed.extend(mgr.submit_children_if_current(parent, parent._attempt, [
+            {"kind": "cut", "source_id": "source", "clip_id": "clip-a",
+             "params": {}, "target": lambda child: child_gate.wait(5)},
+            {"kind": "cut", "source_id": "source", "clip_id": "clip-b",
+             "params": {}, "target": lambda child: child_gate.wait(5)},
+        ]))
+        admitted.set()
+        release.wait(5)
+
+    jid = mgr.submit(kind="produce", source_id="source", target=target)
+    assert admitted.wait(2)
+    assert mgr.cancel(jid) is True
+    assert len(observed) == 2
+    assert mgr.get(jid).result["clip_jobs"] == observed
+    release.set()
+    child_gate.set()
+    assert _wait_worker_inactive(mgr, jid)
+    assert all(mgr.get(child) is not None for child in observed)
+    mgr.shutdown(wait=True)
+
+
+def test_attempt_staging_clip_success_promotes_and_rewrites_result(tmp_path):
+    from attempt_staging import AttemptOutcome, Promotion
+
+    mgr = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
+    final = tmp_path / "clips" / "clip-a" / "renders" / "r.mp4"
+
+    def target(job):
+        staged = Path(job._staging_root) / "clip-a" / "renders" / "r.mp4"
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"render")
+        return AttemptOutcome(
+            updates={"clip_id": "clip-a", "result": {"output_path": str(staged)}},
+            promotions=(Promotion(staged, final),),
+        )
+
+    jid = mgr.submit(kind="export", source_id="source", target=target)
+    _await(mgr, jid, ClipStatus.DONE)
+    job = mgr.get(jid)
+    assert final.read_bytes() == b"render"
+    assert job.result["output_path"] == str(final)
+    assert not Path(job._staging_root).exists()
+    mgr.shutdown(wait=True)
+
+
+def test_clip_attempt_runtime_fields_are_not_persisted(tmp_path):
+    store = tmp_path / "clip.json"
+    mgr = ClipJobManager(max_workers=1, store_path=store)
+    gate = threading.Event()
+    jid = mgr.submit(kind="cut", target=lambda job: gate.wait(5))
+    _await(mgr, jid, ClipStatus.RUNNING)
+    payload = json.loads(store.read_text())["jobs"][jid]
+    assert "_attempt" not in payload
+    assert "_worker_active" not in payload
+    assert "_staging_root" not in payload
+    gate.set()
+    mgr.shutdown(wait=True)

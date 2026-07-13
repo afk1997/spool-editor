@@ -14,6 +14,7 @@ and the per-kind logic lives in the work closures built by ``create_app``.
 from __future__ import annotations
 
 import enum
+import inspect
 import json
 import logging
 import os
@@ -26,6 +27,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+
+from attempt_staging import (
+    AttemptOutcome,
+    apply_updates,
+    attempt_root,
+    cleanup_attempt,
+    commit_outcome,
+)
 
 
 class ClipStatus(str, enum.Enum):
@@ -66,6 +75,9 @@ class ClipJob:
     _cancel_flag: bool = False
     dismissed_at: str | None = None
     last_accessed: float = field(default_factory=time.monotonic)
+    _attempt: int = field(default=0, repr=False, compare=False)
+    _worker_active: bool = field(default=False, repr=False, compare=False)
+    _staging_root: str = field(default="", repr=False, compare=False)
 
 
 _PERSISTENT_FIELDS = {
@@ -83,11 +95,16 @@ class ClipJobManager:
         self._jobs: dict[str, ClipJob] = {}
         # _persist() takes the persistence mutex before this state lock.
         # Lifecycle callers release the state lock before entering persistence.
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._persist_lock = threading.Lock()
         self._persist_dirty = False
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._store_path = Path(store_path) if store_path else None
+        self._attempt_base = (
+            self._store_path.parent
+            if self._store_path is not None
+            else Path(tempfile.mkdtemp(prefix="spool-clip-attempts-"))
+        )
         if self._store_path is not None:
             self._load_from_store()
 
@@ -169,6 +186,154 @@ class ClipJobManager:
             self._persist_dirty = False
             return True
 
+    def _prepare_attempt_locked(self, job: ClipJob) -> tuple[int, Path]:
+        root = attempt_root(self._attempt_base, "clip", job.id)
+        root.mkdir(parents=True, exist_ok=True)
+        job._staging_root = str(root)
+        job._attempt += 1
+        job._worker_active = True
+        return job._attempt, root
+
+    def _mutate_current(
+        self,
+        jid: str,
+        captured_job: ClipJob,
+        attempt: int,
+        expected: set[ClipStatus],
+        mutate: Callable[[ClipJob], None],
+    ) -> bool:
+        with self._lock:
+            current = self._jobs.get(jid)
+            valid = (
+                current is captured_job
+                and current._attempt == attempt
+                and current.status in expected
+                and current.dismissed_at is None
+            )
+            if not valid:
+                return False
+            mutate(current)
+            return True
+
+    def register_process(self, jid: str, captured_job: ClipJob, attempt: int, process) -> bool:
+        accepted = self._mutate_current(
+            jid, captured_job, attempt, {ClipStatus.RUNNING},
+            lambda current: setattr(current, "process_handle", process),
+        )
+        if not accepted and process is not None and hasattr(process, "kill"):
+            try:
+                process.kill()
+            except Exception:
+                pass
+        return accepted
+
+    def attempt_cancelled(self, jid: str, captured_job: ClipJob, attempt: int) -> bool:
+        with self._lock:
+            current = self._jobs.get(jid)
+            return not (
+                current is captured_job
+                and current._attempt == attempt
+                and current.status is ClipStatus.RUNNING
+                and current.dismissed_at is None
+            )
+
+    @staticmethod
+    def _set_error(current: ClipJob, exc: Exception) -> None:
+        current.status = ClipStatus.ERROR
+        current.error_category = current.error_category or getattr(exc, "error_category", "unknown")
+        current.error_message = current.error_message or str(exc)
+
+    @staticmethod
+    def _invoke_target(target, job: ClipJob, attempt: int):
+        try:
+            parameters = inspect.signature(target).parameters.values()
+            accepts_attempt = any(
+                parameter.name == "attempt"
+                or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            accepts_attempt = False
+        if accepts_attempt:
+            return target(job, attempt=attempt)
+        return target(job)
+
+    def _run_attempt(
+        self,
+        job: ClipJob,
+        attempt: int,
+        target: Callable[[ClipJob], object],
+    ) -> None:
+        try:
+            started = self._mutate_current(
+                job.id, job, attempt, {ClipStatus.QUEUED},
+                lambda current: setattr(current, "status", ClipStatus.RUNNING),
+            )
+            if not started:
+                return
+            self._persist()
+
+            outcome = self._invoke_target(target, job, attempt)
+            after_commit = None
+
+            def finish(current: ClipJob) -> None:
+                nonlocal after_commit
+                if isinstance(outcome, AttemptOutcome):
+                    committed = commit_outcome(outcome)
+                    apply_updates(current, committed.updates)
+                    after_commit = committed.after_commit
+                current.status = ClipStatus.DONE
+                current.progress_pct = 100
+                current.process_handle = None
+
+            accepted = self._mutate_current(
+                job.id, job, attempt, {ClipStatus.RUNNING}, finish,
+            )
+            if accepted:
+                self._persist()
+                if after_commit is not None:
+                    try:
+                        self._mutate_current(
+                            job.id, job, attempt, {ClipStatus.DONE}, after_commit,
+                        )
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "clip post-commit hook failed for %s", job.id, exc_info=True,
+                        )
+        except Exception as exc:
+            accepted = self._mutate_current(
+                job.id, job, attempt, {ClipStatus.RUNNING},
+                lambda current: self._set_error(current, exc),
+            )
+            if accepted:
+                self._persist()
+        finally:
+            with self._lock:
+                current = self._jobs.get(job.id)
+                if current is job:
+                    if current._staging_root:
+                        cleanup_attempt(current._staging_root)
+                    current.process_handle = None
+                    current._worker_active = False
+
+    def _new_job_locked(
+        self,
+        *,
+        kind: str,
+        target: Callable[[ClipJob], object],
+        source_id: str | None,
+        clip_id: str | None,
+        params: dict | None,
+    ) -> tuple[ClipJob, int, Callable[[ClipJob], object]]:
+        jid = uuid.uuid4().hex[:10]
+        job = ClipJob(
+            id=jid, kind=kind, source_id=source_id, clip_id=clip_id,
+            params=params or {},
+        )
+        attempt, _root = self._prepare_attempt_locked(job)
+        self._jobs[jid] = job
+        return job, attempt, target
+
     # ----- lifecycle -----------------------------------------------------
 
     def submit(self, *, kind: str, target: Callable[[ClipJob], None],
@@ -176,33 +341,88 @@ class ClipJobManager:
                params: dict | None = None) -> str:
         if kind not in CLIP_KINDS:
             raise ValueError(f"unknown clip kind {kind!r}; expected one of {sorted(CLIP_KINDS)}")
-        jid = uuid.uuid4().hex[:10]
-        job = ClipJob(id=jid, kind=kind, source_id=source_id, clip_id=clip_id,
-                      params=params or {})
         with self._lock:
-            self._jobs[jid] = job
+            job, attempt, target = self._new_job_locked(
+                kind=kind, target=target, source_id=source_id,
+                clip_id=clip_id, params=params,
+            )
         self._persist()
+        try:
+            self._executor.submit(self._run_attempt, job, attempt, target)
+        except Exception:
+            with self._lock:
+                self._jobs.pop(job.id, None)
+                job._worker_active = False
+                cleanup_attempt(job._staging_root)
+            self._persist()
+            raise
+        return job.id
 
-        def _run():
+    def submit_children_if_current(
+        self,
+        parent: ClipJob,
+        attempt: int,
+        specs: list[dict],
+    ) -> list[str]:
+        """Atomically admit every produce child or none of them.
+
+        Executor work is submitted while the manager RLock is held.  Child
+        closures acquire that same lock before leaving QUEUED, so none can run
+        until the complete child set and the parent's child-id result are
+        visible together.
+        """
+        submissions: list[tuple[ClipJob, int, Callable[[ClipJob], object]]] = []
+        with self._lock:
+            current = self._jobs.get(parent.id)
+            if not (
+                current is parent
+                and current._attempt == attempt
+                and current.status is ClipStatus.RUNNING
+                and current.dismissed_at is None
+            ):
+                return []
+
+            for spec in specs:
+                kind = spec.get("kind")
+                if kind not in CLIP_KINDS:
+                    raise ValueError(
+                        f"unknown clip kind {kind!r}; expected one of {sorted(CLIP_KINDS)}",
+                    )
+                target = spec.get("target")
+                if not callable(target):
+                    raise ValueError("child target must be callable")
+                submissions.append(self._new_job_locked(
+                    kind=kind,
+                    target=target,
+                    source_id=spec.get("source_id"),
+                    clip_id=spec.get("clip_id"),
+                    params=spec.get("params"),
+                ))
+
+            child_ids = [child.id for child, _attempt, _target in submissions]
+            current.result = {
+                **(current.result or {}),
+                "count": len(child_ids),
+                "clip_jobs": child_ids,
+            }
             try:
-                with self._lock:
-                    job.status = ClipStatus.RUNNING
-                self._persist()
-                target(job)
-                with self._lock:
-                    if job.status not in {ClipStatus.CANCELLED, ClipStatus.ERROR}:
-                        job.status = ClipStatus.DONE
-                        job.progress_pct = 100
-                self._persist()
-            except Exception as e:
-                with self._lock:
-                    job.status = ClipStatus.ERROR
-                    job.error_category = job.error_category or "unknown"
-                    job.error_message = job.error_message or str(e)
-                self._persist()
-
-        self._executor.submit(_run)
-        return jid
+                for child, child_attempt, target in submissions:
+                    self._executor.submit(
+                        self._run_attempt, child, child_attempt, target,
+                    )
+            except Exception:
+                # Any already-submitted closure is still blocked on this RLock;
+                # removing every captured identity makes all of them no-op.
+                for child, _child_attempt, _target in submissions:
+                    self._jobs.pop(child.id, None)
+                    child._worker_active = False
+                    cleanup_attempt(child._staging_root)
+                current.result = {
+                    **(current.result or {}), "count": 0, "clip_jobs": [],
+                }
+                raise
+        self._persist()
+        return child_ids
 
     def cancel(self, jid: str) -> bool:
         with self._lock:
@@ -212,8 +432,11 @@ class ClipJobManager:
             if j.status in {ClipStatus.DONE, ClipStatus.ERROR, ClipStatus.CANCELLED}:
                 return False
             j._cancel_flag = True
+            j._attempt += 1
             j.status = ClipStatus.CANCELLED
             proc = j.process_handle
+            if not j._worker_active and j._staging_root:
+                cleanup_attempt(j._staging_root)
         if proc is not None and hasattr(proc, "kill"):
             try:
                 proc.kill()
@@ -258,13 +481,30 @@ class ClipJobManager:
         with self._lock:
             return list(self._jobs.values())
 
-    def update_progress(self, jid: str, pct: int, *, stage: str | None = None) -> None:
-        with self._lock:
-            j = self._jobs.get(jid)
-            if j is not None and j.status == ClipStatus.RUNNING:
-                j.progress_pct = max(0, min(100, int(pct)))
-                if stage is not None:
-                    j.stage = stage
+    def update_progress(self, jid: str, *args, stage: str | None = None) -> bool:
+        if len(args) == 1:
+            pct = args[0]
+            with self._lock:
+                captured = self._jobs.get(jid)
+                if captured is None:
+                    return False
+                attempt = captured._attempt
+        elif len(args) == 3:
+            captured, attempt, pct = args
+        else:
+            raise TypeError("update_progress expects pct or captured_job, attempt, pct")
+
+        def mutate(current: ClipJob) -> None:
+            current.progress_pct = max(0, min(100, int(pct)))
+            if stage is not None:
+                current.stage = stage
+
+        accepted = self._mutate_current(
+            jid, captured, attempt, {ClipStatus.RUNNING}, mutate,
+        )
+        if accepted:
+            self._persist()
+        return accepted
 
     def sweep(self) -> int:
         cutoff = time.monotonic() - self.ttl_seconds

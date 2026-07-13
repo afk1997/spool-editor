@@ -1,16 +1,27 @@
 from __future__ import annotations
 import enum
 import glob
+import inspect
 import logging
 import os
 import threading
+import tempfile
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from queue import Full
 from typing import Callable
+
+from attempt_staging import (
+    AttemptOutcome,
+    apply_updates,
+    attempt_root,
+    cleanup_attempt,
+    commit_outcome,
+)
 
 
 class JobStatus(str, enum.Enum):
@@ -24,6 +35,10 @@ class JobStatus(str, enum.Enum):
 
 _TERMINAL_STATUSES = {JobStatus.DONE, JobStatus.ERROR, JobStatus.CANCELLED}
 _PUBLISHED_SIDECAR_SUFFIXES = (".json", ".srt", ".vtt", ".txt", ".ass")
+
+
+class AttemptUnwindingError(RuntimeError):
+    """A paused attempt still owns its worker/staging lease."""
 
 
 def _utc_now_rfc3339() -> str:
@@ -72,6 +87,9 @@ class Job:
     # a model.
     _auto_transcribe_hint: str | None = None
     dismissed_at: str | None = None
+    _attempt: int = field(default=0, repr=False, compare=False)
+    _worker_active: bool = field(default=False, repr=False, compare=False)
+    _staging_root: str = field(default="", repr=False, compare=False)
 
 
 class JobManager:
@@ -83,7 +101,6 @@ class JobManager:
         queue_size: int | None = None,
         store_path: object = None,  # Path or None; None disables persistence
     ):
-        from pathlib import Path  # local import to avoid module-level coupling
         self.max_workers = max_workers
         self.ttl_seconds = ttl_seconds
         self._jobs: dict[str, Job] = {}
@@ -97,6 +114,11 @@ class JobManager:
         self._inflight = 0
         self._queue_size = queue_size
         self._store_path = Path(store_path) if store_path else None
+        self._attempt_base = (
+            self._store_path.parent
+            if self._store_path is not None
+            else Path(tempfile.mkdtemp(prefix="spool-download-attempts-"))
+        )
         if self._store_path is not None:
             self._load_from_store()
 
@@ -110,6 +132,8 @@ class JobManager:
             if job.status in (JobStatus.DOWNLOADING, JobStatus.QUEUED):
                 job.status = JobStatus.PAUSED
             self._jobs[jid] = job
+            if job.status is JobStatus.PAUSED:
+                self._ensure_download_staging_locked(job)
 
     def _persist(self, *, only_if_dirty: bool = False) -> bool:
         if self._store_path is None:
@@ -132,6 +156,206 @@ class JobManager:
             self._persist_dirty = False
             return True
 
+    def _ensure_download_staging_locked(self, job: Job) -> Path:
+        """Normalize legacy output templates into this job's private root.
+
+        Older stores point ``out_template`` at the published download root.
+        Move only unpublished candidates into staging; a recorded published
+        file and transcript sidecars are immutable inputs and stay in place.
+        """
+        root = attempt_root(self._attempt_base, "download", job.id)
+        root.mkdir(parents=True, exist_ok=True)
+        old_template = job.out_template
+        new_template = root / f"{job.id}.%(ext)s"
+        if old_template and Path(old_template).parent != root:
+            published = os.path.realpath(job.file_path) if job.file_path else None
+            for candidate in glob.glob(old_template.replace("%(ext)s", "*")):
+                if not os.path.isfile(candidate):
+                    continue
+                if published and os.path.realpath(candidate) == published:
+                    continue
+                if candidate.lower().endswith(_PUBLISHED_SIDECAR_SUFFIXES):
+                    continue
+                destination = root / Path(candidate).name
+                try:
+                    os.replace(candidate, destination)
+                except OSError:
+                    logging.getLogger(__name__).warning(
+                        "failed to migrate legacy partial %s into %s",
+                        candidate, destination, exc_info=True,
+                    )
+        job._staging_root = str(root)
+        job.out_template = str(new_template)
+        return root
+
+    def _mutate_current(
+        self,
+        job_id: str,
+        captured_job: Job,
+        attempt: int,
+        expected: set[JobStatus],
+        mutate: Callable[[Job], None],
+    ) -> bool:
+        """Validate and mutate one captured attempt in one critical section."""
+        with self._lock:
+            current = self._jobs.get(job_id)
+            valid = (
+                current is captured_job
+                and current._attempt == attempt
+                and current.status in expected
+                and current.dismissed_at is None
+            )
+            if not valid:
+                return False
+            mutate(current)
+            return True
+
+    def register_process(self, job_id: str, captured_job: Job, attempt: int, process) -> bool:
+        accepted = self._mutate_current(
+            job_id, captured_job, attempt, {JobStatus.DOWNLOADING},
+            lambda current: setattr(current, "process", process),
+        )
+        if not accepted and process is not None and hasattr(process, "kill"):
+            try:
+                process.kill()
+            except Exception:
+                pass
+        return accepted
+
+    def update_progress(
+        self,
+        job_id: str,
+        captured_job: Job,
+        attempt: int,
+        *,
+        downloaded: int,
+        total: int,
+        speed: float,
+        eta: int,
+        fragment_index: int,
+        fragment_count: int,
+    ) -> bool:
+        def mutate(current: Job) -> None:
+            current.downloaded_bytes = downloaded
+            current.total_bytes = total
+            current.speed = speed
+            current.eta = eta
+            current.fragment_index = fragment_index
+            current.fragment_count = fragment_count
+
+        accepted = self._mutate_current(
+            job_id, captured_job, attempt, {JobStatus.DOWNLOADING}, mutate,
+        )
+        if accepted:
+            self._persist()
+        return accepted
+
+    def attempt_cancelled(self, job_id: str, captured_job: Job, attempt: int) -> bool:
+        """Read-only cancellation probe for long-running external tools."""
+        with self._lock:
+            current = self._jobs.get(job_id)
+            return not (
+                current is captured_job
+                and current._attempt == attempt
+                and current.status is JobStatus.DOWNLOADING
+                and current.dismissed_at is None
+            )
+
+    @staticmethod
+    def _set_error(current: Job, exc: Exception) -> None:
+        current.status = JobStatus.ERROR
+        current.error_category = current.error_category or getattr(exc, "error_category", "unknown")
+        current.error_message = current.error_message or str(exc)
+
+    @staticmethod
+    def _invoke_target(target, job: Job, attempt: int):
+        try:
+            parameters = inspect.signature(target).parameters.values()
+            accepts_attempt = any(
+                parameter.name == "attempt"
+                or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            accepts_attempt = False
+        if accepts_attempt:
+            return target(job, attempt=attempt)
+        return target(job)
+
+    def _run_attempt(
+        self,
+        job: Job,
+        attempt: int,
+        target: Callable[[Job], object],
+        *,
+        queued_start: bool,
+    ) -> None:
+        try:
+            if queued_start:
+                # Preserve the observable QUEUED hand-off used by API callers;
+                # attempt validation below still decides whether work may start.
+                time.sleep(0.001)
+                started = self._mutate_current(
+                    job.id, job, attempt, {JobStatus.QUEUED},
+                    lambda current: setattr(current, "status", JobStatus.DOWNLOADING),
+                )
+            else:
+                # resume() exposes DOWNLOADING immediately, but the captured
+                # identity/attempt still must be live when its worker slot opens.
+                started = self._mutate_current(
+                    job.id, job, attempt, {JobStatus.DOWNLOADING}, lambda _current: None,
+                )
+            if not started:
+                return
+            self._persist()
+
+            outcome = self._invoke_target(target, job, attempt)
+            after_commit = None
+
+            def finish(current: Job) -> None:
+                nonlocal after_commit
+                if isinstance(outcome, AttemptOutcome):
+                    committed = commit_outcome(outcome)
+                    apply_updates(current, committed.updates)
+                    after_commit = committed.after_commit
+                current.status = JobStatus.DONE
+                current._was_paused = False
+                current.process = None
+
+            accepted = self._mutate_current(
+                job.id, job, attempt, {JobStatus.DOWNLOADING}, finish,
+            )
+            if accepted:
+                self._persist()
+                if after_commit is not None:
+                    try:
+                        self._mutate_current(
+                            job.id, job, attempt, {JobStatus.DONE}, after_commit,
+                        )
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "download post-commit hook failed for %s", job.id, exc_info=True,
+                        )
+        except Exception as exc:
+            accepted = self._mutate_current(
+                job.id, job, attempt, {JobStatus.DOWNLOADING},
+                lambda current: self._set_error(current, exc),
+            )
+            if accepted:
+                self._persist()
+        finally:
+            # Cleanup and lease release share the state lock.  A resume cannot
+            # observe _worker_active=False and reuse the path until the old
+            # worker has either preserved (PAUSED) or cleaned its staging root.
+            with self._lock:
+                current = self._jobs.get(job.id)
+                if current is job:
+                    if current.status is not JobStatus.PAUSED and current._staging_root:
+                        cleanup_attempt(current._staging_root)
+                    current.process = None
+                    current._worker_active = False
+                self._inflight -= 1
+
     def submit(
         self,
         *,
@@ -139,51 +363,38 @@ class JobManager:
         title: str,
         url: str,
         auto_transcribe: bool = False,
+        thumbnail: str = "",
+        format_choice: str = "video",
+        format_id: str | None = None,
     ) -> str:
         job_id = uuid.uuid4().hex[:10]
         job = Job(
             id=job_id, url=url, title=title, status=JobStatus.QUEUED,
-            auto_transcribe=auto_transcribe,
+            auto_transcribe=auto_transcribe, thumbnail=thumbnail,
+            format_choice=format_choice, format_id=format_id,
         )
         with self._lock:
             if self._queue_size == 0 and self._inflight >= self.max_workers:
                 raise RuntimeError("pool full")
+            self._ensure_download_staging_locked(job)
+            job._attempt += 1
+            attempt = job._attempt
+            job._worker_active = True
             self._jobs[job_id] = job
             self._inflight += 1
         self._persist()
-
-        def _run():
-            time.sleep(0.001)
-            try:
-                with self._lock:
-                    # The user may have cancelled or paused this job while it sat QUEUED
-                    # waiting for a worker slot. Starting it anyway resurrected the job
-                    # (and orphaned its yt-dlp subprocess on cancel). Paused stays paused —
-                    # resume() is the only sanctioned restart path.
-                    if job.status is not JobStatus.QUEUED:
-                        return
-                    job.status = JobStatus.DOWNLOADING
-                self._persist()
-                target(job)
-                with self._lock:
-                    if job.status == JobStatus.PAUSED and job.file_path:
-                        # Pause raced runner success — runner already wrote a real file.
-                        job.status = JobStatus.DONE
-                        job._was_paused = False
-                    elif job.status not in {JobStatus.ERROR, JobStatus.CANCELLED, JobStatus.PAUSED}:
-                        job.status = JobStatus.DONE
-                self._persist()
-            except Exception as e:
-                with self._lock:
-                    job.status = JobStatus.ERROR
-                    job.error_category = job.error_category or "unknown"
-                    job.error_message = job.error_message or str(e)
-                self._persist()
-            finally:
-                with self._lock:
-                    self._inflight -= 1
-
-        self._executor.submit(_run)
+        try:
+            self._executor.submit(
+                self._run_attempt, job, attempt, target, queued_start=True,
+            )
+        except Exception:
+            with self._lock:
+                self._jobs.pop(job_id, None)
+                self._inflight -= 1
+                job._worker_active = False
+                cleanup_attempt(job._staging_root)
+            self._persist()
+            raise
         return job_id
 
     def get(self, job_id: str) -> Job | None:
@@ -212,24 +423,17 @@ class JobManager:
             if job.status in _TERMINAL_STATUSES:
                 return False
             proc = job.process
-            out_template = job.out_template
-            published_path = os.path.realpath(job.file_path) if job.file_path else None
+            self._ensure_download_staging_locked(job)
+            job._attempt += 1
+            job._was_paused = False
             job.status = JobStatus.CANCELLED
+            if not job._worker_active:
+                cleanup_attempt(job._staging_root)
         if proc is not None and hasattr(proc, "kill"):
             try:
                 proc.kill()
             except Exception:
                 pass
-        if out_template:
-            for candidate in glob.glob(out_template.replace("%(ext)s", "*")):
-                if published_path and os.path.realpath(candidate) == published_path:
-                    continue
-                if candidate.lower().endswith(_PUBLISHED_SIDECAR_SUFFIXES):
-                    continue
-                try:
-                    os.remove(candidate)
-                except OSError:
-                    pass
         self._persist()
         return True
 
@@ -266,6 +470,8 @@ class JobManager:
             if job.status == JobStatus.PAUSED:
                 return True  # idempotent
             proc = job.process
+            self._ensure_download_staging_locked(job)
+            job._attempt += 1
             job._was_paused = True       # tell runner: skip cleanup
             job.status = JobStatus.PAUSED
         # Outside lock: kill the subprocess if any.
@@ -296,33 +502,30 @@ class JobManager:
                 return False
             if job.status == JobStatus.DOWNLOADING:
                 return True  # idempotent — already running
+            if job._worker_active:
+                raise AttemptUnwindingError("paused attempt is still unwinding")
+            self._ensure_download_staging_locked(job)
+            job._attempt += 1
+            attempt = job._attempt
             job.status = JobStatus.DOWNLOADING
             job._was_paused = False
+            job.error_category = None
+            job.error_message = None
+            job._worker_active = True
             self._inflight += 1
         self._persist()
-
-        def _run():
-            try:
-                target(job)
-                with self._lock:
-                    if job.status == JobStatus.PAUSED and job.file_path:
-                        # Pause raced runner success — runner already wrote a real file.
-                        job.status = JobStatus.DONE
-                        job._was_paused = False
-                    elif job.status not in {JobStatus.ERROR, JobStatus.CANCELLED, JobStatus.PAUSED}:
-                        job.status = JobStatus.DONE
-                self._persist()
-            except Exception as e:
-                with self._lock:
-                    job.status = JobStatus.ERROR
-                    job.error_category = job.error_category or "unknown"
-                    job.error_message = job.error_message or str(e)
-                self._persist()
-            finally:
-                with self._lock:
-                    self._inflight -= 1
-
-        self._executor.submit(_run)
+        try:
+            self._executor.submit(
+                self._run_attempt, job, attempt, target, queued_start=False,
+            )
+        except Exception:
+            with self._lock:
+                job.status = JobStatus.PAUSED
+                job._was_paused = True
+                job._worker_active = False
+                self._inflight -= 1
+            self._persist()
+            raise
         return True
 
     def sweep(self) -> int:

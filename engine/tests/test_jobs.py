@@ -1,6 +1,7 @@
 import os
 import threading
 import time
+from pathlib import Path
 import pytest
 from jobs import JobManager, Job, JobStatus
 
@@ -371,36 +372,42 @@ def test_cancel_from_paused_removes_partial_files_but_preserves_published_file(t
     jm.shutdown()
 
 
-def test_runner_success_during_pause_window_promotes_to_done(tmp_path):
-    """When pause() fires after target() wrote file_path but before _run
-    re-acquires the lock, the post-target promotion should still mark the
-    job DONE. Without this guard the job would be stuck in PAUSED.
+def test_stale_attempt_success_after_pause_does_not_publish(tmp_path):
+    """Pause linearizes before publication, so the captured attempt stays stale.
+
+    A completed yt-dlp result is still private until the manager revalidates and
+    promotes it.  Pausing in that window must preserve staging for resume rather
+    than resurrecting the old attempt as DONE.
     """
-    jm = JobManager(max_workers=1, ttl_seconds=60)
+    from attempt_staging import AttemptOutcome, Promotion
+
+    jm = JobManager(max_workers=1, ttl_seconds=60, store_path=tmp_path / "jobs.json")
+    started = threading.Event()
+    release = threading.Event()
+    final = tmp_path / "published.mp4"
 
     def work(job: Job):
-        # Simulate yt-dlp completing successfully — file_path is set.
-        out = tmp_path / "out.mp4"
-        out.write_bytes(b"ok")
-        job.file_path = str(out)
-        # Now simulate pause() racing in: status flips to PAUSED before
-        # the runner thread re-acquires the lock for the terminal status set.
-        with jm._lock:
-            job.status = JobStatus.PAUSED
-            job._was_paused = True
+        staged = Path(job.out_template.replace("%(ext)s", "mp4"))
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"candidate")
+        started.set()
+        release.wait(5)
+        return AttemptOutcome(
+            updates={"file_path": str(staged), "filename": "published.mp4"},
+            promotions=(Promotion(staged, final),),
+        )
 
     jid = jm.submit(target=work, title="t", url="https://x")
-    # Wait specifically for DONE — under load _run may not have re-acquired
-    # the lock yet so we'd briefly see PAUSED, but the race-promotion path
-    # must converge on DONE.
-    for _ in range(200):
-        if jm.get(jid).status == JobStatus.DONE:
-            break
-        time.sleep(0.02)
+    assert started.wait(2)
+    assert jm.pause(jid) is True
+    release.set()
+    assert _wait_worker_inactive(jm, jid)
 
     j = jm.get(jid)
-    assert j.status == JobStatus.DONE, f"expected DONE, got {j.status}"
-    assert j._was_paused is False
+    assert j.status is JobStatus.PAUSED
+    assert j.file_path is None
+    assert not final.exists()
+    assert Path(j.out_template.replace("%(ext)s", "mp4")).read_bytes() == b"candidate"
     jm.shutdown()
 
 
@@ -460,7 +467,7 @@ def _wait_status(mgr, jid, status, timeout=5.0):
     return False
 
 
-def test_cancel_while_queued_stays_cancelled_and_target_never_runs():
+def test_queued_cancel_initial_download_stays_cancelled_and_target_never_runs():
     mgr = JobManager(max_workers=1)
     gate = threading.Event()
     ran = []
@@ -473,6 +480,241 @@ def test_cancel_while_queued_stays_cancelled_and_target_never_runs():
     time.sleep(0.2)  # let b's worker slot fire and (correctly) no-op
     assert mgr.get(b).status is JobStatus.CANCELLED
     assert ran == []
+
+
+def _wait_worker_inactive(mgr, jid, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not mgr.get(jid)._worker_active:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_queued_cancel_download_resume_never_runs_target(tmp_path):
+    mgr = JobManager(max_workers=1, store_path=tmp_path / "jobs.json")
+    blocker = threading.Event()
+    ran = []
+    first = mgr.submit(target=lambda job: blocker.wait(5), title="first", url="u-first")
+    resumed = Job(
+        id="resume-me", url="u-resume", title="resume", status=JobStatus.PAUSED,
+        out_template=str(tmp_path / "legacy.%(ext)s"),
+    )
+    with mgr._lock:
+        mgr._jobs[resumed.id] = resumed
+
+    assert mgr.resume(resumed.id, target=lambda job: ran.append(job.id)) is True
+    assert mgr.cancel(resumed.id) is True
+    blocker.set()
+    assert _wait_status(mgr, first, JobStatus.DONE)
+    assert _wait_worker_inactive(mgr, resumed.id)
+    assert ran == []
+    assert mgr.get(resumed.id).status is JobStatus.CANCELLED
+    mgr.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_running_cancel_download_rejects_result_error_and_late_progress(tmp_path, raises):
+    from attempt_staging import AttemptOutcome, Promotion
+
+    mgr = JobManager(max_workers=1, store_path=tmp_path / "jobs.json")
+    started = threading.Event()
+    release = threading.Event()
+    final = tmp_path / "published.mp4"
+
+    def target(job):
+        attempt = job._attempt
+        staged = Path(job.out_template.replace("%(ext)s", "mp4"))
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"candidate")
+        started.set()
+        release.wait(5)
+        mgr.update_progress(
+            job.id, job, attempt, downloaded=99, total=100, speed=1.0,
+            eta=1, fragment_index=1, fragment_count=1,
+        )
+        if raises:
+            raise RuntimeError("late failure")
+        return AttemptOutcome(
+            updates={"file_path": str(staged), "filename": "published.mp4"},
+            promotions=(Promotion(staged, final),),
+        )
+
+    jid = mgr.submit(target=target, title="download", url="u")
+    assert started.wait(2)
+    assert mgr.cancel(jid) is True
+    release.set()
+    assert _wait_worker_inactive(mgr, jid)
+
+    job = mgr.get(jid)
+    assert job.status is JobStatus.CANCELLED
+    assert job.file_path is None and job.filename is None
+    assert job.error_category is None and job.error_message is None
+    assert job.downloaded_bytes == 0
+    assert not final.exists()
+    mgr.shutdown(wait=True)
+
+
+def test_stale_attempt_late_process_registration_is_killed(tmp_path):
+    mgr = JobManager(max_workers=1, store_path=tmp_path / "jobs.json")
+    started = threading.Event()
+    release = threading.Event()
+    killed = []
+
+    class Proc:
+        def kill(self):
+            killed.append(True)
+
+    def target(job):
+        attempt = job._attempt
+        started.set()
+        release.wait(5)
+        assert mgr.register_process(job.id, job, attempt, Proc()) is False
+
+    jid = mgr.submit(target=target, title="download", url="u")
+    assert started.wait(2)
+    assert mgr.cancel(jid) is True
+    release.set()
+    assert _wait_worker_inactive(mgr, jid)
+    assert killed == [True]
+    assert mgr.get(jid).process is None
+    mgr.shutdown(wait=True)
+
+
+def test_stale_attempt_target_receives_dispatch_token_not_later_cancel_token(tmp_path):
+    mgr = JobManager(max_workers=1, store_path=tmp_path / "jobs.json")
+    entered = threading.Event()
+    release = threading.Event()
+    observed = []
+
+    def target(job, *, attempt=None):
+        entered.set()
+        release.wait(5)
+        observed.append(attempt)
+
+    jid = mgr.submit(target=target, title="download", url="u")
+    assert entered.wait(2)
+    dispatched = mgr.get(jid)._attempt
+    assert mgr.cancel(jid) is True
+    release.set()
+    assert _wait_worker_inactive(mgr, jid)
+    assert observed == [dispatched]
+    mgr.shutdown(wait=True)
+
+
+def test_stale_attempt_callback_cannot_mutate_dismissed_cancelled_job(tmp_path):
+    mgr = JobManager(max_workers=1, store_path=tmp_path / "jobs.json")
+    started = threading.Event()
+    release = threading.Event()
+    callbacks = []
+
+    def target(job):
+        attempt = job._attempt
+        callbacks.append(lambda: mgr.update_progress(
+            job.id, job, attempt, downloaded=50, total=100, speed=2.0,
+            eta=1, fragment_index=0, fragment_count=0,
+        ))
+        started.set()
+        release.wait(5)
+
+    jid = mgr.submit(target=target, title="download", url="u")
+    assert started.wait(2)
+    assert mgr.cancel(jid) is True
+    assert mgr.dismiss(jid) is True
+    assert callbacks[0]() is False
+    release.set()
+    assert _wait_worker_inactive(mgr, jid)
+    job = mgr.get(jid)
+    assert job.status is JobStatus.CANCELLED and job.dismissed_at is not None
+    assert job.downloaded_bytes == 0
+    mgr.shutdown(wait=True)
+
+
+def test_attempt_unwinding_blocks_resume_and_preserves_part_for_reuse(tmp_path):
+    from jobs import AttemptUnwindingError
+
+    mgr = JobManager(max_workers=1, store_path=tmp_path / "jobs.json")
+    started = threading.Event()
+    release = threading.Event()
+    resumed = threading.Event()
+    observed = {}
+
+    def first_target(job):
+        root = Path(job.out_template).parent
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "download.mp4.part").write_bytes(b"partial")
+        observed["template"] = job.out_template
+        started.set()
+        release.wait(5)
+
+    jid = mgr.submit(target=first_target, title="download", url="u")
+    assert started.wait(2)
+    assert mgr.pause(jid) is True
+    with pytest.raises(AttemptUnwindingError):
+        mgr.resume(jid, target=lambda job: None)
+
+    release.set()
+    assert _wait_worker_inactive(mgr, jid)
+    assert mgr.get(jid).status is JobStatus.PAUSED
+
+    def resumed_target(job):
+        observed["resumed_template"] = job.out_template
+        observed["part_exists"] = (Path(job.out_template).parent / "download.mp4.part").exists()
+        resumed.set()
+
+    assert mgr.resume(jid, target=resumed_target) is True
+    assert resumed.wait(2)
+    assert _wait_status(mgr, jid, JobStatus.DONE)
+    assert observed["resumed_template"] == observed["template"]
+    assert observed["part_exists"] is True
+    mgr.shutdown(wait=True)
+
+
+def test_stale_attempt_callback_cannot_touch_new_resume_attempt(tmp_path):
+    mgr = JobManager(max_workers=1, store_path=tmp_path / "jobs.json")
+    started = threading.Event()
+    release = threading.Event()
+    callbacks = []
+    new_gate = threading.Event()
+
+    def first_target(job):
+        old_attempt = job._attempt
+        callbacks.append(lambda: mgr.update_progress(
+            job.id, job, old_attempt, downloaded=77, total=100, speed=1.0,
+            eta=1, fragment_index=0, fragment_count=0,
+        ))
+        started.set()
+        release.wait(5)
+
+    jid = mgr.submit(target=first_target, title="download", url="u")
+    assert started.wait(2)
+    assert mgr.pause(jid) is True
+    release.set()
+    assert _wait_worker_inactive(mgr, jid)
+    assert mgr.resume(jid, target=lambda job: new_gate.wait(5)) is True
+    assert _wait_status(mgr, jid, JobStatus.DOWNLOADING)
+
+    assert callbacks[0]() is False
+    assert mgr.get(jid).downloaded_bytes == 0
+    new_gate.set()
+    assert _wait_status(mgr, jid, JobStatus.DONE)
+    mgr.shutdown(wait=True)
+
+
+def test_attempt_runtime_fields_are_not_persisted(tmp_path):
+    import json
+
+    store = tmp_path / "jobs.json"
+    mgr = JobManager(max_workers=1, store_path=store)
+    gate = threading.Event()
+    jid = mgr.submit(target=lambda job: gate.wait(5), title="download", url="u")
+    assert _wait_status(mgr, jid, JobStatus.DOWNLOADING)
+    payload = json.loads(store.read_text())["jobs"][0]
+    assert "_attempt" not in payload
+    assert "_worker_active" not in payload
+    assert "_staging_root" not in payload
+    gate.set()
+    mgr.shutdown(wait=True)
 
 
 def test_pause_while_queued_stays_paused_until_resumed():

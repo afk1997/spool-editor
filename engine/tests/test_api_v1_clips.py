@@ -8,6 +8,7 @@ discipline the existing endpoint tests use for downloads/whisper.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -128,6 +129,60 @@ def test_cut_creates_clip(client):
     # the Clip record landed on disk
     cr = app.extensions["trove.clip_runner"]
     assert cr.load_clip_meta(done["clip_id"])["start"] == 2.0
+
+
+def test_attempt_staging_cancelled_cut_never_replaces_published_clip(
+    client, monkeypatch,
+):
+    import clip_runner as cr_module
+
+    app, c = client
+    _seed_source(app)
+    entered = threading.Event()
+    release = threading.Event()
+    observed = {}
+
+    def blocked_cut(_src, _start, _end, out, **_kwargs):
+        observed["out"] = out
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).write_bytes(b"candidate")
+        entered.set()
+        release.wait(5)
+        return out
+
+    monkeypatch.setattr(cr_module.cutter, "cut", blocked_cut)
+    response = c.post("/api/v1/sources/src1/cut", json={"start": 2.0, "end": 12.0})
+    body = response.get_json()
+    assert entered.wait(2)
+    assert "/.attempts/clip/" in observed["out"]
+    assert c.post(f"/api/v1/clip-jobs/{body['id']}/cancel").status_code == 200
+    release.set()
+
+    manager = app.extensions["trove.clips"]
+    deadline = time.time() + 5
+    while manager.get(body["id"])._worker_active and time.time() < deadline:
+        time.sleep(0.01)
+    job = manager.get(body["id"])
+    assert job.status.value == "cancelled"
+    assert job.result == {}
+    published = app.extensions["trove.clip_runner"].clip_dir(body["clip_id"])
+    assert not (published / "meta.json").exists()
+    assert not (published / "clip.mp4").exists()
+
+
+def test_attempt_staging_pipeline_promotes_final_paths_and_removes_private_tree(client):
+    app, c = client
+    _seed_source(app)
+    response = c.post(
+        "/api/v1/sources/src1/render",
+        json={"start": 1.0, "end": 9.0, "aspect": "9:16", "style": "opus"},
+    )
+    done = _await(c, response.get_json()["id"])
+
+    assert "/.attempts/" not in done["result"]["output_path"]
+    assert Path(done["result"]["output_path"]).read_bytes() == b"O"
+    private = app.extensions["trove.download_dir"] / ".attempts" / "clip" / done["id"]
+    assert not private.exists()
 
 
 @pytest.mark.parametrize("body", [{"start": 5, "end": 5}, {"start": 9, "end": 3}, {"end": 3}, {"start": -1, "end": 4}])

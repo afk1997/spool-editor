@@ -32,6 +32,7 @@ import uuid
 from pathlib import Path
 
 import transcript_io
+from attempt_staging import AttemptOutcome, apply_updates, tree_promotions
 from clip import captioner, cutter, exporter, face_track, moments, reframe, signals
 
 _log = logging.getLogger(__name__)
@@ -96,7 +97,7 @@ def _kept_spans(words_path, start: float, end: float) -> list:
 
 class ClipRunner:
     def __init__(self, *, download_dir, job_manager, clip_manager, settings_store=None,
-                 brand_kits_store=None):
+                 brand_kits_store=None, staging_output_root=None):
         self.download_dir = Path(download_dir)
         self.job_manager = job_manager
         self.clip_manager = clip_manager
@@ -107,6 +108,9 @@ class ClipRunner:
         # into its caption look at produce/render time (so a recipe's brand kit actually burns in,
         # the same path a manual kit-apply uses — the golden rule).
         self.brand_kits = brand_kits_store
+        self.staging_output_root = (
+            Path(staging_output_root) if staging_output_root is not None else None
+        )
 
     def _apply_brand_kit(self, params: dict) -> dict:
         """Fold a referenced brand kit's look into the caption params so a ``brand_kit_id`` (carried
@@ -156,22 +160,30 @@ class ClipRunner:
             return None, None
         return fp, os.path.splitext(fp)[0] + ".words.json"
 
-    def write_clip_meta(self, clip_id: str, *, source_id: str, start: float, end: float) -> dict:
-        d = self.clip_dir(clip_id)
+    def write_clip_meta(
+        self, clip_id: str, *, source_id: str, start: float, end: float,
+        output_root: Path | None = None,
+    ) -> dict:
+        d = (Path(output_root) / clip_id) if output_root is not None else self.clip_dir(clip_id)
         d.mkdir(parents=True, exist_ok=True)
         meta = {"clip_id": clip_id, "source_id": source_id,
                 "start": float(start), "end": float(end), "created_at": time.time()}
         (d / "meta.json").write_text(json.dumps(meta))
         return meta
 
-    def load_clip_meta(self, clip_id: str) -> dict | None:
-        p = self.clip_dir(clip_id) / "meta.json"
-        if not p.exists():
-            return None
-        try:
-            return json.loads(p.read_text())
-        except (OSError, json.JSONDecodeError):
-            return None
+    def load_clip_meta(self, clip_id: str, output_root: Path | None = None) -> dict | None:
+        candidates = []
+        if output_root is not None:
+            candidates.append(Path(output_root) / clip_id / "meta.json")
+        candidates.append(self.clip_dir(clip_id) / "meta.json")
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                return json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+        return None
 
     def diarization_from_words(self, words_path: str | None) -> list[dict]:
         """Audio turns ``[{start, end, speaker}]`` from a transcript's speaker'd segments —
@@ -192,59 +204,108 @@ class ClipRunner:
 
     # ----- hooks / helpers ----------------------------------------------
 
-    @staticmethod
-    def _hooks(job) -> dict:
+    def _attempt_root(self, job) -> Path | None:
+        root = getattr(job, "_staging_root", "") or self.staging_output_root
+        return Path(root) if root else None
+
+    def _hooks(self, job, attempt: int | None = None) -> dict:
         """Cancel + live-process hooks handed to each ffmpeg step so the manager's
         cancel() can kill the running subprocess."""
+        staging = self._attempt_root(job)
+        if staging is not None and attempt is not None:
+            return {
+                "cancel_check": lambda: self.clip_manager.attempt_cancelled(
+                    job.id, job, attempt,
+                ),
+                "register_proc": lambda process: self.clip_manager.register_process(
+                    job.id, job, attempt, process,
+                ),
+            }
         return {
             "cancel_check": lambda: job._cancel_flag,
-            "register_proc": lambda p: setattr(job, "process_handle", p),
+            "register_proc": lambda process: setattr(job, "process_handle", process),
         }
 
-    @staticmethod
-    def _cancellable(job, body) -> None:
+    def _cancellable(self, job, body, attempt: int | None = None) -> bool:
         """Run ``body``; treat a cancelled ffmpeg as a clean abort so the job keeps the
         CANCELLED status the manager already set (never surfaces as an error)."""
         try:
             body()
+            return True
         except RuntimeError as e:
-            if str(e) == "cancelled" or job._cancel_flag:
-                return
+            cancelled = (
+                self.clip_manager.attempt_cancelled(job.id, job, attempt)
+                if self._attempt_root(job) is not None and attempt is not None
+                else job._cancel_flag
+            )
+            if str(e) == "cancelled" or cancelled:
+                return False
             raise
 
-    def _stage_input(self, clip_dir: Path, prefer: tuple[str, ...]) -> str:
+    def _stage_input(
+        self, staged_dir: Path, published_dir: Path, prefer: tuple[str, ...],
+    ) -> str:
         """The latest video artifact to feed the next step — first existing of ``prefer``,
         else the last (the engine raises a clear error if it's genuinely missing)."""
         for name in prefer:
-            if (clip_dir / name).exists():
-                return str(clip_dir / name)
-        return str(clip_dir / prefer[-1])
+            for directory in (staged_dir, published_dir):
+                if (directory / name).exists():
+                    return str(directory / name)
+        return str(staged_dir / prefer[-1])
+
+    def _progress(self, job, pct: int, *, stage: str, attempt: int | None = None) -> None:
+        root = self._attempt_root(job)
+        if root is not None:
+            self.clip_manager.update_progress(
+                job.id, job, job._attempt if attempt is None else attempt, pct, stage=stage,
+            )
+        else:
+            self.clip_manager.update_progress(job.id, pct, stage=stage)
+
+    def _target_outcome(self, job, updates: dict) -> AttemptOutcome | None:
+        root = self._attempt_root(job)
+        if root is None:
+            apply_updates(job, updates)
+            return None
+        return AttemptOutcome(
+            updates=updates,
+            promotions=tree_promotions(root, self.download_dir / "clips"),
+        )
 
     # ----- per-stage engine work (no staging; reused by targets + pipeline) ----
 
-    def _do_cut(self, job, *, source_id: str, clip_id: str, params: dict) -> str:
+    def _do_cut(
+        self, job, *, source_id: str, clip_id: str, params: dict,
+        output_root: Path | None = None, attempt: int | None = None,
+    ) -> str:
         media_path, words_path = self.source_paths(source_id)
         if not media_path:
             raise ValueError(f"source {source_id!r} has no downloaded media to clip")
         start, end = float(params["start"]), float(params["end"])
-        job.clip_id = clip_id
-        self.write_clip_meta(clip_id, source_id=source_id, start=start, end=end)
-        out = str(self.clip_dir(clip_id) / "clip.mp4")
+        self.write_clip_meta(
+            clip_id, source_id=source_id, start=start, end=end,
+            output_root=output_root,
+        )
+        d = (Path(output_root) / clip_id) if output_root is not None else self.clip_dir(clip_id)
+        out = str(d / "clip.mp4")
         # Transcript-driven: if words were deleted in this window, ripple-cut them out;
         # otherwise the lossless single-range stream-copy.
         spans = _kept_spans(words_path, start, end)
         if len(spans) <= 1:
-            cutter.cut(media_path, start, end, out, **self._hooks(job))
+            cutter.cut(media_path, start, end, out, **self._hooks(job, attempt))
         else:
-            cutter.cut_spans(media_path, spans, out, **self._hooks(job))
+            cutter.cut_spans(media_path, spans, out, **self._hooks(job, attempt))
         return out
 
-    def _do_reframe(self, job, *, clip_id: str, params: dict) -> dict:
-        d = self.clip_dir(clip_id)
-        meta = self.load_clip_meta(clip_id) or {}
-        if meta.get("source_id"):
-            job.source_id = meta["source_id"]
-        clip_path = str(d / "clip.mp4")
+    def _do_reframe(
+        self, job, *, clip_id: str, params: dict,
+        output_root: Path | None = None, attempt: int | None = None,
+    ) -> dict:
+        published = self.clip_dir(clip_id)
+        d = (Path(output_root) / clip_id) if output_root is not None else published
+        d.mkdir(parents=True, exist_ok=True)
+        meta = self.load_clip_meta(clip_id, output_root) or {}
+        clip_path = self._stage_input(d, published, ("clip.mp4",))
 
         rois = params.get("rois")
         if rois:
@@ -265,7 +326,7 @@ class ClipRunner:
             track = reframe.speaker_track(
                 clip_path, roi_left=roi_l, roi_right=roi_r, diarization=diar,
                 min_dwell=float(params.get("min_dwell", 1.0)), smoothing=params.get("smoothing"),
-                work_dir=str(d), **self._hooks(job),
+                work_dir=str(d), **self._hooks(job, attempt),
             )
         # Editor preview: a fast low-res reframe to preview.mp4 that does NOT clobber the baked
         # reframed.mp4 / track.json (so the real render's artifacts survive a preview).
@@ -289,7 +350,8 @@ class ClipRunner:
                 # the cut clip's timeline (it starts at 0) or the tie-break never overlaps a shot.
                 clip_diar = face_track.rebase_diarization(diar, float(meta.get("start", 0) or 0), dur)
                 ft = face_track.track(clip_path, dur, src_w, src_h, out_w, out_h,
-                                      cancel_check=lambda: job._cancel_flag, diarization=clip_diar)
+                                      cancel_check=self._hooks(job, attempt)["cancel_check"],
+                                      diarization=clip_diar)
                 face_timeline = ft or None
             except Exception:
                 face_timeline = None
@@ -298,14 +360,23 @@ class ClipRunner:
                 (d / "track.json").write_text(json.dumps(track))
         reframe.render(clip_path, track, aspect=params.get("aspect", "9:16"),
                        mode=mode, crop_margin=float(params.get("crop_margin", 0.0)),
-                       out_path=out, face_timeline=face_timeline, preview=preview, **self._hooks(job))
-        return {"reframed_path": out, "track": track, "preview": preview}
+                       out_path=out, face_timeline=face_timeline, preview=preview,
+                       **self._hooks(job, attempt))
+        return {
+            "reframed_path": out,
+            "track": track,
+            "preview": preview,
+            "source_id": meta.get("source_id"),
+        }
 
-    def _do_caption(self, job, *, clip_id: str, params: dict) -> dict:
-        d = self.clip_dir(clip_id)
-        meta = self.load_clip_meta(clip_id) or {}
-        if meta.get("source_id"):
-            job.source_id = meta["source_id"]
+    def _do_caption(
+        self, job, *, clip_id: str, params: dict,
+        output_root: Path | None = None, attempt: int | None = None,
+    ) -> dict:
+        published = self.clip_dir(clip_id)
+        d = (Path(output_root) / clip_id) if output_root is not None else published
+        d.mkdir(parents=True, exist_ok=True)
+        meta = self.load_clip_meta(clip_id, output_root) or {}
         # Resolve a referenced brand kit into the caption look (style/overrides/watermark/
         # lower-third) before building the caption — so produce/render apply it like a manual kit.
         params = self._apply_brand_kit(params)
@@ -320,17 +391,25 @@ class ClipRunner:
                            emphasis=bool(params.get("emphasis")),
                            balance_lines=bool(params.get("balance_lines")),
                            out_ass_path=ass)
-        video_in = self._stage_input(d, ("reframed.mp4", "clip.mp4"))
+        video_in = self._stage_input(d, published, ("reframed.mp4", "clip.mp4"))
         out = str(d / "captioned.mp4")
-        captioner.burn(video_in, ass, out, **self._hooks(job))
-        return {"ass_path": ass, "captioned_path": out}
+        captioner.burn(video_in, ass, out, **self._hooks(job, attempt))
+        return {
+            "ass_path": ass,
+            "captioned_path": out,
+            "source_id": meta.get("source_id"),
+        }
 
-    def _do_export(self, job, *, clip_id: str, render_id: str, params: dict) -> str:
-        d = self.clip_dir(clip_id)
-        meta = self.load_clip_meta(clip_id) or {}
-        if meta.get("source_id"):
-            job.source_id = meta["source_id"]
-        video_in = self._stage_input(d, ("captioned.mp4", "reframed.mp4", "clip.mp4"))
+    def _do_export(
+        self, job, *, clip_id: str, render_id: str, params: dict,
+        output_root: Path | None = None, attempt: int | None = None,
+    ) -> dict:
+        published = self.clip_dir(clip_id)
+        d = (Path(output_root) / clip_id) if output_root is not None else published
+        meta = self.load_clip_meta(clip_id, output_root) or {}
+        video_in = self._stage_input(
+            d, published, ("captioned.mp4", "reframed.mp4", "clip.mp4"),
+        )
         renders = d / "renders"
         renders.mkdir(parents=True, exist_ok=True)
         out = str(renders / f"{render_id}.mp4")
@@ -340,13 +419,16 @@ class ClipRunner:
         if fast is None:
             fast = self._setting("fast_default", True)
         preset = params.get("preset") or self._setting("default_preset", "tiktok")
-        exporter.export(video_in, preset=preset, fast=bool(fast), out_path=out, **self._hooks(job))
-        return out
+        exporter.export(
+            video_in, preset=preset, fast=bool(fast), out_path=out,
+            **self._hooks(job, attempt),
+        )
+        return {"output_path": out, "source_id": meta.get("source_id")}
 
     # ----- work-closure builders (one per ClipJob kind) -----------------
 
     def find_moments_target(self, *, source_id: str, params: dict):
-        def _work(job):
+        def _work(job, *, attempt=None):
             media_path, words_path = self.source_paths(source_id)
             cands = moments.find_moments(
                 words_path,
@@ -369,48 +451,135 @@ class ClipRunner:
             # result so the chosen weighting is inspectable (no silent magic — spec §6 glass-box).
             cands = moments.rank(cands, weights=params.get("weights"))
             weights = cands[0]["weights"] if cands else moments._normalized_weights(params.get("weights"))
-            job.result = {"candidates": cands, "count": len(cands),
-                          "mode": params.get("mode", "funny"), "weights": weights}
+            return self._target_outcome(job, {
+                "result": {
+                    "candidates": cands,
+                    "count": len(cands),
+                    "mode": params.get("mode", "funny"),
+                    "weights": weights,
+                },
+            })
         return _work
 
     def cut_target(self, *, source_id: str, clip_id: str, params: dict):
-        def _work(job):
+        def _work(job, *, attempt=None):
+            root = self._attempt_root(job)
+            if root is not None and attempt is None:
+                attempt = job._attempt
+            result = {}
+
             def body():
-                out = self._do_cut(job, source_id=source_id, clip_id=clip_id, params=params)
-                job.result = {"clip_id": clip_id, "clip_path": out,
-                              "start": float(params["start"]), "end": float(params["end"])}
-            self._cancellable(job, body)
+                out = self._do_cut(
+                    job, source_id=source_id, clip_id=clip_id, params=params,
+                    output_root=root, attempt=attempt,
+                )
+                result.update({
+                    "clip_id": clip_id,
+                    "clip_path": out,
+                    "start": float(params["start"]),
+                    "end": float(params["end"]),
+                })
+
+            if not self._cancellable(job, body, attempt):
+                return None
+            return self._target_outcome(job, {
+                "clip_id": clip_id,
+                "source_id": source_id,
+                "result": result,
+            })
         return _work
 
     def reframe_target(self, *, clip_id: str, params: dict):
-        def _work(job):
+        def _work(job, *, attempt=None):
+            root = self._attempt_root(job)
+            if root is not None and attempt is None:
+                attempt = job._attempt
+            result = {}
+            source_id = None
+
             def body():
-                r = self._do_reframe(job, clip_id=clip_id, params=params)
+                nonlocal source_id
+                r = self._do_reframe(
+                    job, clip_id=clip_id, params=params,
+                    output_root=root, attempt=attempt,
+                )
                 track = r["track"]
-                job.result = {"clip_id": clip_id, "reframed_path": r["reframed_path"],
-                              "aspect": params.get("aspect", "9:16"),
-                              "mode": params.get("mode", "pan"),
-                              "source": track.get("source"), "segments": track.get("segments", [])}
-            self._cancellable(job, body)
+                source_id = r.get("source_id")
+                result.update({
+                    "clip_id": clip_id,
+                    "reframed_path": r["reframed_path"],
+                    "aspect": params.get("aspect", "9:16"),
+                    "mode": params.get("mode", "pan"),
+                    "source": track.get("source"),
+                    "segments": track.get("segments", []),
+                })
+
+            if not self._cancellable(job, body, attempt):
+                return None
+            updates = {"clip_id": clip_id, "result": result}
+            if source_id:
+                updates["source_id"] = source_id
+            return self._target_outcome(job, updates)
         return _work
 
     def caption_target(self, *, clip_id: str, params: dict):
-        def _work(job):
+        def _work(job, *, attempt=None):
+            root = self._attempt_root(job)
+            if root is not None and attempt is None:
+                attempt = job._attempt
+            result = {}
+            source_id = None
+
             def body():
-                r = self._do_caption(job, clip_id=clip_id, params=params)
-                job.result = {"clip_id": clip_id, "ass_path": r["ass_path"],
-                              "captioned_path": r["captioned_path"],
-                              "style": params.get("style", "opus")}
-            self._cancellable(job, body)
+                nonlocal source_id
+                r = self._do_caption(
+                    job, clip_id=clip_id, params=params,
+                    output_root=root, attempt=attempt,
+                )
+                source_id = r.get("source_id")
+                result.update({
+                    "clip_id": clip_id,
+                    "ass_path": r["ass_path"],
+                    "captioned_path": r["captioned_path"],
+                    "style": params.get("style", "opus"),
+                })
+
+            if not self._cancellable(job, body, attempt):
+                return None
+            updates = {"clip_id": clip_id, "result": result}
+            if source_id:
+                updates["source_id"] = source_id
+            return self._target_outcome(job, updates)
         return _work
 
     def export_target(self, *, clip_id: str, render_id: str, params: dict):
-        def _work(job):
+        def _work(job, *, attempt=None):
+            root = self._attempt_root(job)
+            if root is not None and attempt is None:
+                attempt = job._attempt
+            result = {}
+            source_id = None
+
             def body():
-                out = self._do_export(job, clip_id=clip_id, render_id=render_id, params=params)
-                job.result = {"clip_id": clip_id, "render_id": render_id, "output_path": out,
-                              "preset": params.get("preset", "tiktok")}
-            self._cancellable(job, body)
+                nonlocal source_id
+                exported = self._do_export(
+                    job, clip_id=clip_id, render_id=render_id, params=params,
+                    output_root=root, attempt=attempt,
+                )
+                source_id = exported.get("source_id")
+                result.update({
+                    "clip_id": clip_id,
+                    "render_id": render_id,
+                    "output_path": exported["output_path"],
+                    "preset": params.get("preset", "tiktok"),
+                })
+
+            if not self._cancellable(job, body, attempt):
+                return None
+            updates = {"clip_id": clip_id, "result": result}
+            if source_id:
+                updates["source_id"] = source_id
+            return self._target_outcome(job, updates)
         return _work
 
     def produce_target(self, *, source_id: str, recipe: dict):
@@ -420,14 +589,17 @@ class ClipRunner:
         aspect/reframe/caption/platform/fast), each tagged ``auto`` + ``recipe_id`` (+ ``watch_id``)
         for the review queue. Reuses find_moments + moments.rank + pipeline_target — no new engine.
         The produced clips are NOT published (Phase 4) — they land for review (honest gate)."""
-        def _work(job):
+        def _work(job, *, attempt=None):
+            root = self._attempt_root(job)
+            if root is not None and attempt is None:
+                attempt = job._attempt
             media_path, words_path = self.source_paths(source_id)
             count = int(recipe.get("count") or 5)
             # Over-fetch a candidate POOL larger than `count` so the recipe's glass-box ranking
             # weights actually SELECT the top moments — otherwise rank() would only reorder the exact
             # `count` the model returns, and the weights would have no selective effect.
             pool = max(count + 4, count * 2)
-            self.clip_manager.update_progress(job.id, 10, stage="find")
+            self._progress(job, 10, stage="find", attempt=attempt)
             cands = moments.find_moments(words_path, mode=recipe.get("content_mode", "funny"),
                                          count=pool, source_id=source_id)
             try:
@@ -435,7 +607,7 @@ class ClipRunner:
                 signals.annotate(cands, words=words, media_path=media_path)
             except Exception:
                 pass  # signals are additive glass-box extras; never fail production over them
-            self.clip_manager.update_progress(job.id, 40, stage="rank")
+            self._progress(job, 40, stage="rank", attempt=attempt)
             ranked = moments.rank(cands, weights=recipe.get("weights"))[:count]
             if not ranked:
                 # No usable moments → submit nothing. Record the empty result (count=0, clip_jobs=[])
@@ -444,7 +616,7 @@ class ClipRunner:
                 # the no-op isn't silent.
                 _log.warning("produce for source %s yielded zero moments (recipe %s) — nothing to render",
                              source_id, recipe.get("id"))
-            submitted = []
+            child_specs = []
             for c in ranked:
                 clip_id, render_id = uuid.uuid4().hex[:10], uuid.uuid4().hex[:10]
                 params = {"start": c["start"], "end": c["end"],
@@ -457,41 +629,97 @@ class ClipRunner:
                     params["brand_kit_id"] = recipe["brand_kit_id"]   # the kit burns in at the caption step
                 if recipe.get("watch_id"):
                     params["watch_id"] = recipe["watch_id"]
-                jid = self.clip_manager.submit(
-                    kind="pipeline", source_id=source_id, clip_id=clip_id, params=params,
-                    target=self.pipeline_target(source_id=source_id, clip_id=clip_id,
-                                                render_id=render_id, params=params))
-                submitted.append(jid)
-            job.result = {"recipe_id": recipe.get("id"), "count": len(submitted),
-                          "clip_jobs": submitted, "candidates": ranked}
+                child_specs.append({
+                    "kind": "pipeline",
+                    "source_id": source_id,
+                    "clip_id": clip_id,
+                    "params": params,
+                    "target": self.pipeline_target(
+                        source_id=source_id,
+                        clip_id=clip_id,
+                        render_id=render_id,
+                        params=params,
+                    ),
+                })
+
+            if root is not None:
+                submitted = self.clip_manager.submit_children_if_current(
+                    job, attempt, child_specs,
+                )
+            else:
+                submitted = [
+                    self.clip_manager.submit(**spec)
+                    for spec in child_specs
+                ]
+            return self._target_outcome(job, {
+                "result": {
+                    "recipe_id": recipe.get("id"),
+                    "count": len(submitted),
+                    "clip_jobs": submitted,
+                    "candidates": ranked,
+                },
+            })
         return _work
 
     def pipeline_target(self, *, source_id: str, clip_id: str, render_id: str, params: dict):
         """One-shot ingest→cut→reframe→caption→export, staged for progress (spec §4
         ``render.pipeline``). The API caller supplies all params up front; the MCP layer
         adds elicitation pauses on top of this same chain (next task)."""
-        def _work(job):
+        def _work(job, *, attempt=None):
+            root = self._attempt_root(job)
+            if root is not None and attempt is None:
+                attempt = job._attempt
+            result = {}
+
             def body():
-                cm = self.clip_manager
                 start, end = float(params.get("start", 0.0)), float(params.get("end", 0.0))
-                cm.update_progress(job.id, 5, stage="cut")
-                self._do_cut(job, source_id=source_id, clip_id=clip_id, params=params)
-                cm.update_progress(job.id, 30, stage="reframe")
-                rf = self._do_reframe(job, clip_id=clip_id, params=params)
+                self._progress(job, 5, stage="cut", attempt=attempt)
+                self._do_cut(
+                    job, source_id=source_id, clip_id=clip_id, params=params,
+                    output_root=root, attempt=attempt,
+                )
+                self._progress(job, 30, stage="reframe", attempt=attempt)
+                rf = self._do_reframe(
+                    job, clip_id=clip_id, params=params,
+                    output_root=root, attempt=attempt,
+                )
                 # "Make clips" = cut + auto-reframe, then STOP — the clip lands ready to review
                 # (reframed.mp4 + its window for the editor timeline); the user renders later.
                 if params.get("stop_after") == "reframe":
-                    job.result = {"clip_id": clip_id, "reframed_path": rf["reframed_path"],
-                                  "aspect": params.get("aspect", "9:16"), "start": start, "end": end}
+                    result.update({
+                        "clip_id": clip_id,
+                        "reframed_path": rf["reframed_path"],
+                        "aspect": params.get("aspect", "9:16"),
+                        "start": start,
+                        "end": end,
+                    })
                     return
-                cm.update_progress(job.id, 65, stage="caption")
-                self._do_caption(job, clip_id=clip_id, params=params)
-                cm.update_progress(job.id, 90, stage="export")
-                out = self._do_export(job, clip_id=clip_id, render_id=render_id, params=params)
-                job.result = {"clip_id": clip_id, "render_id": render_id, "output_path": out,
-                              "aspect": params.get("aspect", "9:16"),
-                              "preset": params.get("preset", "tiktok"),
-                              "style": params.get("style", "opus"),
-                              "start": start, "end": end}
-            self._cancellable(job, body)
+                self._progress(job, 65, stage="caption", attempt=attempt)
+                self._do_caption(
+                    job, clip_id=clip_id, params=params,
+                    output_root=root, attempt=attempt,
+                )
+                self._progress(job, 90, stage="export", attempt=attempt)
+                exported = self._do_export(
+                    job, clip_id=clip_id, render_id=render_id, params=params,
+                    output_root=root, attempt=attempt,
+                )
+                result.update({
+                    "clip_id": clip_id,
+                    "render_id": render_id,
+                    "output_path": exported["output_path"],
+                    "aspect": params.get("aspect", "9:16"),
+                    "preset": params.get("preset", "tiktok"),
+                    "style": params.get("style", "opus"),
+                    "start": start,
+                    "end": end,
+                })
+
+            if not self._cancellable(job, body, attempt):
+                return None
+            return self._target_outcome(job, {
+                "clip_id": clip_id,
+                "source_id": source_id,
+                "result": result,
+            })
         return _work
