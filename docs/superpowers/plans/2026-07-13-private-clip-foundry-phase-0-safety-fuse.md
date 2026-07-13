@@ -590,6 +590,7 @@ This slice has three independently revertible commits: visible product truth, pr
 **Files:**
 
 - Create: `apps/studio/test/product-truth.test.tsx`
+- Modify: `apps/studio/test/context-mutations.test.tsx`
 - Modify: `apps/studio/src/components/spool/shell.tsx`
 - Modify: `apps/studio/src/components/spool/overlays.tsx`
 - Modify: `apps/studio/src/components/spool/agent.tsx`
@@ -648,7 +649,7 @@ pnpm --filter @spool/studio exec vitest run test/product-truth.test.tsx
 pnpm --filter @spool/studio test
 pnpm --filter @spool/studio typecheck
 pnpm --filter @spool/studio lint
-git add apps/studio/test/product-truth.test.tsx \
+git add apps/studio/test/product-truth.test.tsx apps/studio/test/context-mutations.test.tsx \
   apps/studio/src/components/spool/shell.tsx \
   apps/studio/src/components/spool/overlays.tsx \
   apps/studio/src/components/spool/agent.tsx \
