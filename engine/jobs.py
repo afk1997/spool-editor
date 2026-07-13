@@ -87,9 +87,12 @@ class JobManager:
         self.max_workers = max_workers
         self.ttl_seconds = ttl_seconds
         self._jobs: dict[str, Job] = {}
-        # RLock: cancel() persists while already holding the lock, and _persist itself
-        # takes the lock to snapshot — reentrancy keeps that legal.
+        # Lock order is persistence mutex -> state lock. Lifecycle callers always
+        # release the state lock before entering _persist(), so concurrent writes
+        # cannot deadlock or replace a newer snapshot with an older one.
         self._lock = threading.RLock()
+        self._persist_lock = threading.Lock()
+        self._persist_dirty = False
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._inflight = 0
         self._queue_size = queue_size
@@ -108,19 +111,26 @@ class JobManager:
                 job.status = JobStatus.PAUSED
             self._jobs[jid] = job
 
-    def _persist(self) -> None:
+    def _persist(self, *, only_if_dirty: bool = False) -> bool:
         if self._store_path is None:
-            return
-        try:
-            from jobs_store import persist_atomic
-            with self._lock:
-                snapshot = dict(self._jobs)   # never serialize the live dict unlocked
-            persist_atomic(snapshot, self._store_path)
-        except Exception:
-            # Persistence failure shouldn't crash a download — but a dropped terminal
-            # write IS data loss across restart, so say so instead of swallowing.
-            logging.getLogger(__name__).warning(
-                "job-store persist failed for %s", self._store_path, exc_info=True)
+            return True
+        with self._persist_lock:
+            if only_if_dirty and not self._persist_dirty:
+                return True
+            self._persist_dirty = True
+            try:
+                from jobs_store import persist_atomic
+                with self._lock:
+                    snapshot = dict(self._jobs)
+                persist_atomic(snapshot, self._store_path)
+            except Exception:
+                # A failed write stays dirty so an idempotent dismiss or sweep can
+                # retry the latest full snapshot without crashing lifecycle work.
+                logging.getLogger(__name__).warning(
+                    "job-store persist failed for %s", self._store_path, exc_info=True)
+                return False
+            self._persist_dirty = False
+            return True
 
     def submit(
         self,
@@ -238,8 +248,7 @@ class JobManager:
             if job.dismissed_at is None:
                 job.dismissed_at = _utc_now_rfc3339()
                 changed = True
-        if changed:
-            self._persist()
+        self._persist(only_if_dirty=not changed)
         return True
 
     def pause(self, job_id: str) -> bool:
@@ -329,8 +338,7 @@ class JobManager:
                     continue
                 j.dismissed_at = dismissed_at
                 changed += 1
-        if changed:
-            self._persist()
+        self._persist(only_if_dirty=not changed)
         return changed
 
     def start_sweeper(

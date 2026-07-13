@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import enum
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -80,7 +81,11 @@ class ClipJobManager:
         self.max_workers = max_workers
         self.ttl_seconds = ttl_seconds
         self._jobs: dict[str, ClipJob] = {}
+        # _persist() takes the persistence mutex before this state lock.
+        # Lifecycle callers release the state lock before entering persistence.
         self._lock = threading.Lock()
+        self._persist_lock = threading.Lock()
+        self._persist_dirty = False
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._store_path = Path(store_path) if store_path else None
         if self._store_path is not None:
@@ -124,37 +129,45 @@ class ClipJobManager:
             except (KeyError, ValueError):
                 continue
 
-    def _persist(self) -> None:
+    def _persist(self, *, only_if_dirty: bool = False) -> bool:
         if self._store_path is None:
-            return
-        try:
-            with self._lock:
-                payload = {
-                    "schema_version": 1,
-                    "jobs": {
-                        # Explicit getattr allowlist — NOT dataclasses.asdict, which
-                        # deep-copies every field and raises TypeError on a live Popen
-                        # in process_handle, silently dropping this persist (e.g. the
-                        # CANCELLED write while ffmpeg is still running).
-                        jid: {**{k: getattr(j, k) for k in _PERSISTENT_FIELDS if k != "status"},
-                              "status": j.status.value}
-                        for jid, j in self._jobs.items()
-                    },
-                }
-            self._store_path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(prefix=".clip.", dir=str(self._store_path.parent))
+            return True
+        with self._persist_lock:
             try:
-                with os.fdopen(fd, "w") as f:
-                    json.dump(payload, f, indent=2)
-                os.replace(tmp, self._store_path)
-            except Exception:
+                if only_if_dirty and not self._persist_dirty:
+                    return True
+                self._persist_dirty = True
+                with self._lock:
+                    payload = {
+                        "schema_version": 1,
+                        "jobs": {
+                            # Explicit getattr allowlist — NOT dataclasses.asdict, which
+                            # deep-copies every field and raises TypeError on a live Popen
+                            # in process_handle, silently dropping this persist (e.g. the
+                            # CANCELLED write while ffmpeg is still running).
+                            jid: {**{k: getattr(j, k) for k in _PERSISTENT_FIELDS if k != "status"},
+                                  "status": j.status.value}
+                            for jid, j in self._jobs.items()
+                        },
+                    }
+                self._store_path.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(prefix=".clip.", dir=str(self._store_path.parent))
                 try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                raise
-        except Exception:
-            pass  # persistence failure must never crash a clip job
+                    with os.fdopen(fd, "w") as f:
+                        json.dump(payload, f, indent=2)
+                    os.replace(tmp, self._store_path)
+                except Exception:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    raise
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "clip-store persist failed for %s", self._store_path, exc_info=True)
+                return False
+            self._persist_dirty = False
+            return True
 
     # ----- lifecycle -----------------------------------------------------
 
@@ -223,8 +236,7 @@ class ClipJobManager:
             if j.dismissed_at is None:
                 j.dismissed_at = _utc_now_rfc3339()
                 changed = True
-        if changed:
-            self._persist()
+        self._persist(only_if_dirty=not changed)
         return True
 
     def get(self, jid: str) -> ClipJob | None:
@@ -266,8 +278,7 @@ class ClipJobManager:
                     continue
                 j.dismissed_at = dismissed_at
                 changed += 1
-        if changed:
-            self._persist()
+        self._persist(only_if_dirty=not changed)
         return changed
 
     def start_sweeper(self, interval_seconds: int = 300) -> None:

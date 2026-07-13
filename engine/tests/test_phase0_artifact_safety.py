@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 from pathlib import Path
 
 import pytest
 
 import clip_jobs
 import jobs
+import jobs_store
 import transcribe_jobs
 from clip_jobs import ClipJob, ClipJobManager, ClipStatus
 from jobs import Job, JobManager, JobStatus
@@ -82,6 +84,12 @@ def _restart(stores):
         "transcribe": TranscribeJobManager(max_workers=1, ttl_seconds=0, store_path=stores["transcribe"]),
         "clip": ClipJobManager(max_workers=1, ttl_seconds=0, store_path=stores["clip"]),
     }
+
+
+def _replace_owner(manager_name: str):
+    return jobs_store if manager_name == "download" else (
+        transcribe_jobs if manager_name == "transcribe" else clip_jobs
+    )
 
 
 @pytest.mark.parametrize("manager_name", ["download", "transcribe", "clip"])
@@ -202,6 +210,114 @@ def test_clear_finished_dismisses_all_history_without_deleting_artifacts_across_
                 assert restored.status is record.status
                 assert restored.dismissed_at == DISMISSED_AT
         assert artifact_hashes(tmp_path, artifacts) == before
+    finally:
+        for item in restarted.values():
+            item.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("manager_name", ["download", "transcribe", "clip"])
+def test_dismiss_persist_cannot_be_overwritten_by_older_snapshot(
+    tmp_path, monkeypatch, manager_name,
+):
+    _, stores, managers, records = _seed_managers(tmp_path)
+    manager = managers[manager_name]
+    record = records[manager_name]
+    replace_owner = _replace_owner(manager_name)
+    original_replace = replace_owner.os.replace
+    old_at_replace = threading.Event()
+    release_old = threading.Event()
+    newer_replaced = threading.Event()
+    errors = []
+
+    def controlled_replace(src, dst):
+        if threading.current_thread().name == "old-writer":
+            old_at_replace.set()
+            if not release_old.wait(2):
+                raise TimeoutError("old writer was not released")
+        result = original_replace(src, dst)
+        if threading.current_thread().name == "new-writer":
+            newer_replaced.set()
+        return result
+
+    def run_old_writer():
+        try:
+            manager._persist()
+        except BaseException as exc:  # pragma: no cover - failure is asserted below
+            errors.append(exc)
+
+    def run_dismiss():
+        try:
+            assert manager.dismiss(record.id) is True
+        except BaseException as exc:  # pragma: no cover - failure is asserted below
+            errors.append(exc)
+
+    monkeypatch.setattr(replace_owner.os, "replace", controlled_replace)
+    old_writer = threading.Thread(target=run_old_writer, name="old-writer")
+    new_writer = threading.Thread(target=run_dismiss, name="new-writer")
+    try:
+        old_writer.start()
+        assert old_at_replace.wait(2), "old writer never reached atomic replace"
+        new_writer.start()
+        newer_replaced.wait(0.5)
+    finally:
+        release_old.set()
+        old_writer.join(2)
+        if new_writer.ident is not None:
+            new_writer.join(2)
+        for item in managers.values():
+            item.shutdown(wait=True)
+    assert not old_writer.is_alive() and not new_writer.is_alive()
+    assert errors == []
+    assert newer_replaced.is_set()
+
+    restarted = _restart(stores)
+    try:
+        assert restarted[manager_name].get(record.id).dismissed_at is not None
+    finally:
+        for item in restarted.values():
+            item.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("manager_name", ["download", "transcribe", "clip"])
+@pytest.mark.parametrize("retry_with", ["dismiss", "sweep"])
+def test_failed_dismiss_persist_is_retried(
+    tmp_path, monkeypatch, caplog, manager_name, retry_with,
+):
+    _, stores, managers, records = _seed_managers(tmp_path)
+    manager = managers[manager_name]
+    record = records[manager_name]
+    replace_owner = _replace_owner(manager_name)
+    original_replace = replace_owner.os.replace
+    replace_calls = 0
+
+    def fail_first_replace(src, dst):
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls == 1:
+            raise OSError("forced first dismissal persist failure")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(replace_owner.os, "replace", fail_first_replace)
+    try:
+        assert manager.dismiss(record.id) is True
+        expected_log = {
+            "download": "job-store persist failed",
+            "transcribe": "transcribe-store persist failed",
+            "clip": "clip-store persist failed",
+        }[manager_name]
+        assert expected_log in caplog.text
+        if retry_with == "dismiss":
+            assert manager.dismiss(record.id) is True
+        else:
+            assert manager.sweep() == 0
+        assert replace_calls == 2
+    finally:
+        for item in managers.values():
+            item.shutdown(wait=True)
+
+    restarted = _restart(stores)
+    try:
+        assert restarted[manager_name].get(record.id).dismissed_at is not None
     finally:
         for item in restarted.values():
             item.shutdown(wait=True)
