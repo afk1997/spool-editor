@@ -601,6 +601,7 @@ This slice has three independently revertible commits: visible product truth, pr
 - Modify: `apps/studio/src/components/spool/panels.tsx`
 - Modify: `apps/studio/src/components/spool/context.tsx`
 - Modify: `apps/studio/src/components/spool/work.tsx`
+- Modify: `apps/studio/src/components/spool/timeline.tsx`
 - Modify: `apps/studio/src/components/spool/cards.tsx`
 - Create: `apps/studio/src/lib/action-error.ts`
 - Modify: `packages/api-client/src/index.ts`
@@ -672,7 +673,8 @@ git add apps/studio/test/product-truth.test.tsx apps/studio/test/context-mutatio
   apps/studio/src/components/spool/agent.tsx \
   apps/studio/src/components/spool/panels.tsx \
   apps/studio/src/components/spool/context.tsx \
-  apps/studio/src/components/spool/work.tsx apps/studio/src/components/spool/cards.tsx \
+  apps/studio/src/components/spool/work.tsx apps/studio/src/components/spool/timeline.tsx \
+  apps/studio/src/components/spool/cards.tsx \
   apps/studio/src/lib/action-error.ts \
   apps/studio/src/app/import/page.tsx apps/studio/src/app/library/page.tsx \
   apps/studio/src/app/queue/page.tsx \
