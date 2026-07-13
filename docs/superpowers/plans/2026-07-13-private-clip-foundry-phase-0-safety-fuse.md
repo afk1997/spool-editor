@@ -599,6 +599,8 @@ This slice has three independently revertible commits: visible product truth, pr
 - Modify: `apps/studio/src/components/spool/work.tsx`
 - Modify: `apps/studio/src/components/spool/cards.tsx`
 - Create: `apps/studio/src/lib/action-error.ts`
+- Modify: `packages/api-client/src/index.ts`
+- Modify: `apps/studio/test/api-client.test.ts`
 - Modify: `apps/studio/src/app/import/page.tsx`
 - Modify: `apps/studio/src/app/library/page.tsx`
 - Modify: `apps/studio/src/app/queue/page.tsx`
@@ -627,6 +629,7 @@ Render the relevant pages/components with a mocked `SpoolApiClient` and assert:
 - the home/agent surfaces contain no hard-coded recipe list and never claim the read-only agent can drive or mutate the whole app;
 - Source/Clip not-found copy no longer claims queue clearing deleted work; it reports an unavailable ID or incomplete import/render and preserves the recovery action;
 - every visible mutating API action on Library, Queue, Source, Editor, Reframe, Brand, Recipes, and Watches reports failure; batch actions use `Promise.allSettled`, report exact succeeded/failed counts, and never emit success before the promises settle.
+- the shared API client preserves both the engine's structured error code and message so unknown server failures remain actionable in Studio.
 
 - [ ] **Step 2: Observe the product-truth test fail**
 
@@ -642,6 +645,8 @@ Hide navigation and action entry points only. Do not delete routes, Recipes/Watc
 
 Add `action-error.ts` to extract `SpoolApiError.code` and map known actionable codes (`queue_full`, `invalid_url`, `origin_forbidden`, `agent_mutation_disabled`, `egress_consent_required`, `not_resumable`, `timeout`, and `unreachable`) to concise copy while retaining the code for diagnostics. Replace swallowed mutation rejections on every file listed in Section 9.1. A browser autoplay rejection may remain non-fatal; a failed engine mutation may not.
 
+When the API client receives a non-2xx JSON response, preserve both `error` and `message` in `SpoolApiError`; do not collapse an unknown structured failure to its code alone.
+
 - [ ] **Step 4: Verify Studio behavior and commit it**
 
 ```bash
@@ -650,6 +655,7 @@ pnpm --filter @spool/studio test
 pnpm --filter @spool/studio typecheck
 pnpm --filter @spool/studio lint
 git add apps/studio/test/product-truth.test.tsx apps/studio/test/context-mutations.test.tsx \
+  apps/studio/test/api-client.test.ts packages/api-client/src/index.ts \
   apps/studio/src/components/spool/shell.tsx \
   apps/studio/src/components/spool/overlays.tsx \
   apps/studio/src/components/spool/agent.tsx \
