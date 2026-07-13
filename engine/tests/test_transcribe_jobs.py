@@ -360,6 +360,90 @@ def test_stale_attempt_transcribe_target_receives_dispatch_token(tmp_path):
     mgr.shutdown(wait=True)
 
 
+def test_legacy_transcribe_target_cannot_mutate_canonical_job_after_cancel(tmp_path):
+    mgr = TranscribeJobManager(max_workers=1, store_path=tmp_path / "tj.json")
+    started = threading.Event()
+    release = threading.Event()
+    killed = []
+
+    class Proc:
+        def kill(self):
+            killed.append(True)
+
+    def legacy_target(job, *, model_path):
+        started.set()
+        release.wait(5)
+        job.status = TranscribeStatus.DONE
+        job.duration_seconds = 99.0
+        job.language_detected = "late"
+        job.process_handle = Proc()
+
+    jid = mgr.submit(parent_job_id="source", model_path="m.bin", target=legacy_target)
+    assert started.wait(2)
+    assert mgr.cancel(jid) is True
+    release.set()
+    assert _wait_worker_inactive(mgr, jid)
+
+    canonical = mgr.get(jid)
+    assert canonical.status is TranscribeStatus.CANCELLED
+    assert canonical.duration_seconds == 0.0 and canonical.language_detected == ""
+    assert canonical.process_handle is None
+    assert killed == [True]
+    mgr.shutdown(wait=True)
+
+
+def test_transcribe_positional_only_attempt_is_not_passed_as_keyword(tmp_path):
+    mgr = TranscribeJobManager(max_workers=1, store_path=tmp_path / "tj.json")
+    observed = []
+
+    def legacy_target(job, attempt=None, /, *, model_path):
+        observed.append((attempt, job is mgr.get(job.id)))
+
+    jid = mgr.submit(parent_job_id="source", model_path="m.bin", target=legacy_target)
+    _wait_tj(mgr, jid)
+    assert mgr.get(jid).status is TranscribeStatus.DONE
+    assert observed == [(None, False)]
+    mgr.shutdown(wait=True)
+
+
+def test_transcribe_post_commit_entitlement_survives_concurrent_dismiss(tmp_path):
+    from attempt_staging import AttemptOutcome
+
+    mgr = TranscribeJobManager(max_workers=1, store_path=tmp_path / "tj.json")
+    done_persisted = threading.Event()
+    release_persist = threading.Event()
+    worker_ident = []
+    hook_calls = []
+    blocked = False
+    real_persist = mgr._persist
+
+    def persist_with_done_barrier(*args, **kwargs):
+        nonlocal blocked
+        result = real_persist(*args, **kwargs)
+        if worker_ident and threading.get_ident() == worker_ident[0]:
+            with mgr._lock:
+                is_done = any(job.status is TranscribeStatus.DONE for job in mgr._jobs.values())
+            if is_done and not blocked:
+                blocked = True
+                done_persisted.set()
+                assert release_persist.wait(5)
+        return result
+
+    mgr._persist = persist_with_done_barrier
+
+    def target(job, *, model_path, attempt):
+        worker_ident.append(threading.get_ident())
+        return AttemptOutcome(after_commit=lambda committed: hook_calls.append(committed.id))
+
+    jid = mgr.submit(parent_job_id="source", model_path="m.bin", target=target)
+    assert done_persisted.wait(2)
+    assert mgr.dismiss(jid) is True
+    release_persist.set()
+    assert _wait_worker_inactive(mgr, jid)
+    assert hook_calls == [jid]
+    mgr.shutdown(wait=True)
+
+
 def test_stale_attempt_transcribe_callback_cannot_mutate_dismissed_job(tmp_path):
     mgr = TranscribeJobManager(max_workers=1, store_path=tmp_path / "tj.json")
     started = threading.Event()

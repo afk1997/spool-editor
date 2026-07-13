@@ -84,12 +84,18 @@ def test_pool_full_returns_overflow():
 
 
 def test_ttl_sweep_marks_old_done_jobs_and_preserves_file(tmp_path):
+    from attempt_staging import AttemptOutcome, Promotion
+
     jm = JobManager(max_workers=1, ttl_seconds=0)  # zero = sweep immediately
 
     def work(job: Job):
         f = tmp_path / "out.bin"
-        f.write_bytes(b"x")
-        job.file_path = str(f)
+        staged = Path(job.out_template.replace("%(ext)s", "bin"))
+        staged.write_bytes(b"x")
+        return AttemptOutcome(
+            updates={"file_path": str(staged), "filename": f.name},
+            promotions=(Promotion(staged, f),),
+        )
 
     jid = jm.submit(target=work, title="t", url="https://x")
     for _ in range(50):
@@ -106,12 +112,18 @@ def test_ttl_sweep_marks_old_done_jobs_and_preserves_file(tmp_path):
 
 
 def test_ttl_sweep_marks_each_expired_terminal_job_once(tmp_path):
+    from attempt_staging import AttemptOutcome, Promotion
+
     jm = JobManager(max_workers=1, ttl_seconds=0)
 
     def work(job: Job):
         f = tmp_path / f"{job.id}.bin"
-        f.write_bytes(b"x")
-        job.file_path = str(f)
+        staged = Path(job.out_template.replace("%(ext)s", "bin"))
+        staged.write_bytes(b"x")
+        return AttemptOutcome(
+            updates={"file_path": str(staged), "filename": f.name},
+            promotions=(Promotion(staged, f),),
+        )
 
     jid_keep = jm.submit(target=work, title="keep", url="https://k")
     jid_drop = jm.submit(target=work, title="drop", url="https://d")
@@ -421,14 +433,20 @@ def test_snapshot_jobs_returns_insertion_ordered_list():
 
 
 def test_dismiss_marks_done_job_idempotently_and_preserves_file(tmp_path, monkeypatch):
+    from attempt_staging import AttemptOutcome, Promotion
+
     import jobs
     monkeypatch.setattr(jobs, "_utc_now_rfc3339", lambda: "2026-07-13T12:34:56.789Z", raising=False)
     jm = JobManager(max_workers=1, ttl_seconds=60)
     f = tmp_path / "out.bin"
-    f.write_bytes(b"saved")
 
     def work(job: Job):
-        job.file_path = str(f)
+        staged = Path(job.out_template.replace("%(ext)s", "bin"))
+        staged.write_bytes(b"saved")
+        return AttemptOutcome(
+            updates={"file_path": str(staged), "filename": f.name},
+            promotions=(Promotion(staged, f),),
+        )
 
     jid = jm.submit(target=work, title="t", url="https://x")
     for _ in range(50):
@@ -599,6 +617,89 @@ def test_stale_attempt_target_receives_dispatch_token_not_later_cancel_token(tmp
     release.set()
     assert _wait_worker_inactive(mgr, jid)
     assert observed == [dispatched]
+    mgr.shutdown(wait=True)
+
+
+def test_legacy_download_target_cannot_mutate_canonical_job_after_cancel(tmp_path):
+    mgr = JobManager(max_workers=1, store_path=tmp_path / "jobs.json")
+    started = threading.Event()
+    release = threading.Event()
+    killed = []
+
+    class Proc:
+        def kill(self):
+            killed.append(True)
+
+    def legacy_target(job):
+        started.set()
+        release.wait(5)
+        job.status = JobStatus.DONE
+        job.file_path = str(tmp_path / "late.mp4")
+        job.filename = "late.mp4"
+        job.process = Proc()
+
+    jid = mgr.submit(target=legacy_target, title="download", url="u")
+    assert started.wait(2)
+    assert mgr.cancel(jid) is True
+    release.set()
+    assert _wait_worker_inactive(mgr, jid)
+
+    canonical = mgr.get(jid)
+    assert canonical.status is JobStatus.CANCELLED
+    assert canonical.file_path is None and canonical.filename is None
+    assert canonical.process is None
+    assert killed == [True]
+    mgr.shutdown(wait=True)
+
+
+def test_download_positional_only_attempt_is_not_passed_as_keyword(tmp_path):
+    mgr = JobManager(max_workers=1, store_path=tmp_path / "jobs.json")
+    observed = []
+
+    def legacy_target(job, attempt=None, /):
+        observed.append((attempt, job is mgr.get(job.id)))
+
+    jid = mgr.submit(target=legacy_target, title="download", url="u")
+    assert _wait_status(mgr, jid, JobStatus.DONE)
+    assert observed == [(None, False)]
+    mgr.shutdown(wait=True)
+
+
+def test_download_post_commit_entitlement_survives_concurrent_dismiss(tmp_path):
+    from attempt_staging import AttemptOutcome
+
+    mgr = JobManager(max_workers=1, store_path=tmp_path / "jobs.json")
+    done_persisted = threading.Event()
+    release_persist = threading.Event()
+    worker_ident = []
+    hook_calls = []
+    blocked = False
+    real_persist = mgr._persist
+
+    def persist_with_done_barrier(*args, **kwargs):
+        nonlocal blocked
+        result = real_persist(*args, **kwargs)
+        if worker_ident and threading.get_ident() == worker_ident[0]:
+            with mgr._lock:
+                is_done = any(job.status is JobStatus.DONE for job in mgr._jobs.values())
+            if is_done and not blocked:
+                blocked = True
+                done_persisted.set()
+                assert release_persist.wait(5)
+        return result
+
+    mgr._persist = persist_with_done_barrier
+
+    def target(job, *, attempt):
+        worker_ident.append(threading.get_ident())
+        return AttemptOutcome(after_commit=lambda committed: hook_calls.append(committed.id))
+
+    jid = mgr.submit(target=target, title="download", url="u")
+    assert done_persisted.wait(2)
+    assert mgr.dismiss(jid) is True
+    release_persist.set()
+    assert _wait_worker_inactive(mgr, jid)
+    assert hook_calls == [jid]
     mgr.shutdown(wait=True)
 
 

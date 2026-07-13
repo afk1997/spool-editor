@@ -13,6 +13,7 @@ publishing at all.
 """
 from __future__ import annotations
 
+import copy
 import os
 import shutil
 from dataclasses import dataclass, field
@@ -21,6 +22,59 @@ from typing import Any, Callable, Iterable
 
 
 _KINDS = frozenset({"download", "transcribe", "clip"})
+
+
+class IsolatedTargetRecord:
+    """Deep snapshot passed to callbacks that do not accept an attempt token.
+
+    Legacy callbacks may still read the record and attach a subprocess through
+    the historical process field, but all other writes stay on this private
+    snapshot.  In particular, a callback that returns after cancellation can no
+    longer overwrite canonical status or artifact fields outside the manager's
+    attempt fence.
+    """
+
+    __slots__ = ("_snapshot", "_process_field", "_register_process")
+
+    def __init__(
+        self,
+        record: object,
+        *,
+        process_field: str,
+        register_process: Callable[[object], bool],
+    ) -> None:
+        snapshot: dict[str, Any] = {}
+        for name, value in vars(record).items():
+            if name == process_field:
+                snapshot[name] = None
+                continue
+            try:
+                snapshot[name] = copy.deepcopy(value)
+            except Exception as exc:
+                # Never fall back to an aliased mutable value: that would let a
+                # legacy callback reach canonical state through a nested object.
+                raise TypeError(
+                    f"cannot isolate legacy target field {name!r}",
+                ) from exc
+        object.__setattr__(self, "_snapshot", snapshot)
+        object.__setattr__(self, "_process_field", process_field)
+        object.__setattr__(self, "_register_process", register_process)
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self._snapshot[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in self.__slots__:
+            object.__setattr__(self, name, value)
+            return
+        if name == self._process_field:
+            accepted = self._register_process(value)
+            self._snapshot[name] = value if accepted else None
+            return
+        self._snapshot[name] = value
 
 
 @dataclass(frozen=True)

@@ -17,6 +17,7 @@ from typing import Callable
 
 from attempt_staging import (
     AttemptOutcome,
+    IsolatedTargetRecord,
     apply_updates,
     attempt_root,
     cleanup_attempt,
@@ -267,20 +268,25 @@ class JobManager:
         current.error_category = current.error_category or getattr(exc, "error_category", "unknown")
         current.error_message = current.error_message or str(exc)
 
-    @staticmethod
-    def _invoke_target(target, job: Job, attempt: int):
+    def _invoke_target(self, target, job: Job, attempt: int):
         try:
-            parameters = inspect.signature(target).parameters.values()
-            accepts_attempt = any(
-                parameter.name == "attempt"
-                or parameter.kind is inspect.Parameter.VAR_KEYWORD
-                for parameter in parameters
+            parameter = inspect.signature(target).parameters.get("attempt")
+            accepts_attempt = parameter is not None and parameter.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
             )
         except (TypeError, ValueError):
             accepts_attempt = False
         if accepts_attempt:
             return target(job, attempt=attempt)
-        return target(job)
+        isolated = IsolatedTargetRecord(
+            job,
+            process_field="process",
+            register_process=lambda process: self.register_process(
+                job.id, job, attempt, process,
+            ),
+        )
+        return target(isolated)
 
     def _run_attempt(
         self,
@@ -329,9 +335,10 @@ class JobManager:
                 self._persist()
                 if after_commit is not None:
                     try:
-                        self._mutate_current(
-                            job.id, job, attempt, {JobStatus.DONE}, after_commit,
-                        )
+                        # Entitlement was captured at the accepted finish
+                        # linearization point.  A later dismiss must not suppress
+                        # it, and external hooks never run under the state lock.
+                        after_commit(job)
                     except Exception:
                         logging.getLogger(__name__).warning(
                             "download post-commit hook failed for %s", job.id, exc_info=True,

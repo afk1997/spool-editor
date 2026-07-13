@@ -4,6 +4,7 @@ Mirrors test_transcribe_jobs.py: same lock + ThreadPoolExecutor + atomic-JSON
 persistence + restart-downgrade machinery, extended with a ``kind`` and
 ``params``/``result`` dicts so one manager drives all six clip operations.
 """
+import copy
 import json
 import threading
 import time
@@ -57,11 +58,15 @@ def test_submit_rejects_unknown_kind(tmp_path):
 
 
 def test_target_can_write_result_and_clip_id(tmp_path):
+    from attempt_staging import AttemptOutcome
+
     jm = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
 
     def target(j):
-        j.clip_id = "clip_xyz"
-        j.result = {"clip_path": "/tmp/clip.mp4", "candidates": [{"start": 1.0}]}
+        return AttemptOutcome(updates={
+            "clip_id": "clip_xyz",
+            "result": {"clip_path": "/tmp/clip.mp4", "candidates": [{"start": 1.0}]},
+        })
 
     jid = jm.submit(kind="cut", source_id="s", target=target)
     _await(jm, jid, ClipStatus.DONE)
@@ -135,12 +140,13 @@ def test_update_progress_clamps_and_sets_stage(tmp_path):
 
 
 def test_persistence_round_trip(tmp_path):
+    from attempt_staging import AttemptOutcome
+
     store = tmp_path / "clip.json"
     jm = ClipJobManager(max_workers=1, store_path=store)
 
     def target(j):
-        j.clip_id = "c1"
-        j.result = {"render_id": "r1"}
+        return AttemptOutcome(updates={"clip_id": "c1", "result": {"render_id": "r1"}})
 
     jm.submit(kind="export", source_id="p1", params={"preset": "tiktok"}, target=target)
     for _ in range(50):
@@ -392,14 +398,181 @@ def test_stale_attempt_clip_target_receives_dispatch_token(tmp_path):
     mgr.shutdown(wait=True)
 
 
+def test_legacy_clip_target_cannot_mutate_canonical_job_after_cancel(tmp_path):
+    mgr = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
+    started = threading.Event()
+    release = threading.Event()
+    killed = []
+
+    class Proc:
+        def kill(self):
+            killed.append(True)
+
+    def legacy_target(job):
+        started.set()
+        release.wait(5)
+        job.status = ClipStatus.DONE
+        job.clip_id = "late"
+        job.result = {"output_path": str(tmp_path / "late.mp4")}
+        job.params["nested"]["value"] = "late"
+        job.process_handle = Proc()
+
+    jid = mgr.submit(
+        kind="cut", params={"nested": {"value": "canonical"}}, target=legacy_target,
+    )
+    assert started.wait(2)
+    assert mgr.cancel(jid) is True
+    release.set()
+    assert _wait_worker_inactive(mgr, jid)
+
+    canonical = mgr.get(jid)
+    assert canonical.status is ClipStatus.CANCELLED
+    assert canonical.clip_id is None and canonical.result == {}
+    assert canonical.params == {"nested": {"value": "canonical"}}
+    assert canonical.process_handle is None
+    assert killed == [True]
+    mgr.shutdown(wait=True)
+
+
+def test_clip_positional_only_attempt_is_not_passed_as_keyword(tmp_path):
+    mgr = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
+    observed = []
+
+    def legacy_target(job, attempt=None, /):
+        observed.append((attempt, job is mgr.get(job.id)))
+
+    jid = mgr.submit(kind="cut", target=legacy_target)
+    _await(mgr, jid, ClipStatus.DONE)
+    assert observed == [(None, False)]
+    mgr.shutdown(wait=True)
+
+
+def test_clip_post_commit_entitlement_survives_concurrent_dismiss(tmp_path):
+    from attempt_staging import AttemptOutcome
+
+    mgr = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
+    done_persisted = threading.Event()
+    release_persist = threading.Event()
+    worker_ident = []
+    hook_calls = []
+    blocked = False
+    real_persist = mgr._persist
+
+    def persist_with_done_barrier(*args, **kwargs):
+        nonlocal blocked
+        result = real_persist(*args, **kwargs)
+        if worker_ident and threading.get_ident() == worker_ident[0]:
+            with mgr._lock:
+                is_done = any(job.status is ClipStatus.DONE for job in mgr._jobs.values())
+            if is_done and not blocked:
+                blocked = True
+                done_persisted.set()
+                assert release_persist.wait(5)
+        return result
+
+    mgr._persist = persist_with_done_barrier
+
+    def target(job, *, attempt):
+        worker_ident.append(threading.get_ident())
+        return AttemptOutcome(after_commit=lambda committed: hook_calls.append(committed.id))
+
+    jid = mgr.submit(kind="cut", target=target)
+    assert done_persisted.wait(2)
+    assert mgr.dismiss(jid) is True
+    release_persist.set()
+    assert _wait_worker_inactive(mgr, jid)
+    assert hook_calls == [jid]
+    mgr.shutdown(wait=True)
+
+
+def _seed_running_produce_parent(mgr):
+    parent = ClipJob(
+        id="produce-parent", kind="produce", status=ClipStatus.RUNNING,
+        result={"keep": {"nested": [1, 2]}, "count": 7, "clip_jobs": ["old"]},
+    )
+    parent._attempt = 3
+    parent._worker_active = True
+    with mgr._lock:
+        mgr._jobs[parent.id] = parent
+    return parent
+
+
+def test_atomic_fanout_prevalidates_all_specs_before_admitting_any_child(tmp_path):
+    mgr = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
+    parent = _seed_running_produce_parent(mgr)
+    original_result = copy.deepcopy(parent.result)
+
+    with pytest.raises(ValueError, match="unknown clip kind"):
+        mgr.submit_children_if_current(parent, parent._attempt, [
+            {"kind": "cut", "target": lambda child: None},
+            {"kind": "invalid-later", "target": lambda child: None},
+        ])
+
+    assert [job.id for job in mgr.snapshot_jobs()] == [parent.id]
+    assert parent.result == original_result
+    attempts = tmp_path / ".attempts" / "clip"
+    assert not attempts.exists() or list(attempts.iterdir()) == []
+    mgr.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("failure_stage", ["creation", "submission"])
+def test_atomic_fanout_rolls_back_every_child_and_exact_parent_result(
+    tmp_path, monkeypatch, failure_stage,
+):
+    mgr = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
+    parent = _seed_running_produce_parent(mgr)
+    original_result = parent.result
+    created = []
+
+    real_new_job = mgr._new_job_locked
+
+    def create_then_fail(**kwargs):
+        child = real_new_job(**kwargs)
+        created.append(child[0])
+        if failure_stage == "creation" and len(created) == 2:
+            raise RuntimeError("creation failed")
+        return child
+
+    monkeypatch.setattr(mgr, "_new_job_locked", create_then_fail)
+
+    class FailSecondSubmission:
+        def __init__(self):
+            self.calls = 0
+
+        def submit(self, _fn, child, _attempt, _target):
+            self.calls += 1
+            if failure_stage == "submission" and self.calls == 2:
+                raise RuntimeError("submission failed")
+
+        def shutdown(self, wait=True):
+            return None
+
+    mgr._executor.shutdown(wait=True)
+    mgr._executor = FailSecondSubmission()
+
+    with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
+        mgr.submit_children_if_current(parent, parent._attempt, [
+            {"kind": "cut", "clip_id": "a", "target": lambda child: None},
+            {"kind": "cut", "clip_id": "b", "target": lambda child: None},
+        ])
+
+    assert [job.id for job in mgr.snapshot_jobs()] == [parent.id]
+    assert parent.result is original_result
+    assert parent.result == {
+        "keep": {"nested": [1, 2]}, "count": 7, "clip_jobs": ["old"],
+    }
+    assert created and all(child._worker_active is False for child in created)
+    assert all(not Path(child._staging_root).exists() for child in created)
+    mgr.shutdown(wait=True)
+
+
 def test_cancel_produce_before_atomic_fanout_submits_zero_children(tmp_path):
     mgr = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
     started = threading.Event()
     release = threading.Event()
     observed = []
 
-    def target(parent):
-        attempt = parent._attempt
+    def target(parent, *, attempt):
         started.set()
         release.wait(5)
         observed.extend(mgr.submit_children_if_current(parent, attempt, [
@@ -426,8 +599,8 @@ def test_cancel_produce_after_atomic_fanout_keeps_all_admitted_children(tmp_path
     child_gate = threading.Event()
     observed = []
 
-    def target(parent):
-        observed.extend(mgr.submit_children_if_current(parent, parent._attempt, [
+    def target(parent, *, attempt):
+        observed.extend(mgr.submit_children_if_current(parent, attempt, [
             {"kind": "cut", "source_id": "source", "clip_id": "clip-a",
              "params": {}, "target": lambda child: child_gate.wait(5)},
             {"kind": "cut", "source_id": "source", "clip_id": "clip-b",

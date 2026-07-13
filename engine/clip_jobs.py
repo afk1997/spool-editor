@@ -30,6 +30,7 @@ from typing import Callable
 
 from attempt_staging import (
     AttemptOutcome,
+    IsolatedTargetRecord,
     apply_updates,
     attempt_root,
     cleanup_attempt,
@@ -243,20 +244,25 @@ class ClipJobManager:
         current.error_category = current.error_category or getattr(exc, "error_category", "unknown")
         current.error_message = current.error_message or str(exc)
 
-    @staticmethod
-    def _invoke_target(target, job: ClipJob, attempt: int):
+    def _invoke_target(self, target, job: ClipJob, attempt: int):
         try:
-            parameters = inspect.signature(target).parameters.values()
-            accepts_attempt = any(
-                parameter.name == "attempt"
-                or parameter.kind is inspect.Parameter.VAR_KEYWORD
-                for parameter in parameters
+            parameter = inspect.signature(target).parameters.get("attempt")
+            accepts_attempt = parameter is not None and parameter.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
             )
         except (TypeError, ValueError):
             accepts_attempt = False
         if accepts_attempt:
             return target(job, attempt=attempt)
-        return target(job)
+        isolated = IsolatedTargetRecord(
+            job,
+            process_field="process_handle",
+            register_process=lambda process: self.register_process(
+                job.id, job, attempt, process,
+            ),
+        )
+        return target(isolated)
 
     def _run_attempt(
         self,
@@ -293,9 +299,7 @@ class ClipJobManager:
                 self._persist()
                 if after_commit is not None:
                     try:
-                        self._mutate_current(
-                            job.id, job, attempt, {ClipStatus.DONE}, after_commit,
-                        )
+                        after_commit(job)
                     except Exception:
                         logging.getLogger(__name__).warning(
                             "clip post-commit hook failed for %s", job.id, exc_info=True,
@@ -330,9 +334,25 @@ class ClipJobManager:
             id=jid, kind=kind, source_id=source_id, clip_id=clip_id,
             params=params or {},
         )
-        attempt, _root = self._prepare_attempt_locked(job)
-        self._jobs[jid] = job
-        return job, attempt, target
+        try:
+            attempt, _root = self._prepare_attempt_locked(job)
+            self._jobs[jid] = job
+            return job, attempt, target
+        except Exception:
+            # A staging/setup failure can happen after the lease/root exists.
+            # This helper owns that partial record until it returns, so unwind
+            # it here before the outer fan-out transaction can see it.
+            self._jobs.pop(jid, None)
+            job.process_handle = None
+            job._worker_active = False
+            if job._staging_root:
+                try:
+                    cleanup_attempt(job._staging_root)
+                except Exception:
+                    logging.getLogger(__name__).warning(
+                        "failed to clean partial clip child %s", jid, exc_info=True,
+                    )
+            raise
 
     # ----- lifecycle -----------------------------------------------------
 
@@ -371,7 +391,6 @@ class ClipJobManager:
         until the complete child set and the parent's child-id result are
         visible together.
         """
-        submissions: list[tuple[ClipJob, int, Callable[[ClipJob], object]]] = []
         with self._lock:
             current = self._jobs.get(parent.id)
             if not (
@@ -382,7 +401,13 @@ class ClipJobManager:
             ):
                 return []
 
+            # Validate the complete batch before allocating an id, lease, or
+            # staging directory for any child.
+            validated: list[tuple[str, Callable[[ClipJob], object], str | None,
+                                  str | None, dict | None]] = []
             for spec in specs:
+                if not isinstance(spec, dict):
+                    raise ValueError("child spec must be a mapping")
                 kind = spec.get("kind")
                 if kind not in CLIP_KINDS:
                     raise ValueError(
@@ -391,35 +416,61 @@ class ClipJobManager:
                 target = spec.get("target")
                 if not callable(target):
                     raise ValueError("child target must be callable")
-                submissions.append(self._new_job_locked(
-                    kind=kind,
-                    target=target,
-                    source_id=spec.get("source_id"),
-                    clip_id=spec.get("clip_id"),
-                    params=spec.get("params"),
+                validated.append((
+                    kind, target, spec.get("source_id"), spec.get("clip_id"),
+                    spec.get("params"),
                 ))
 
-            child_ids = [child.id for child, _attempt, _target in submissions]
-            current.result = {
-                **(current.result or {}),
-                "count": len(child_ids),
-                "clip_jobs": child_ids,
-            }
+            original_result = current.result
+            initial_job_ids = set(self._jobs)
+            submissions: list[tuple[ClipJob, int, Callable[[ClipJob], object]]] = []
+            futures = []
             try:
+                for kind, target, source_id, clip_id, params in validated:
+                    submissions.append(self._new_job_locked(
+                        kind=kind,
+                        target=target,
+                        source_id=source_id,
+                        clip_id=clip_id,
+                        params=params,
+                    ))
+
                 for child, child_attempt, target in submissions:
-                    self._executor.submit(
+                    futures.append(self._executor.submit(
                         self._run_attempt, child, child_attempt, target,
-                    )
+                    ))
+
+                child_ids = [child.id for child, _attempt, _target in submissions]
+                current.result = {
+                    **(original_result or {}),
+                    "count": len(child_ids),
+                    "clip_jobs": child_ids,
+                }
             except Exception:
                 # Any already-submitted closure is still blocked on this RLock;
                 # removing every captured identity makes all of them no-op.
-                for child, _child_attempt, _target in submissions:
+                for future in futures:
+                    try:
+                        future.cancel()
+                    except Exception:
+                        pass
+                new_children = [
+                    child for jid, child in self._jobs.items()
+                    if jid not in initial_job_ids
+                ]
+                for child in new_children:
                     self._jobs.pop(child.id, None)
+                    child.process_handle = None
                     child._worker_active = False
-                    cleanup_attempt(child._staging_root)
-                current.result = {
-                    **(current.result or {}), "count": 0, "clip_jobs": [],
-                }
+                    if child._staging_root:
+                        try:
+                            cleanup_attempt(child._staging_root)
+                        except Exception:
+                            logging.getLogger(__name__).warning(
+                                "failed to clean rolled-back clip child %s",
+                                child.id, exc_info=True,
+                            )
+                current.result = original_result
                 raise
         self._persist()
         return child_ids

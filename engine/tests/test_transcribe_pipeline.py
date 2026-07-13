@@ -55,12 +55,17 @@ def _flask_app(tmp_path, monkeypatch):
 
 def _media_job(job_manager, downloads_dir, *, ext=".mp4"):
     """Submit a fake parent media job whose file_path points at a touched file."""
+    from attempt_staging import AttemptOutcome, Promotion
+
     media = downloads_dir / f"src{ext}"
-    media.write_bytes(b"fake-media")
 
     def _noop(j):
-        j.file_path = str(media)
-        j.filename = f"src{ext}"
+        staged = Path(j.out_template.replace("%(ext)s", ext.removeprefix(".")))
+        staged.write_bytes(b"fake-media")
+        return AttemptOutcome(
+            updates={"file_path": str(staged), "filename": f"src{ext}"},
+            promotions=(Promotion(staged, media),),
+        )
 
     jid = job_manager.submit(target=_noop, title="t", url="https://x")
     # Drain the worker so the job lands at DONE

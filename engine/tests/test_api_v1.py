@@ -469,6 +469,60 @@ def test_attempt_staging_successful_download_promotes_before_auto_transcribe(
     assert auto_state == [(JobStatus.DONE, str(final), True)]
 
 
+def test_auto_transcribe_entitlement_survives_dismiss_after_done_persist(
+    client, monkeypatch,
+):
+    from runner import DownloadResult
+    import app as app_module
+
+    app, c = client
+    manager = app.extensions["trove.jobs"]
+    done_persisted = threading.Event()
+    release_persist = threading.Event()
+    worker_ident = []
+    transcribe_calls = []
+    blocked = False
+    real_persist = manager._persist
+
+    def persist_with_done_barrier(*args, **kwargs):
+        nonlocal blocked
+        result = real_persist(*args, **kwargs)
+        if worker_ident and threading.get_ident() == worker_ident[0]:
+            with manager._lock:
+                is_done = any(job.status is JobStatus.DONE for job in manager._jobs.values())
+            if is_done and not blocked:
+                blocked = True
+                done_persisted.set()
+                assert release_persist.wait(5)
+        return result
+
+    manager._persist = persist_with_done_barrier
+
+    def fake_download(**kwargs):
+        worker_ident.append(threading.get_ident())
+        staged = Path(kwargs["out_template"].replace("%(ext)s", "mp4"))
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"download")
+        return DownloadResult(file_path=str(staged))
+
+    monkeypatch.setattr(app_module, "run_download", fake_download)
+    monkeypatch.setattr("models_store.get_active_path", lambda: Path("model.bin"))
+    monkeypatch.setattr(
+        app.extensions["trove.transcribe"], "submit",
+        lambda **kwargs: transcribe_calls.append(kwargs) or "t1",
+    )
+
+    response = c.post("/api/v1/jobs", json={
+        "url": "https://93.184.216.34/video", "title": "video", "auto_transcribe": True,
+    })
+    jid = response.get_json()["id"]
+    assert done_persisted.wait(2)
+    assert c.post(f"/api/v1/jobs/{jid}/dismiss").status_code == 204
+    release_persist.set()
+    assert _wait_download_worker_inactive(manager, jid)
+    assert [call["parent_job_id"] for call in transcribe_calls] == [jid]
+
+
 def test_dismiss_refuses_active_job(client):
     app, c = client
     jm = app.extensions["trove.jobs"]

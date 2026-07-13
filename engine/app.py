@@ -454,7 +454,7 @@ def create_app() -> Flask:
         """
         if not parent.auto_transcribe or not parent.file_path:
             return
-        if parent.status is not JobStatus.DONE or parent.dismissed_at is not None:
+        if parent.status is not JobStatus.DONE:
             return
         model_path = models_store.get_active_path()
         if model_path is None:
