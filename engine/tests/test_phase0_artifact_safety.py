@@ -132,11 +132,61 @@ def test_clear_finished_dismisses_all_history_without_deleting_artifacts_across_
     monkeypatch.setattr(transcribe_jobs, "_utc_now_rfc3339", lambda: DISMISSED_AT, raising=False)
     monkeypatch.setattr(clip_jobs, "_utc_now_rfc3339", lambda: DISMISSED_AT, raising=False)
     artifacts, stores, managers, records = _seed_managers(tmp_path)
+    source = artifacts[0]
+    export = artifacts[-1]
+    terminal_records = {
+        "download": [
+            records["download"],
+            Job(
+                id="download-error", url="https://example.test/error", title="Errored source",
+                status=JobStatus.ERROR, file_path=str(source), filename=source.name,
+            ),
+            Job(
+                id="download-cancelled", url="https://example.test/cancelled",
+                title="Cancelled source", status=JobStatus.CANCELLED,
+                file_path=str(source), filename=source.name,
+            ),
+        ],
+        "transcribe": [
+            records["transcribe"],
+            TranscribeJob(
+                id="transcribe-error", parent_job_id="download-done", model_used="local.bin",
+                status=TranscribeStatus.ERROR,
+            ),
+            TranscribeJob(
+                id="transcribe-cancelled", parent_job_id="download-done",
+                model_used="local.bin", status=TranscribeStatus.CANCELLED,
+            ),
+        ],
+        "clip": [
+            records["clip"],
+            ClipJob(
+                id="clip-error", kind="export", source_id="download-done", clip_id="clip-error",
+                status=ClipStatus.ERROR, result={"output_path": str(export)},
+            ),
+            ClipJob(
+                id="clip-cancelled", kind="export", source_id="download-done",
+                clip_id="clip-cancelled", status=ClipStatus.CANCELLED,
+                result={"output_path": str(export)},
+            ),
+        ],
+    }
+    expected_statuses = {
+        "download": {JobStatus.DONE, JobStatus.ERROR, JobStatus.CANCELLED},
+        "transcribe": {
+            TranscribeStatus.DONE, TranscribeStatus.ERROR, TranscribeStatus.CANCELLED,
+        },
+        "clip": {ClipStatus.DONE, ClipStatus.ERROR, ClipStatus.CANCELLED},
+    }
+    for name, manager in managers.items():
+        with manager._lock:
+            manager._jobs.update({record.id: record for record in terminal_records[name]})
+        manager._persist()
     before = artifact_hashes(tmp_path, artifacts)
 
-    for manager in managers.values():
+    for name, manager in managers.items():
         terminal = list(manager.snapshot_jobs())
-        assert terminal
+        assert {record.status for record in terminal} == expected_statuses[name]
         assert all(manager.dismiss(record.id) for record in terminal)
         assert all(manager.get(record.id).dismissed_at == DISMISSED_AT for record in terminal)
     assert artifact_hashes(tmp_path, artifacts) == before
@@ -146,9 +196,11 @@ def test_clear_finished_dismisses_all_history_without_deleting_artifacts_across_
     restarted = _restart(stores)
     try:
         for name, item in restarted.items():
-            restored = item.get(records[name].id)
-            assert restored is not None
-            assert restored.dismissed_at == DISMISSED_AT
+            for record in terminal_records[name]:
+                restored = item.get(record.id)
+                assert restored is not None
+                assert restored.status is record.status
+                assert restored.dismissed_at == DISMISSED_AT
         assert artifact_hashes(tmp_path, artifacts) == before
     finally:
         for item in restarted.values():
