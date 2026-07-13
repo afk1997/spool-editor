@@ -112,7 +112,7 @@ const human = (bytes: number) => {
   return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
 };
 
-function mapSources(snap: EventsSnapshot | null): SpoolSource[] {
+export function mapSources(snap: EventsSnapshot | null): SpoolSource[] {
   if (!snap) return [];
   const clipCount = (sid: string) =>
     new Set(snap.clips.filter((c) => c.source_id === sid && c.clip_id).map((c) => c.clip_id)).size;
@@ -148,7 +148,7 @@ function clipTitle(jobs: ClipJobView[], cid: string): string {
   return "Clip " + cid.slice(0, 6);
 }
 
-function mapClips(snap: EventsSnapshot | null): SpoolClip[] {
+export function mapClips(snap: EventsSnapshot | null): SpoolClip[] {
   if (!snap) return [];
   const byClip = new Map<string, ClipJobView[]>();
   for (const c of snap.clips) {
@@ -182,10 +182,11 @@ function mapClips(snap: EventsSnapshot | null): SpoolClip[] {
   return out.reverse();
 }
 
-function mapJobs(snap: EventsSnapshot | null): SpoolJob[] {
+export function mapJobs(snap: EventsSnapshot | null): SpoolJob[] {
   if (!snap) return [];
   const jobs: SpoolJob[] = [];
   for (const j of snap.jobs) {
+    if (j.dismissed) continue;
     if (j.status === "done")
       jobs.push({ id: j.id, type: "download", domain: "download", label: j.title || j.url, src: j.id, status: "done", prog: 100, stage: "complete", eta: "—", elapsed: j.human?.elapsed || "—" });
     else if (j.status === "error" || j.status === "cancelled")
@@ -195,10 +196,13 @@ function mapJobs(snap: EventsSnapshot | null): SpoolJob[] {
     else
       jobs.push({ id: j.id, type: "download", domain: "download", label: j.title || j.url, src: j.id, status: j.status === "downloading" ? "running" : "queued", prog: j.progress_pct, stage: j.human?.summary || "downloading", eta: j.human?.eta || "—", elapsed: j.human?.elapsed || "—" });
   }
-  for (const t of snap.transcripts)
+  for (const t of snap.transcripts) {
+    if (t.dismissed) continue;
     if (t.status === "running" || t.status === "queued")
       jobs.push({ id: t.id, type: "transcribe", domain: "transcribe", label: t.human?.summary || "transcribe", src: t.parent_job_id, status: t.status === "running" ? "running" : "queued", prog: t.progress_pct, stage: "whisper · on-device", eta: "—", elapsed: t.human?.elapsed || "—" });
+  }
   for (const c of snap.clips) {
+    if (c.dismissed) continue;
     if (c.status === "done" && c.kind === "moments") continue;
     const type = c.kind === "moments" ? "transcribe" : "render";
     const st = c.status === "running" ? "running" : c.status === "queued" ? "queued" : c.status === "done" ? "done" : c.status === "error" ? "failed" : c.status;
@@ -208,9 +212,9 @@ function mapJobs(snap: EventsSnapshot | null): SpoolJob[] {
   return jobs;
 }
 
-function mapDownloads(snap: EventsSnapshot | null): SpoolDownload[] {
+export function mapDownloads(snap: EventsSnapshot | null): SpoolDownload[] {
   if (!snap) return [];
-  return snap.jobs.map((j) => ({
+  return snap.jobs.filter((j) => !j.dismissed).map((j) => ({
     id: j.id, title: j.title || j.url, src: originOf(j.url), prog: j.progress_pct,
     status: j.status === "done" ? "done" : j.status === "error" ? "error" : j.status === "cancelled" ? "error" : "downloading",
     size: j.human?.size || "", speed: j.human?.speed || "", eta: j.human?.eta || "—", err: j.error_message,

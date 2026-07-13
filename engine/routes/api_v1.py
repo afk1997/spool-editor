@@ -233,6 +233,8 @@ def _job_view(job) -> dict:
         "auto_transcribe": job.auto_transcribe,
         "error_category": job.error_category,
         "error_message": job.error_message,
+        "dismissed": getattr(job, "dismissed_at", None) is not None,
+        "dismissed_at": getattr(job, "dismissed_at", None),
     }
     # Pre-formatted strings for direct display by the agent / CLI.
     out["human"] = {
@@ -287,6 +289,8 @@ def _tj_view(tj) -> dict:
         "diarization_status": tj.diarization_status,
         "diarization_error": tj.diarization_error,
         "speaker_count": tj.speaker_count,
+        "dismissed": getattr(tj, "dismissed_at", None) is not None,
+        "dismissed_at": getattr(tj, "dismissed_at", None),
     }
     out["human"] = {
         "progress": f"{tj.progress_pct}%",
@@ -331,6 +335,8 @@ def _clip_job_view(cj) -> dict:
         "result": cj.result,
         "error_category": cj.error_category,
         "error_message": cj.error_message,
+        "dismissed": getattr(cj, "dismissed_at", None) is not None,
+        "dismissed_at": getattr(cj, "dismissed_at", None),
     }
     out["human"] = {
         "progress": f"{cj.progress_pct}%",

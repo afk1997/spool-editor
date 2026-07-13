@@ -131,9 +131,8 @@ def test_concurrent_submits_never_drop_a_persisted_job(tmp_path):
     assert len(data["jobs"]) == 200
 
 
-def test_cancel_done_job_persists_without_deadlock(tmp_path):
-    """cancel() persists while holding the manager lock — must not deadlock now that
-    _persist snapshots under the (reentrant) lock."""
+def test_cancel_done_job_is_false_noop_without_deadlock(tmp_path):
+    """Terminal cancel is a fast false-returning no-op and never deadlocks."""
     mgr = JobManager(max_workers=1, store_path=tmp_path / "jobs.json")
     jid = mgr.submit(target=lambda j: None, title="t", url="u")
     deadline = time.time() + 5
@@ -142,4 +141,5 @@ def test_cancel_done_job_persists_without_deadlock(tmp_path):
     result = []
     t = threading.Thread(target=lambda: result.append(mgr.cancel(jid)))
     t.start(); t.join(timeout=5)
-    assert result == [True], "cancel deadlocked or failed"
+    assert result == [False], "terminal cancel deadlocked or changed state"
+    assert mgr.get(jid).status is JobStatus.DONE

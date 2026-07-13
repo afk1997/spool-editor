@@ -22,6 +22,7 @@ def test_dataclass_defaults():
     assert j.progress_pct == 0
     assert j.language_detected == ""
     assert j.process_handle is None
+    assert j.dismissed_at is None
 
 
 def test_submit_returns_id_and_runs(tmp_path):
@@ -51,6 +52,20 @@ def test_cancel_marks_cancelled(tmp_path):
     time.sleep(0.1)  # let it start
     assert jm.cancel(jid) is True
     assert jm.get(jid).status == TranscribeStatus.CANCELLED
+    jm.shutdown()
+
+
+@pytest.mark.parametrize("status", [TranscribeStatus.DONE, TranscribeStatus.ERROR, TranscribeStatus.CANCELLED])
+def test_cancel_terminal_is_noop(status, tmp_path):
+    artifact = tmp_path / "source.words.json"
+    artifact.write_bytes(b"published-transcript")
+    jm = TranscribeJobManager(max_workers=1, store_path=tmp_path / "tj.json")
+    job = TranscribeJob(id="terminal", parent_job_id="source", model_used="m", status=status)
+    with jm._lock:
+        jm._jobs[job.id] = job
+    assert jm.cancel(job.id) is False
+    assert jm.get(job.id).status is status
+    assert artifact.read_bytes() == b"published-transcript"
     jm.shutdown()
 
 
@@ -106,8 +121,11 @@ def test_running_at_restart_downgrades_to_error(tmp_path):
     jm.shutdown()
 
 
-def test_dismiss_removes_terminal_job(tmp_path):
-    jm = TranscribeJobManager(max_workers=1, store_path=tmp_path / "tj.json")
+def test_dismiss_marks_terminal_job_idempotently_and_persists(tmp_path, monkeypatch):
+    import transcribe_jobs as module
+    monkeypatch.setattr(module, "_utc_now_rfc3339", lambda: "2026-07-13T12:34:56.789Z", raising=False)
+    store = tmp_path / "tj.json"
+    jm = TranscribeJobManager(max_workers=1, store_path=store)
     jid = jm.submit(
         parent_job_id="abc",
         model_path=str(tmp_path / "fake.bin"),
@@ -118,8 +136,14 @@ def test_dismiss_removes_terminal_job(tmp_path):
             break
         time.sleep(0.05)
     assert jm.dismiss(jid) is True
-    assert jm.get(jid) is None
+    assert jm.get(jid).dismissed_at == "2026-07-13T12:34:56.789Z"
+    assert jm.dismiss(jid) is True
+    assert jm.get(jid).dismissed_at == "2026-07-13T12:34:56.789Z"
     jm.shutdown()
+
+    restarted = TranscribeJobManager(max_workers=1, store_path=store)
+    assert restarted.get(jid).dismissed_at == "2026-07-13T12:34:56.789Z"
+    restarted.shutdown()
 
 
 def test_dismiss_refuses_running(tmp_path):
@@ -131,6 +155,20 @@ def test_dismiss_refuses_running(tmp_path):
     )
     time.sleep(0.1)
     assert jm.dismiss(jid) is False
+    jm.shutdown()
+
+
+def test_ttl_sweep_marks_terminal_once_and_preserves_artifacts(tmp_path):
+    artifact = tmp_path / "source.srt"
+    artifact.write_bytes(b"published-srt")
+    jm = TranscribeJobManager(max_workers=1, ttl_seconds=0, store_path=tmp_path / "tj.json")
+    job = TranscribeJob(id="done", parent_job_id="source", model_used="m", status=TranscribeStatus.DONE)
+    with jm._lock:
+        jm._jobs[job.id] = job
+    assert jm.sweep() == 1
+    assert jm.get(job.id).dismissed_at is not None
+    assert artifact.read_bytes() == b"published-srt"
+    assert jm.sweep() == 0
     jm.shutdown()
 
 

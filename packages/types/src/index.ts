@@ -272,6 +272,8 @@ export interface JobView {
   auto_transcribe: boolean;
   error_category: string | null;
   error_message: string | null;
+  dismissed?: boolean;
+  dismissed_at?: string | null;
   human: HumanSummary;
 }
 
@@ -290,6 +292,8 @@ export interface TranscribeJobView {
   diarization_status: string | null;
   diarization_error: string | null;
   speaker_count: number | null;
+  dismissed?: boolean;
+  dismissed_at?: string | null;
   human: HumanSummary;
 }
 
@@ -360,6 +364,8 @@ export interface ClipJobView {
   result: ClipJobResult;
   error_category: string | null;
   error_message: string | null;
+  dismissed?: boolean;
+  dismissed_at?: string | null;
   human: HumanSummary;
 }
 

@@ -1,6 +1,14 @@
 import { describe, it, expect } from "vitest";
 import type { EventsSnapshot, TranscriptWord } from "@spool/types";
-import { mapCandidates, buildTranscript, scoreFromFactors } from "@/components/spool/context";
+import {
+  mapCandidates,
+  buildTranscript,
+  scoreFromFactors,
+  mapSources,
+  mapClips,
+  mapJobs,
+  mapDownloads,
+} from "@/components/spool/context";
 
 /* Pure data-mapping logic — the layer that turns the live engine snapshot into the demo's
  * shapes. These are the highest-value units (no DOM, real branching). */
@@ -58,6 +66,44 @@ describe("mapCandidates", () => {
   it("returns [] for an unknown source or a null snapshot", () => {
     expect(mapCandidates(snapshotWithMoments(), "nope")).toEqual([]);
     expect(mapCandidates(null, "src1")).toEqual([]);
+  });
+});
+
+describe("dismissed history projections", () => {
+  it("keeps published sources and renders in Library/Clips but hides them from Queue/Import", () => {
+    const snapshot = {
+      ts: 0,
+      jobs: [
+        {
+          id: "source-1", url: "https://example.test/video", title: "Published source",
+          status: "done", filename: "source-1.mp4", thumbnail: null, format_choice: "video",
+          downloaded_bytes: 10, total_bytes: 10, speed_bps: 0, eta_seconds: 0,
+          fragment_index: 0, fragment_count: 0, progress_pct: 100, elapsed_seconds: 1,
+          auto_transcribe: false, error_category: null, error_message: null,
+          dismissed: true, dismissed_at: "2026-07-13T12:34:56.789Z",
+          human: { summary: "done", elapsed: "0:01", size: "10 B", speed: "—", eta: "—" },
+        },
+      ],
+      transcripts: [],
+      clips: [
+        {
+          id: "render-job", kind: "pipeline", source_id: "source-1", clip_id: "clip-1",
+          status: "done", progress_pct: 100, stage: null, elapsed_seconds: 1,
+          params: { aspect: "9:16", preset: "tiktok", title: "Published clip" },
+          result: { start: 2, end: 12, render_id: "render-1", aspect: "9:16", preset: "tiktok" },
+          error_category: null, error_message: null,
+          dismissed: true, dismissed_at: "2026-07-13T12:34:56.789Z",
+          human: { summary: "done", elapsed: "0:01" },
+        },
+      ],
+    } as unknown as EventsSnapshot;
+
+    expect(mapSources(snapshot).map((source) => source.id)).toEqual(["source-1"]);
+    expect(mapClips(snapshot)).toEqual([
+      expect.objectContaining({ id: "clip-1", status: "ready", renderId: "render-1" }),
+    ]);
+    expect(mapJobs(snapshot)).toEqual([]);
+    expect(mapDownloads(snapshot)).toEqual([]);
   });
 });
 

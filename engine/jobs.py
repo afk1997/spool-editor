@@ -1,5 +1,6 @@
 from __future__ import annotations
 import enum
+import glob
 import logging
 import os
 import threading
@@ -7,6 +8,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from queue import Full
 from typing import Callable
 
@@ -18,6 +20,14 @@ class JobStatus(str, enum.Enum):
     DONE = "done"
     ERROR = "error"
     CANCELLED = "cancelled"
+
+
+_TERMINAL_STATUSES = {JobStatus.DONE, JobStatus.ERROR, JobStatus.CANCELLED}
+_PUBLISHED_SIDECAR_SUFFIXES = (".json", ".srt", ".vtt", ".txt", ".ass")
+
+
+def _utc_now_rfc3339() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 @dataclass
@@ -61,6 +71,7 @@ class Job:
     # the user can still click `▸ transcribe` manually after installing
     # a model.
     _auto_transcribe_hint: str | None = None
+    dismissed_at: str | None = None
 
 
 class JobManager:
@@ -92,12 +103,9 @@ class JobManager:
         for jid, job in loaded.items():
             # Downgrade rules per design §4.2:
             # DOWNLOADING / QUEUED → PAUSED (interrupted by restart, no live thunk)
-            # CANCELLED dropped (no point keeping)
-            # DONE / ERROR / PAUSED kept as-is
+            # DONE / ERROR / CANCELLED / PAUSED kept as-is
             if job.status in (JobStatus.DOWNLOADING, JobStatus.QUEUED):
                 job.status = JobStatus.PAUSED
-            elif job.status == JobStatus.CANCELLED:
-                continue
             self._jobs[jid] = job
 
     def _persist(self) -> None:
@@ -191,17 +199,11 @@ class JobManager:
             job = self._jobs.get(job_id)
             if job is None:
                 return False
+            if job.status in _TERMINAL_STATUSES:
+                return False
             proc = job.process
             out_template = job.out_template
-            if job.status in {JobStatus.DONE, JobStatus.ERROR, JobStatus.CANCELLED}:
-                if job.file_path and os.path.exists(job.file_path):
-                    try:
-                        os.remove(job.file_path)
-                    except OSError:
-                        pass
-                job.status = JobStatus.CANCELLED
-                self._persist()
-                return True
+            published_path = os.path.realpath(job.file_path) if job.file_path else None
             job.status = JobStatus.CANCELLED
         if proc is not None and hasattr(proc, "kill"):
             try:
@@ -209,35 +211,35 @@ class JobManager:
             except Exception:
                 pass
         if out_template:
-            try:
-                from runner import _cleanup_glob
-                _cleanup_glob(out_template)
-            except Exception:
-                pass
+            for candidate in glob.glob(out_template.replace("%(ext)s", "*")):
+                if published_path and os.path.realpath(candidate) == published_path:
+                    continue
+                if candidate.lower().endswith(_PUBLISHED_SIDECAR_SUFFIXES):
+                    continue
+                try:
+                    os.remove(candidate)
+                except OSError:
+                    pass
         self._persist()
         return True
 
     def dismiss(self, job_id: str) -> bool:
-        """Remove a terminal-state job from the queue and delete its file.
+        """Hide a terminal job from queue projections without deleting history."""
+        return self._mark_dismissed(job_id)
 
-        Symmetric with the TTL sweep but user-triggered. Refuses non-terminal
-        jobs (caller should cancel or pause first to avoid orphaning a running
-        yt-dlp subprocess).
-        """
+    def _mark_dismissed(self, job_id: str) -> bool:
+        changed = False
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
                 return False
-            if job.status not in {JobStatus.DONE, JobStatus.ERROR, JobStatus.CANCELLED}:
+            if job.status not in _TERMINAL_STATUSES:
                 return False
-            file_path = job.file_path
-            del self._jobs[job_id]
-        if file_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except OSError:
-                pass
-        self._persist()
+            if job.dismissed_at is None:
+                job.dismissed_at = _utc_now_rfc3339()
+                changed = True
+        if changed:
+            self._persist()
         return True
 
     def pause(self, job_id: str) -> bool:
@@ -314,67 +316,32 @@ class JobManager:
         self._executor.submit(_run)
         return True
 
-    def sweep(self, *, keep_predicate: Callable[[Job], bool] | None = None) -> int:
-        """Drop terminal jobs whose last_accessed is older than ttl_seconds.
-
-        ``keep_predicate(job) -> bool`` (optional): when supplied and it
-        returns True for a job that would otherwise be swept, the job is
-        retained AND its ``last_accessed`` is refreshed so it doesn't
-        immediately re-qualify for sweep on the next pass.
-
-        This hook exists so the app can preserve parent media jobs that
-        still have a completed transcribe child — without it, the TTL
-        sweep would silently 404 every transcript page after one idle
-        hour and unlink the source media that the transcript's <video>
-        element points at.
-        """
+    def sweep(self) -> int:
+        """Mark newly expired terminal jobs as dismissed without deleting them."""
         cutoff = time.monotonic() - self.ttl_seconds
-        removed = 0
+        changed = 0
+        dismissed_at = _utc_now_rfc3339()
         with self._lock:
-            kept_ids: list[str] = []
-            to_remove: list[str] = []
-            for jid, j in self._jobs.items():
-                if j.status not in {JobStatus.DONE, JobStatus.ERROR, JobStatus.CANCELLED}:
+            for j in self._jobs.values():
+                if j.status not in _TERMINAL_STATUSES or j.dismissed_at is not None:
                     continue
                 if j.last_accessed > cutoff:
                     continue
-                if keep_predicate is not None:
-                    try:
-                        if keep_predicate(j):
-                            kept_ids.append(jid)
-                            continue
-                    except Exception:
-                        # A buggy predicate must not destroy a real job.
-                        kept_ids.append(jid)
-                        continue
-                to_remove.append(jid)
-            for jid in to_remove:
-                job = self._jobs.pop(jid)
-                if job.file_path and os.path.exists(job.file_path):
-                    try:
-                        os.remove(job.file_path)
-                    except OSError:
-                        pass
-                removed += 1
-            now = time.monotonic()
-            for jid in kept_ids:
-                # Bump last_accessed so we don't re-evaluate on every sweep.
-                self._jobs[jid].last_accessed = now
-        if removed:
+                j.dismissed_at = dismissed_at
+                changed += 1
+        if changed:
             self._persist()
-        return removed
+        return changed
 
     def start_sweeper(
         self,
         interval_seconds: int = 300,
-        *,
-        keep_predicate: Callable[[Job], bool] | None = None,
     ) -> None:
         def loop():
             while True:
                 time.sleep(interval_seconds)
                 try:
-                    self.sweep(keep_predicate=keep_predicate)
+                    self.sweep()
                 except Exception:
                     pass
         t = threading.Thread(target=loop, daemon=True, name="trove-sweeper")

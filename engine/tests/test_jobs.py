@@ -47,11 +47,14 @@ def test_submit_marks_error_when_target_raises():
     jm.shutdown()
 
 
-def test_cancel_marks_cancelled_for_done_job():
+def test_cancel_done_is_noop_and_preserves_published_file(tmp_path):
     jm = JobManager(max_workers=1, ttl_seconds=60)
 
+    published = tmp_path / "published.mp4"
+    published.write_bytes(b"published-download")
+
     def work(job: Job):
-        pass
+        job.file_path = str(published)
 
     jid = jm.submit(target=work, title="t", url="https://x")
     for _ in range(50):
@@ -59,8 +62,9 @@ def test_cancel_marks_cancelled_for_done_job():
             break
         time.sleep(0.05)
     cancelled = jm.cancel(jid)
-    assert cancelled is True
-    assert jm.get(jid).status == JobStatus.CANCELLED
+    assert cancelled is False
+    assert jm.get(jid).status == JobStatus.DONE
+    assert published.read_bytes() == b"published-download"
     jm.shutdown()
 
 
@@ -78,7 +82,7 @@ def test_pool_full_returns_overflow():
     jm.shutdown(wait=True)
 
 
-def test_ttl_sweep_removes_old_done_jobs(tmp_path):
+def test_ttl_sweep_marks_old_done_jobs_and_preserves_file(tmp_path):
     jm = JobManager(max_workers=1, ttl_seconds=0)  # zero = sweep immediately
 
     def work(job: Job):
@@ -91,17 +95,16 @@ def test_ttl_sweep_removes_old_done_jobs(tmp_path):
         if jm.get(jid).status == JobStatus.DONE:
             break
         time.sleep(0.05)
-    jm.sweep()
-    assert jm.get(jid) is None
-    assert not (tmp_path / "out.bin").exists()
+    assert jm.sweep() == 1
+    swept = jm.get(jid)
+    assert swept is not None
+    assert swept.dismissed_at is not None
+    assert (tmp_path / "out.bin").read_bytes() == b"x"
+    assert jm.sweep() == 0
     jm.shutdown()
 
 
-def test_ttl_sweep_keep_predicate_preserves_jobs(tmp_path):
-    """When keep_predicate(j) returns True, the job survives the sweep
-    AND its last_accessed is bumped so it doesn't immediately re-qualify.
-    This is what protects parent media jobs that still have a completed
-    transcribe child from being unlinked."""
+def test_ttl_sweep_marks_each_expired_terminal_job_once(tmp_path):
     jm = JobManager(max_workers=1, ttl_seconds=0)
 
     def work(job: Job):
@@ -109,7 +112,6 @@ def test_ttl_sweep_keep_predicate_preserves_jobs(tmp_path):
         f.write_bytes(b"x")
         job.file_path = str(f)
 
-    # Two terminal jobs; predicate keeps one of them.
     jid_keep = jm.submit(target=work, title="keep", url="https://k")
     jid_drop = jm.submit(target=work, title="drop", url="https://d")
     for _ in range(50):
@@ -118,39 +120,22 @@ def test_ttl_sweep_keep_predicate_preserves_jobs(tmp_path):
             break
         time.sleep(0.05)
 
-    removed = jm.sweep(keep_predicate=lambda j: j.id == jid_keep)
-    assert removed == 1
-    assert jm.get(jid_keep) is not None
-    assert jm.get(jid_drop) is None
-    # File for kept job survives; file for dropped job is gone.
-    assert (tmp_path / f"{jid_keep}.bin").exists()
-    assert not (tmp_path / f"{jid_drop}.bin").exists()
-    # Subsequent sweep with NO predicate should still drop the kept job
-    # (it remains terminal + last_accessed was bumped, but ttl=0 means
-    # any non-zero age qualifies — confirm it's still sweepable).
-    time.sleep(0.01)
-    jm.sweep()
-    assert jm.get(jid_keep) is None
+    assert jm.sweep() == 2
+    assert jm.get(jid_keep).dismissed_at is not None
+    assert jm.get(jid_drop).dismissed_at is not None
+    assert (tmp_path / f"{jid_keep}.bin").read_bytes() == b"x"
+    assert (tmp_path / f"{jid_drop}.bin").read_bytes() == b"x"
+    assert jm.sweep() == 0
     jm.shutdown()
 
 
-def test_ttl_sweep_keep_predicate_is_called_per_job(tmp_path):
-    """The predicate sees every candidate job (so the app can walk all
-    transcribe children for a parent, not just the most recent)."""
+def test_ttl_sweep_does_not_mark_active_job(tmp_path):
     jm = JobManager(max_workers=1, ttl_seconds=0)
-
-    def work(job: Job):
-        pass  # no file
-
-    ids = [jm.submit(target=work, title=f"t{i}", url=f"https://x{i}") for i in range(3)]
-    for _ in range(50):
-        if all(jm.get(j).status == JobStatus.DONE for j in ids):
-            break
-        time.sleep(0.05)
-
-    seen = []
-    jm.sweep(keep_predicate=lambda j: seen.append(j.id) or False)
-    assert sorted(seen) == sorted(ids)
+    job = Job(id="active", url="https://x", title="active", status=JobStatus.PAUSED)
+    with jm._lock:
+        jm._jobs[job.id] = job
+    assert jm.sweep() == 0
+    assert jm.get(job.id).dismissed_at is None
     jm.shutdown()
 
 
@@ -167,6 +152,7 @@ def test_job_dataclass_has_resume_fields():
     assert j.format_id is None
     assert j.out_template == ""
     assert j._was_paused is False
+    assert j.dismissed_at is None
 
 
 def test_jobmanager_persists_on_state_change(tmp_path):
@@ -223,7 +209,7 @@ def test_jobmanager_load_downgrades_queued_to_paused(tmp_path):
     jm.shutdown()
 
 
-def test_jobmanager_load_drops_cancelled(tmp_path):
+def test_jobmanager_load_keeps_cancelled(tmp_path):
     from jobs_store import persist_atomic
     store_path = tmp_path / "jobs.json"
     persist_atomic(
@@ -231,7 +217,7 @@ def test_jobmanager_load_drops_cancelled(tmp_path):
         store_path,
     )
     jm = JobManager(max_workers=1, ttl_seconds=60, store_path=store_path)
-    assert jm.get("x") is None
+    assert jm.get("x").status == JobStatus.CANCELLED
     jm.shutdown()
 
 
@@ -342,7 +328,7 @@ def test_resume_no_op_on_already_downloading():
     jm.shutdown()
 
 
-def test_cancel_from_paused_removes_partial_files(tmp_path):
+def test_cancel_from_paused_removes_partial_files_but_preserves_published_file(tmp_path):
     """Cancel on a non-terminal job (e.g. PAUSED) must remove .part and other
     output-template artifacts left behind by the killed yt-dlp process.
     """
@@ -352,6 +338,16 @@ def test_cancel_from_paused_removes_partial_files(tmp_path):
     part_file.write_bytes(b"partial")
     webm_file = tmp_path / "abc.webm"
     webm_file.write_bytes(b"alt")
+    published_file = tmp_path / "abc.mp4"
+    published_file.write_bytes(b"published")
+    transcript_artifacts = {
+        tmp_path / "abc.words.json": b"words",
+        tmp_path / "abc.srt": b"srt",
+        tmp_path / "abc.vtt": b"vtt",
+        tmp_path / "abc.txt": b"txt",
+    }
+    for path, contents in transcript_artifacts.items():
+        path.write_bytes(contents)
     out_template = str(tmp_path / "abc.%(ext)s")
 
     # Insert a paused job directly rather than submitting a live worker: a real
@@ -361,6 +357,7 @@ def test_cancel_from_paused_removes_partial_files(tmp_path):
     job = Job(id="pausedjob", url="https://x", title="t", status=JobStatus.PAUSED)
     job._was_paused = True
     job.out_template = out_template
+    job.file_path = str(published_file)
     with jm._lock:
         jm._jobs[job.id] = job
 
@@ -368,6 +365,9 @@ def test_cancel_from_paused_removes_partial_files(tmp_path):
     assert jm.get(job.id).status == JobStatus.CANCELLED
     assert not part_file.exists(), "cancel should delete .part files"
     assert not webm_file.exists(), "cancel should delete the alt-format leftover"
+    assert published_file.read_bytes() == b"published"
+    for path, contents in transcript_artifacts.items():
+        assert path.read_bytes() == contents
     jm.shutdown()
 
 
@@ -413,8 +413,9 @@ def test_snapshot_jobs_returns_insertion_ordered_list():
     jm.shutdown()
 
 
-def test_dismiss_removes_done_job_and_file(tmp_path):
-    """Dismiss a DONE job: pop from _jobs, delete file_path on disk."""
+def test_dismiss_marks_done_job_idempotently_and_preserves_file(tmp_path, monkeypatch):
+    import jobs
+    monkeypatch.setattr(jobs, "_utc_now_rfc3339", lambda: "2026-07-13T12:34:56.789Z", raising=False)
     jm = JobManager(max_workers=1, ttl_seconds=60)
     f = tmp_path / "out.bin"
     f.write_bytes(b"saved")
@@ -429,13 +430,16 @@ def test_dismiss_removes_done_job_and_file(tmp_path):
         time.sleep(0.05)
 
     assert jm.dismiss(jid) is True
-    assert jm.get(jid) is None
-    assert not f.exists()
+    hidden = jm.get(jid)
+    assert hidden is not None
+    assert hidden.dismissed_at == "2026-07-13T12:34:56.789Z"
+    assert f.read_bytes() == b"saved"
+    assert jm.dismiss(jid) is True
+    assert jm.get(jid).dismissed_at == "2026-07-13T12:34:56.789Z"
     jm.shutdown()
 
 
-def test_dismiss_removes_error_job():
-    """Dismiss on an ERROR job removes the entry from _jobs."""
+def test_dismiss_marks_error_job():
     jm = JobManager(max_workers=1, ttl_seconds=60)
     j = Job(id="errjob1", url="https://x", title="t", status=JobStatus.ERROR,
             error_category="unknown", error_message="boom")
@@ -443,7 +447,7 @@ def test_dismiss_removes_error_job():
         jm._jobs["errjob1"] = j
 
     assert jm.dismiss("errjob1") is True
-    assert jm.get("errjob1") is None
+    assert jm.get("errjob1").dismissed_at is not None
     jm.shutdown()
 
 
@@ -488,15 +492,14 @@ def test_pause_while_queued_stays_paused_until_resumed():
     assert ran == [b]
 
 
-def test_dismiss_removes_cancelled_job():
-    """Dismiss on a CANCELLED job removes the entry from _jobs."""
+def test_dismiss_marks_cancelled_job():
     jm = JobManager(max_workers=1, ttl_seconds=60)
     j = Job(id="canjob1", url="https://x", title="t", status=JobStatus.CANCELLED)
     with jm._lock:
         jm._jobs["canjob1"] = j
 
     assert jm.dismiss("canjob1") is True
-    assert jm.get("canjob1") is None
+    assert jm.get("canjob1").dismissed_at is not None
     jm.shutdown()
 
 

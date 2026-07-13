@@ -15,6 +15,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -25,6 +26,15 @@ class TranscribeStatus(str, enum.Enum):
     DONE        = "done"
     ERROR       = "error"
     CANCELLED   = "cancelled"
+
+
+_TERMINAL_STATUSES = {
+    TranscribeStatus.DONE, TranscribeStatus.ERROR, TranscribeStatus.CANCELLED,
+}
+
+
+def _utc_now_rfc3339() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 @dataclass
@@ -50,19 +60,24 @@ class TranscribeJob:
     # Not persisted:
     process_handle: object | None = None
     _cancel_flag: bool = False
+    dismissed_at: str | None = None
+    last_accessed: float = field(default_factory=time.monotonic)
 
 
 _PERSISTENT_FIELDS = {
     "id", "parent_job_id", "status", "progress_pct", "started_at",
     "duration_seconds", "model_used", "language_detected",
     "error_category", "error_message",
+    "dismissed_at",
     "diarization_status", "diarization_error", "speaker_count",
 }
 
 
 class TranscribeJobManager:
-    def __init__(self, *, max_workers: int = 1, store_path: object = None):
+    def __init__(self, *, max_workers: int = 1, ttl_seconds: int = 3600,
+                 store_path: object = None):
         self.max_workers = max_workers
+        self.ttl_seconds = ttl_seconds
         self._jobs: dict[str, TranscribeJob] = {}
         self._lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
@@ -100,6 +115,7 @@ class TranscribeJobManager:
                     language_detected=raw.get("language_detected", ""),
                     error_category=raw.get("error_category"),
                     error_message=raw.get("error_message"),
+                    dismissed_at=raw.get("dismissed_at"),
                     diarization_status=raw.get("diarization_status"),
                     diarization_error=raw.get("diarization_error"),
                     speaker_count=raw.get("speaker_count"),
@@ -189,19 +205,29 @@ class TranscribeJobManager:
         return True
 
     def dismiss(self, jid: str) -> bool:
+        return self._mark_dismissed(jid)
+
+    def _mark_dismissed(self, jid: str) -> bool:
+        changed = False
         with self._lock:
             j = self._jobs.get(jid)
             if j is None:
                 return False
-            if j.status not in {TranscribeStatus.DONE, TranscribeStatus.ERROR, TranscribeStatus.CANCELLED}:
+            if j.status not in _TERMINAL_STATUSES:
                 return False
-            del self._jobs[jid]
-        self._persist()
+            if j.dismissed_at is None:
+                j.dismissed_at = _utc_now_rfc3339()
+                changed = True
+        if changed:
+            self._persist()
         return True
 
     def get(self, jid: str) -> TranscribeJob | None:
         with self._lock:
-            return self._jobs.get(jid)
+            j = self._jobs.get(jid)
+            if j is not None:
+                j.last_accessed = time.monotonic()
+            return j
 
     def get_by_parent(self, parent_job_id: str) -> TranscribeJob | None:
         """Return the most recent TranscribeJob for this parent, if any."""
@@ -220,6 +246,34 @@ class TranscribeJobManager:
             j = self._jobs.get(jid)
             if j is not None and j.status == TranscribeStatus.RUNNING:
                 j.progress_pct = max(0, min(100, int(pct)))
+
+    def sweep(self) -> int:
+        cutoff = time.monotonic() - self.ttl_seconds
+        changed = 0
+        dismissed_at = _utc_now_rfc3339()
+        with self._lock:
+            for j in self._jobs.values():
+                if j.status not in _TERMINAL_STATUSES or j.dismissed_at is not None:
+                    continue
+                if j.last_accessed > cutoff:
+                    continue
+                j.dismissed_at = dismissed_at
+                changed += 1
+        if changed:
+            self._persist()
+        return changed
+
+    def start_sweeper(self, interval_seconds: int = 300) -> None:
+        def loop():
+            while True:
+                time.sleep(interval_seconds)
+                try:
+                    self.sweep()
+                except Exception:
+                    pass
+        threading.Thread(
+            target=loop, daemon=True, name="trove-transcribe-sweeper",
+        ).start()
 
     def shutdown(self, wait: bool = False) -> None:
         self._executor.shutdown(wait=wait)

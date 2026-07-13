@@ -62,6 +62,7 @@ def create_app() -> Flask:
     # the env-var-aware resolver only if the module global was cleared.
     download_dir = DOWNLOAD_DIR if DOWNLOAD_DIR is not None else _resolve_download_dir()
     download_dir.mkdir(parents=True, exist_ok=True)
+    job_ttl = int(os.environ.get("TROVE_JOB_TTL_SECONDS", str(JOB_TTL)))
 
     # Settings store (demo 07 / spec §5 P2 "config from the UI"). Built before the job pools
     # so a UI-written concurrency takes effect at boot: a persisted override wins over the
@@ -95,7 +96,7 @@ def create_app() -> Flask:
 
     job_manager = JobManager(
         max_workers=effective_max_workers,
-        ttl_seconds=JOB_TTL,
+        ttl_seconds=job_ttl,
         store_path=download_dir / "jobs.json",
     )
     app.extensions["trove.jobs"] = job_manager
@@ -132,6 +133,7 @@ def create_app() -> Flask:
 
     transcribe_manager = transcribe_jobs.TranscribeJobManager(
         max_workers=1,
+        ttl_seconds=job_ttl,
         store_path=download_dir / "transcribe_jobs.json",
     )
     app.extensions["trove.transcribe"] = transcribe_manager
@@ -141,6 +143,7 @@ def create_app() -> Flask:
     # and (later) the MCP server, so manual + agent mode drive the same engine + queue.
     clip_manager = clip_jobs.ClipJobManager(
         max_workers=effective_clip_workers,
+        ttl_seconds=job_ttl,
         store_path=download_dir / "clip_jobs.json",
     )
     app.extensions["trove.clips"] = clip_manager
@@ -169,40 +172,11 @@ def create_app() -> Flask:
     from routes.api_v1 import api_v1_bp
     app.register_blueprint(api_v1_bp)
 
-    # Sweeper has to start AFTER both managers exist because the
-    # keep_predicate references transcribe_manager — without it the
-    # TTL sweep would unlink the source media for every completed
-    # transcript after one idle hour, silently 404-ing the transcript
-    # page and dropping the download.
-    #
-    # Important: walk ALL children, not just the most recent one. A
-    # parent may have an older DONE transcribe AND a newer ERROR
-    # transcribe (e.g. user re-ran the transcribe with a bigger model
-    # and it failed). The older DONE result is still valid and must
-    # keep the parent alive. Using ``get_by_parent`` (which returns
-    # only the latest) would silently drop those.
-    _KEEP_STATUSES = {
-        transcribe_jobs.TranscribeStatus.QUEUED,
-        transcribe_jobs.TranscribeStatus.RUNNING,
-        transcribe_jobs.TranscribeStatus.DONE,
-    }
-
-    def _has_active_or_done_transcribe(parent_job) -> bool:
-        for tj in transcribe_manager.snapshot_jobs():
-            if tj.parent_job_id == parent_job.id and tj.status in _KEEP_STATUSES:
-                return True
-        return False
-
-    def _keep_source(parent_job) -> bool:
-        # Also pin a source whose clips/renders still exist — sweeping its media out
-        # from under a clip would 404 re-cuts/reframes and orphan the clip tree.
-        return _has_active_or_done_transcribe(parent_job) or bool(
-            clip_manager.get_by_source(parent_job.id))
-
-    job_manager.start_sweeper(
-        interval_seconds=300,
-        keep_predicate=_keep_source,
-    )
+    # TTL cleanup is history-only for every queue: it hides expired terminal
+    # attempts without deleting identity or published artifacts.
+    job_manager.start_sweeper(interval_seconds=300)
+    transcribe_manager.start_sweeper(interval_seconds=300)
+    clip_manager.start_sweeper(interval_seconds=300)
 
     # Idempotent HTMX/JS status polls — exempted from the per-IP rate
     # limit because they fire every 1-2s while a page is open and would

@@ -171,7 +171,9 @@ def test_get_job_returns_view_shape(client):
     assert body["status"] == "done"
     assert body["url"] == "https://x"
     # Field set is part of the contract; do not silently drop fields.
-    assert {"filename", "downloaded_bytes", "auto_transcribe"}.issubset(body.keys())
+    assert {"filename", "downloaded_bytes", "auto_transcribe", "dismissed", "dismissed_at"}.issubset(body.keys())
+    assert body["dismissed"] is False
+    assert body["dismissed_at"] is None
 
 
 # ---- jobs write -----------------------------------------------------
@@ -323,6 +325,24 @@ def test_pause_resume_cancel_dismiss(client):
     # dismiss
     r = c.post("/api/v1/jobs/jid/dismiss")
     assert r.status_code == 204
+    history = c.get("/api/v1/jobs/jid")
+    assert history.status_code == 200
+    assert history.get_json()["dismissed"] is True
+    assert history.get_json()["dismissed_at"] is not None
+    assert any(j["id"] == "jid" for j in c.get("/api/v1/jobs").get_json()["jobs"])
+
+
+def test_cancel_terminal_download_is_noop_and_preserves_file(client, tmp_path):
+    app, c = client
+    media = tmp_path / "published.mp4"
+    media.write_bytes(b"published")
+    app.extensions["trove.jobs"]._jobs["done"] = Job(
+        id="done", url="u", title="t", status=JobStatus.DONE,
+        file_path=str(media), filename=media.name,
+    )
+    assert c.post("/api/v1/jobs/done/cancel").status_code == 404
+    assert c.get("/api/v1/jobs/done").get_json()["status"] == "done"
+    assert media.read_bytes() == b"published"
 
 
 def test_pause_404_for_unknown(client):
@@ -492,6 +512,48 @@ def test_transcript_view_includes_human_progress(client):
     assert "running" in h["summary"]
     assert "42%" in h["summary"]
     assert "ggml-tiny.bin" in h["summary"]
+
+
+def test_transcript_history_retains_dismissed_record(client):
+    app, c = client
+    tm = app.extensions["trove.transcribe"]
+    tj = transcribe_jobs.TranscribeJob(
+        id="dismissed-t", parent_job_id="p1", model_used="ggml-tiny.bin",
+        status=transcribe_jobs.TranscribeStatus.DONE,
+    )
+    with tm._lock:
+        tm._jobs[tj.id] = tj
+    assert c.post(f"/api/v1/transcripts/{tj.id}/dismiss").status_code == 204
+    direct = c.get(f"/api/v1/transcripts/{tj.id}")
+    assert direct.status_code == 200
+    assert direct.get_json()["dismissed"] is True
+    assert direct.get_json()["dismissed_at"] is not None
+    listed = c.get("/api/v1/transcripts").get_json()["transcripts"]
+    assert any(row["id"] == tj.id and row["dismissed"] is True for row in listed)
+
+
+def test_create_app_configures_and_starts_all_job_sweepers(tmp_path, monkeypatch):
+    import app as app_module
+    from clip_jobs import ClipJobManager
+    from jobs import JobManager
+    from transcribe_jobs import TranscribeJobManager
+
+    calls = []
+    monkeypatch.setenv("TROVE_JOB_TTL_SECONDS", "17")
+    monkeypatch.setenv("TROVE_RATE_LIMIT", "0")
+    monkeypatch.setattr(app_module, "DOWNLOAD_DIR", tmp_path / "sweeper-downloads")
+    monkeypatch.setattr(JobManager, "start_sweeper", lambda self, *a, **k: calls.append("download"))
+    monkeypatch.setattr(TranscribeJobManager, "start_sweeper", lambda self, *a, **k: calls.append("transcribe"))
+    monkeypatch.setattr(ClipJobManager, "start_sweeper", lambda self, *a, **k: calls.append("clip"))
+
+    created = app_module.create_app()
+    assert created.extensions["trove.jobs"].ttl_seconds == 17
+    assert created.extensions["trove.transcribe"].ttl_seconds == 17
+    assert created.extensions["trove.clips"].ttl_seconds == 17
+    assert calls == ["download", "transcribe", "clip"]
+    created.extensions["trove.jobs"].shutdown(wait=True)
+    created.extensions["trove.transcribe"].shutdown(wait=True)
+    created.extensions["trove.clips"].shutdown(wait=True)
 
 
 # ---- rate-limit exemption scope ------------------------------------

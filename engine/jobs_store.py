@@ -24,6 +24,7 @@ SCHEMA_VERSION = 1
 _PERSISTENT_FIELDS = (
     "id", "url", "title", "status", "thumbnail",
     "file_path", "filename", "error_category", "error_message",
+    "dismissed_at",
     "downloaded_bytes", "total_bytes", "speed", "eta",
     "fragment_index", "fragment_count",
     "format_choice", "format_id", "out_template",
@@ -53,6 +54,7 @@ def _job_from_dict(data: dict) -> Job:
         filename=data.get("filename"),
         error_category=data.get("error_category"),
         error_message=data.get("error_message"),
+        dismissed_at=data.get("dismissed_at"),
         downloaded_bytes=int(data.get("downloaded_bytes") or 0),
         total_bytes=int(data.get("total_bytes") or 0),
         speed=float(data.get("speed") or 0.0),

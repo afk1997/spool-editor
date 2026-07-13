@@ -33,6 +33,7 @@ def test_dataclass_defaults():
     assert j.params == {} and j.result == {}
     assert j.clip_id is None and j.stage == ""
     assert j.process_handle is None
+    assert j.dismissed_at is None
 
 
 def test_submit_returns_id_and_runs(tmp_path):
@@ -105,6 +106,21 @@ def test_cancel_marks_cancelled_and_kills_proc(tmp_path):
     jm.shutdown()
 
 
+@pytest.mark.parametrize("status", [ClipStatus.DONE, ClipStatus.ERROR, ClipStatus.CANCELLED])
+def test_cancel_terminal_is_noop(status, tmp_path):
+    artifact = tmp_path / "render.mp4"
+    artifact.write_bytes(b"published-render")
+    jm = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
+    job = ClipJob(id="terminal", kind="export", clip_id="clip", status=status,
+                  result={"output_path": str(artifact)})
+    with jm._lock:
+        jm._jobs[job.id] = job
+    assert jm.cancel(job.id) is False
+    assert jm.get(job.id).status is status
+    assert artifact.read_bytes() == b"published-render"
+    jm.shutdown()
+
+
 def test_update_progress_clamps_and_sets_stage(tmp_path):
     jm = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
     gate = threading.Event()
@@ -163,11 +179,17 @@ def test_running_at_restart_downgrades_to_error(tmp_path):
     jm.shutdown()
 
 
-def test_dismiss_removes_terminal_refuses_running(tmp_path):
-    jm = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
+def test_dismiss_marks_terminal_idempotently_and_refuses_running(tmp_path, monkeypatch):
+    import clip_jobs as module
+    monkeypatch.setattr(module, "_utc_now_rfc3339", lambda: "2026-07-13T12:34:56.789Z", raising=False)
+    store = tmp_path / "clip.json"
+    jm = ClipJobManager(max_workers=1, store_path=store)
     done = jm.submit(kind="cut", target=lambda j: None)
     _await(jm, done, ClipStatus.DONE)
-    assert jm.dismiss(done) is True and jm.get(done) is None
+    assert jm.dismiss(done) is True
+    assert jm.get(done).dismissed_at == "2026-07-13T12:34:56.789Z"
+    assert jm.dismiss(done) is True
+    assert jm.get(done).dismissed_at == "2026-07-13T12:34:56.789Z"
 
     gate = threading.Event()
     running = jm.submit(kind="cut", target=lambda j: gate.wait(2))
@@ -175,6 +197,25 @@ def test_dismiss_removes_terminal_refuses_running(tmp_path):
     assert jm.dismiss(running) is False
     gate.set()
     jm.shutdown(wait=True)
+
+    restarted = ClipJobManager(max_workers=1, store_path=store)
+    assert restarted.get(done).dismissed_at == "2026-07-13T12:34:56.789Z"
+    restarted.shutdown()
+
+
+def test_ttl_sweep_marks_terminal_once_and_preserves_artifacts(tmp_path):
+    artifact = tmp_path / "render.mp4"
+    artifact.write_bytes(b"published-render")
+    jm = ClipJobManager(max_workers=1, ttl_seconds=0, store_path=tmp_path / "clip.json")
+    job = ClipJob(id="done", kind="export", clip_id="clip", status=ClipStatus.DONE,
+                  result={"output_path": str(artifact)})
+    with jm._lock:
+        jm._jobs[job.id] = job
+    assert jm.sweep() == 1
+    assert jm.get(job.id).dismissed_at is not None
+    assert artifact.read_bytes() == b"published-render"
+    assert jm.sweep() == 0
+    jm.shutdown()
 
 
 def test_lookups_by_clip_and_source(tmp_path):

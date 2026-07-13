@@ -22,6 +22,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -32,6 +33,13 @@ class ClipStatus(str, enum.Enum):
     DONE      = "done"
     ERROR     = "error"
     CANCELLED = "cancelled"
+
+
+_TERMINAL_STATUSES = {ClipStatus.DONE, ClipStatus.ERROR, ClipStatus.CANCELLED}
+
+
+def _utc_now_rfc3339() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 # The clip-engine operations, one per engine module (+ the chained pipeline).
@@ -55,17 +63,22 @@ class ClipJob:
     # Not persisted:
     process_handle: object | None = None
     _cancel_flag: bool = False
+    dismissed_at: str | None = None
+    last_accessed: float = field(default_factory=time.monotonic)
 
 
 _PERSISTENT_FIELDS = {
     "id", "kind", "source_id", "clip_id", "status", "progress_pct", "stage",
     "started_at", "params", "result", "error_category", "error_message",
+    "dismissed_at",
 }
 
 
 class ClipJobManager:
-    def __init__(self, *, max_workers: int = 2, store_path: object = None):
+    def __init__(self, *, max_workers: int = 2, ttl_seconds: int = 3600,
+                 store_path: object = None):
         self.max_workers = max_workers
+        self.ttl_seconds = ttl_seconds
         self._jobs: dict[str, ClipJob] = {}
         self._lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
@@ -106,6 +119,7 @@ class ClipJobManager:
                     result=raw.get("result") or {},
                     error_category=raw.get("error_category"),
                     error_message=raw.get("error_message"),
+                    dismissed_at=raw.get("dismissed_at"),
                 )
             except (KeyError, ValueError):
                 continue
@@ -196,19 +210,29 @@ class ClipJobManager:
         return True
 
     def dismiss(self, jid: str) -> bool:
+        return self._mark_dismissed(jid)
+
+    def _mark_dismissed(self, jid: str) -> bool:
+        changed = False
         with self._lock:
             j = self._jobs.get(jid)
             if j is None:
                 return False
-            if j.status not in {ClipStatus.DONE, ClipStatus.ERROR, ClipStatus.CANCELLED}:
+            if j.status not in _TERMINAL_STATUSES:
                 return False
-            del self._jobs[jid]
-        self._persist()
+            if j.dismissed_at is None:
+                j.dismissed_at = _utc_now_rfc3339()
+                changed = True
+        if changed:
+            self._persist()
         return True
 
     def get(self, jid: str) -> ClipJob | None:
         with self._lock:
-            return self._jobs.get(jid)
+            j = self._jobs.get(jid)
+            if j is not None:
+                j.last_accessed = time.monotonic()
+            return j
 
     def get_by_clip(self, clip_id: str) -> list[ClipJob]:
         with self._lock:
@@ -229,6 +253,34 @@ class ClipJobManager:
                 j.progress_pct = max(0, min(100, int(pct)))
                 if stage is not None:
                     j.stage = stage
+
+    def sweep(self) -> int:
+        cutoff = time.monotonic() - self.ttl_seconds
+        changed = 0
+        dismissed_at = _utc_now_rfc3339()
+        with self._lock:
+            for j in self._jobs.values():
+                if j.status not in _TERMINAL_STATUSES or j.dismissed_at is not None:
+                    continue
+                if j.last_accessed > cutoff:
+                    continue
+                j.dismissed_at = dismissed_at
+                changed += 1
+        if changed:
+            self._persist()
+        return changed
+
+    def start_sweeper(self, interval_seconds: int = 300) -> None:
+        def loop():
+            while True:
+                time.sleep(interval_seconds)
+                try:
+                    self.sweep()
+                except Exception:
+                    pass
+        threading.Thread(
+            target=loop, daemon=True, name="trove-clip-sweeper",
+        ).start()
 
     def shutdown(self, wait: bool = False) -> None:
         self._executor.shutdown(wait=wait)

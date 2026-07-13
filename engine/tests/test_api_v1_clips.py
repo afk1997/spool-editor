@@ -381,7 +381,12 @@ def test_dismiss_clip_job(client):
     j = c.post("/api/v1/sources/src1/cut", json={"start": 1, "end": 5}).get_json()
     _await(c, j["id"])
     assert c.post(f"/api/v1/clip-jobs/{j['id']}/dismiss").status_code == 204
-    assert c.get(f"/api/v1/clip-jobs/{j['id']}").status_code == 404
+    direct = c.get(f"/api/v1/clip-jobs/{j['id']}")
+    assert direct.status_code == 200
+    assert direct.get_json()["dismissed"] is True
+    assert direct.get_json()["dismissed_at"] is not None
+    listed = c.get("/api/v1/clip-jobs").get_json()["clip_jobs"]
+    assert any(row["id"] == j["id"] and row["dismissed"] is True for row in listed)
 
 
 # ---- discovery surfaces ---------------------------------------------
