@@ -600,6 +600,7 @@ This slice has three independently revertible commits: visible product truth, pr
 - Modify: `apps/studio/src/components/spool/cards.tsx`
 - Create: `apps/studio/src/lib/action-error.ts`
 - Modify: `packages/api-client/src/index.ts`
+- Modify: `packages/ui/src/ui.tsx`
 - Modify: `apps/studio/test/api-client.test.ts`
 - Modify: `apps/studio/src/app/import/page.tsx`
 - Modify: `apps/studio/src/app/library/page.tsx`
@@ -630,6 +631,7 @@ Render the relevant pages/components with a mocked `SpoolApiClient` and assert:
 - Source/Clip not-found copy no longer claims queue clearing deleted work; it reports an unavailable ID or incomplete import/render and preserves the recovery action;
 - every visible mutating API action on Library, Queue, Source, Editor, Reframe, Brand, Recipes, and Watches reports failure; batch actions use `Promise.allSettled`, report exact succeeded/failed counts, and never emit success before the promises settle.
 - the shared API client preserves both the engine's structured error code and message so unknown server failures remain actionable in Studio.
+- shared switches used by visible import options are keyboard-operable and expose `role="switch"`, an accessible name, and checked state.
 
 - [ ] **Step 2: Observe the product-truth test fail**
 
@@ -655,7 +657,7 @@ pnpm --filter @spool/studio test
 pnpm --filter @spool/studio typecheck
 pnpm --filter @spool/studio lint
 git add apps/studio/test/product-truth.test.tsx apps/studio/test/context-mutations.test.tsx \
-  apps/studio/test/api-client.test.ts packages/api-client/src/index.ts \
+  apps/studio/test/api-client.test.ts packages/api-client/src/index.ts packages/ui/src/ui.tsx \
   apps/studio/src/components/spool/shell.tsx \
   apps/studio/src/components/spool/overlays.tsx \
   apps/studio/src/components/spool/agent.tsx \
