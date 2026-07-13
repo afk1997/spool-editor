@@ -590,6 +590,10 @@ This slice has three independently revertible commits: visible product truth, pr
 **Files:**
 
 - Create: `apps/studio/test/product-truth.test.tsx`
+- Create: `apps/studio/test/queue-guards.test.tsx`
+- Create: `apps/studio/test/import-job-guards.test.tsx`
+- Create: `apps/studio/test/editor-async-a11y.test.tsx`
+- Create: `apps/studio/test/visible-mutation-inventory.test.tsx`
 - Modify: `apps/studio/test/context-mutations.test.tsx`
 - Modify: `apps/studio/src/components/spool/shell.tsx`
 - Modify: `apps/studio/src/components/spool/overlays.tsx`
@@ -607,6 +611,7 @@ This slice has three independently revertible commits: visible product truth, pr
 - Modify: `apps/studio/src/app/queue/page.tsx`
 - Modify: `apps/studio/src/app/clips/page.tsx`
 - Modify: `apps/studio/src/app/clips/[id]/page.tsx`
+- Modify: `apps/studio/src/app/clips/[id]/caption/page.tsx`
 - Modify: `apps/studio/src/app/clips/[id]/reframe/page.tsx`
 - Modify: `apps/studio/src/app/analytics/page.tsx`
 - Modify: `apps/studio/src/app/page.tsx`
@@ -614,6 +619,7 @@ This slice has three independently revertible commits: visible product truth, pr
 - Modify: `apps/studio/src/app/brand/page.tsx`
 - Modify: `apps/studio/src/app/recipes/page.tsx`
 - Modify: `apps/studio/src/app/watches/page.tsx`
+- Modify: `apps/studio/src/app/settings/page.tsx`
 
 - [ ] **Step 1: Add the complete visible-control regression inventory**
 
@@ -631,7 +637,8 @@ Render the relevant pages/components with a mocked `SpoolApiClient` and assert:
 - Source/Clip not-found copy no longer claims queue clearing deleted work; it reports an unavailable ID or incomplete import/render and preserves the recovery action;
 - every visible mutating API action on Library, Queue, Source, Editor, Reframe, Brand, Recipes, and Watches reports failure; batch actions use `Promise.allSettled`, report exact succeeded/failed counts, and never emit success before the promises settle.
 - the shared API client preserves both the engine's structured error code and message so unknown server failures remain actionable in Studio.
-- shared switches used by visible import options are keyboard-operable and expose `role="switch"`, an accessible name, and checked state.
+- shared switches and segmented controls used by visible Studio surfaces are keyboard-operable and expose distinct accessible names plus checked/selected state;
+- repeated clicks cannot submit duplicate/conflicting row or batch mutations before React state or SSE catches up, and long-running completions never redirect a route the user has since left.
 
 - [ ] **Step 2: Observe the product-truth test fail**
 
@@ -657,6 +664,8 @@ pnpm --filter @spool/studio test
 pnpm --filter @spool/studio typecheck
 pnpm --filter @spool/studio lint
 git add apps/studio/test/product-truth.test.tsx apps/studio/test/context-mutations.test.tsx \
+  apps/studio/test/queue-guards.test.tsx apps/studio/test/import-job-guards.test.tsx \
+  apps/studio/test/editor-async-a11y.test.tsx apps/studio/test/visible-mutation-inventory.test.tsx \
   apps/studio/test/api-client.test.ts packages/api-client/src/index.ts packages/ui/src/ui.tsx \
   apps/studio/src/components/spool/shell.tsx \
   apps/studio/src/components/spool/overlays.tsx \
@@ -668,6 +677,7 @@ git add apps/studio/test/product-truth.test.tsx apps/studio/test/context-mutatio
   apps/studio/src/app/import/page.tsx apps/studio/src/app/library/page.tsx \
   apps/studio/src/app/queue/page.tsx \
   apps/studio/src/app/clips/page.tsx 'apps/studio/src/app/clips/[id]/page.tsx' \
+  'apps/studio/src/app/clips/[id]/caption/page.tsx' apps/studio/src/app/settings/page.tsx \
   'apps/studio/src/app/clips/[id]/reframe/page.tsx' \
   apps/studio/src/app/analytics/page.tsx apps/studio/src/app/page.tsx \
   'apps/studio/src/app/sources/[id]/page.tsx' apps/studio/src/app/brand/page.tsx \
