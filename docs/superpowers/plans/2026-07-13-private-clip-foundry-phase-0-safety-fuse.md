@@ -680,12 +680,14 @@ Before committing, inspect `git diff --cached --name-only` and unstage any gener
 - Modify: `engine/app.py`
 - Modify: `engine/clip/llm.py`
 - Modify: `engine/models_store.py`
+- Modify: `engine/runner.py`
 - Modify: `engine/watcher.py`
 - Modify: `engine/routes/api_v1.py`
 - Modify: `engine/tests/test_settings.py`
 - Modify: `engine/tests/test_llm.py`
 - Modify: `engine/tests/test_moments.py`
 - Modify: `engine/tests/test_models_store.py`
+- Modify: `engine/tests/test_runner.py`
 - Modify: `engine/tests/test_watcher.py`
 - Modify: `engine/tests/test_api_v1.py`
 - Modify: `packages/types/src/index.ts`
@@ -694,6 +696,7 @@ Before committing, inspect `git diff --cached --name-only` and unstage any gener
 - Modify: `apps/studio/src/app/onboarding/page.tsx`
 - Modify: `apps/studio/src/app/settings/page.tsx`
 - Modify: `apps/studio/src/app/import/page.tsx`
+- Modify: `apps/studio/src/app/watches/page.tsx`
 - Modify: `apps/studio/src/components/spool/shell.tsx`
 - Modify: `apps/studio/src/components/spool/context.tsx`
 
@@ -730,7 +733,8 @@ Tests with DNS, runner, `urlopen`, watcher, and provider spies must prove:
 cd engine
 .venv/bin/python -m pytest -q \
   tests/test_network_policy.py tests/test_settings.py tests/test_llm.py \
-  tests/test_moments.py tests/test_models_store.py tests/test_watcher.py tests/test_api_v1.py \
+  tests/test_moments.py tests/test_models_store.py tests/test_runner.py \
+  tests/test_watcher.py tests/test_api_v1.py \
   -k "provider or consent or egress or offline or network_policy"
 cd ..
 pnpm --filter @spool/studio exec vitest run test/privacy-mode.test.tsx
@@ -778,7 +782,8 @@ offline
 cd engine
 .venv/bin/python -m pytest -q \
   tests/test_network_policy.py tests/test_settings.py tests/test_llm.py \
-  tests/test_moments.py tests/test_models_store.py tests/test_watcher.py tests/test_api_v1.py
+  tests/test_moments.py tests/test_models_store.py tests/test_runner.py \
+  tests/test_watcher.py tests/test_api_v1.py
 .venv/bin/python -m pytest -q
 cd ..
 pnpm --filter @spool/studio exec vitest run test/privacy-mode.test.tsx
@@ -788,14 +793,15 @@ pnpm --filter @spool/studio lint
 pnpm --filter @spool/api-client lint
 pnpm --filter @spool/types lint
 git add engine/network_policy.py engine/settings.py engine/app.py engine/clip/llm.py \
-  engine/models_store.py engine/watcher.py engine/routes/api_v1.py \
+  engine/models_store.py engine/runner.py engine/watcher.py engine/routes/api_v1.py \
   engine/tests/test_network_policy.py engine/tests/test_settings.py engine/tests/test_llm.py \
-  engine/tests/test_moments.py engine/tests/test_models_store.py \
+  engine/tests/test_moments.py engine/tests/test_models_store.py engine/tests/test_runner.py \
   engine/tests/test_watcher.py engine/tests/test_api_v1.py \
   packages/types/src/index.ts packages/api-client/src/index.ts \
   apps/studio/test/privacy-mode.test.tsx apps/studio/src/app/layout.tsx \
   apps/studio/src/app/onboarding/page.tsx apps/studio/src/app/settings/page.tsx \
-  apps/studio/src/app/import/page.tsx apps/studio/src/components/spool/shell.tsx \
+  apps/studio/src/app/import/page.tsx apps/studio/src/app/watches/page.tsx \
+  apps/studio/src/components/spool/shell.tsx \
   apps/studio/src/components/spool/context.tsx
 git diff --cached --check
 git commit -m "fix(privacy): require consent and enforce offline mode"
