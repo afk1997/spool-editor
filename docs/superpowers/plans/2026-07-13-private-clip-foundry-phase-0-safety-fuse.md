@@ -283,6 +283,7 @@ Expected: Python, typecheck, tests, and build match Section 3. `pnpm lint` retai
 - Modify: `engine/app.py`
 - Modify: `engine/routes/api_v1.py`
 - Modify: `engine/tests/test_jobs.py`
+- Modify: `engine/tests/test_jobs_store.py`
 - Modify: `engine/tests/test_transcribe_jobs.py`
 - Modify: `engine/tests/test_clip_jobs.py`
 - Modify: `engine/tests/test_api_v1.py`
@@ -411,7 +412,8 @@ pnpm --filter @spool/studio typecheck
 
 ```bash
 git add engine/jobs.py engine/jobs_store.py engine/transcribe_jobs.py engine/clip_jobs.py \
-  engine/app.py engine/routes/api_v1.py engine/tests/test_jobs.py engine/tests/test_transcribe_jobs.py \
+  engine/app.py engine/routes/api_v1.py engine/tests/test_jobs.py engine/tests/test_jobs_store.py \
+  engine/tests/test_transcribe_jobs.py \
   engine/tests/test_clip_jobs.py engine/tests/test_api_v1.py \
   engine/tests/test_api_v1_clips.py engine/tests/test_phase0_artifact_safety.py \
   packages/types/src/index.ts apps/studio/src/components/spool/context.tsx \
