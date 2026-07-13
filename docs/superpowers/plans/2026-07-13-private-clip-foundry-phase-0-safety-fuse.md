@@ -437,6 +437,7 @@ Rollback rule: if a consumer cannot tolerate the additive marker, keep unlink/po
 - Modify: `engine/clip_runner.py`
 - Modify: `engine/tests/test_jobs.py`
 - Modify: `engine/tests/test_transcribe_jobs.py`
+- Modify: `engine/tests/test_transcribe_pipeline.py`
 - Modify: `engine/tests/test_clip_jobs.py`
 - Modify: `engine/tests/test_api_v1.py`
 - Modify: `engine/tests/test_api_v1_clips.py`
@@ -560,6 +561,7 @@ cd engine
   tests/test_attempt_staging.py \
   tests/test_jobs.py \
   tests/test_transcribe_jobs.py \
+  tests/test_transcribe_pipeline.py \
   tests/test_clip_jobs.py \
   tests/test_api_v1.py \
   tests/test_api_v1_clips.py
@@ -572,7 +574,8 @@ cd engine
 git add engine/attempt_staging.py engine/jobs.py engine/transcribe_jobs.py \
   engine/clip_jobs.py engine/app.py engine/clip_runner.py \
   engine/tests/test_attempt_staging.py engine/tests/test_jobs.py \
-  engine/tests/test_transcribe_jobs.py engine/tests/test_clip_jobs.py \
+  engine/tests/test_transcribe_jobs.py engine/tests/test_transcribe_pipeline.py \
+  engine/tests/test_clip_jobs.py \
   engine/tests/test_api_v1.py engine/tests/test_api_v1_clips.py
 git diff --cached --check
 git commit -m "fix(engine): fence stale job attempts"
