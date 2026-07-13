@@ -47,23 +47,23 @@ def test_submit_marks_error_when_target_raises():
     jm.shutdown()
 
 
-def test_cancel_done_is_noop_and_preserves_published_file(tmp_path):
+@pytest.mark.parametrize(
+    "status", [JobStatus.DONE, JobStatus.ERROR, JobStatus.CANCELLED],
+)
+def test_cancel_terminal_is_noop_and_preserves_published_file(status, tmp_path):
     jm = JobManager(max_workers=1, ttl_seconds=60)
 
     published = tmp_path / "published.mp4"
     published.write_bytes(b"published-download")
+    job = Job(
+        id=f"terminal-{status.value}", url="https://x", title="t",
+        status=status, file_path=str(published), filename=published.name,
+    )
+    with jm._lock:
+        jm._jobs[job.id] = job
 
-    def work(job: Job):
-        job.file_path = str(published)
-
-    jid = jm.submit(target=work, title="t", url="https://x")
-    for _ in range(50):
-        if jm.get(jid).status == JobStatus.DONE:
-            break
-        time.sleep(0.05)
-    cancelled = jm.cancel(jid)
-    assert cancelled is False
-    assert jm.get(jid).status == JobStatus.DONE
+    assert jm.cancel(job.id) is False
+    assert jm.get(job.id).status is status
     assert published.read_bytes() == b"published-download"
     jm.shutdown()
 
