@@ -45,6 +45,7 @@ vi.mock("@/components/spool/context", async (importOriginal) => {
 
 import EditorScreen from "@/app/clips/[id]/page";
 import { AgentPanel } from "@/components/spool/agent";
+import { Timeline } from "@/components/spool/timeline";
 import { AdjustModal, TranscriptView } from "@/components/spool/work";
 
 const deferred = <T,>() => {
@@ -577,6 +578,26 @@ describe("editor async lifecycle guards", () => {
 });
 
 describe("editor controls expose their real accessible actions", () => {
+  it("does not fabricate Speaker A when timeline words have no diarization", () => {
+    render(
+      <Timeline
+        words={[{ idx: 0, w: "Hello", start: 0, end: 1 }]}
+        segments={[]}
+        lo={0}
+        hi={2}
+        cur={0}
+        onSeek={vi.fn()}
+        onDeleteWord={vi.fn()}
+        energyBars={[]}
+        sceneCuts={[]}
+        filmstrip={null}
+        onTrim={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTitle("Speaker A")).not.toBeInTheDocument();
+  });
+
   it("labels the Agent close control", () => {
     harness.ctx = baseCtx({ agentOpen: true });
     render(<AgentPanel />);

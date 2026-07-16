@@ -80,8 +80,8 @@ export function Timeline({
     runs = segRuns;
   } else {
     for (const w of words) {
-      if (w.start == null) continue;
-      const sp = w.speaker || "A";
+      if (w.start == null || !w.speaker) continue;
+      const sp = w.speaker;
       const s = w.start - lo, e = (w.end ?? w.start) - lo;
       const last = runs[runs.length - 1];
       if (last && last.sp === sp && s - last.e < 1.2) last.e = e;
