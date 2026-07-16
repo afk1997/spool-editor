@@ -293,6 +293,74 @@ describe("product truth: live view models", () => {
     expect(container.querySelector(".thumb .tr")).toBeNull();
   });
 
+  it("ignores dismissed clip failures without discarding successful artifact metadata", () => {
+    const base = {
+      source_id: "source-1",
+      clip_id: "clip-1",
+      progress_pct: 100,
+      elapsed_seconds: 1,
+      stage: null,
+      error_category: null,
+      error_message: null,
+      human: { summary: "done", elapsed: "0:01" },
+    };
+    const snapshot = {
+      ts: 2,
+      jobs: [],
+      transcripts: [],
+      clips: [
+        {
+          ...base,
+          id: "cut-done",
+          kind: "cut",
+          status: "done",
+          params: {},
+          result: { start: 2, end: 9 },
+        },
+        {
+          ...base,
+          id: "reframe-done",
+          kind: "reframe",
+          status: "done",
+          dismissed: true,
+          params: { aspect: "4:5" },
+          result: { aspect: "4:5" },
+        },
+        {
+          ...base,
+          id: "caption-done",
+          kind: "caption",
+          status: "done",
+          dismissed: true,
+          params: { style: "minimal" },
+          result: { style: "minimal" },
+        },
+        {
+          ...base,
+          id: "export-failed",
+          kind: "export",
+          status: "error",
+          dismissed: true,
+          progress_pct: 40,
+          params: { preset: "tiktok" },
+          result: {},
+          error_category: "encode_failed",
+          error_message: "Encoder stopped.",
+        },
+      ],
+    } as unknown as EventsSnapshot;
+
+    expect(mapClips(snapshot)[0]).toMatchObject({
+      id: "clip-1",
+      status: "ready",
+      dur: 7,
+      start: 2,
+      end: 9,
+      aspect: "4:5",
+      style: "minimal",
+    });
+  });
+
   it("labels missing diarization as unknown instead of inventing Speaker A", () => {
     const transcript = buildTranscript([
       { idx: 0, w: "Hello", start: 0, end: 0.4 },

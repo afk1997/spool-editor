@@ -164,12 +164,13 @@ export function mapClips(snap: EventsSnapshot | null): SpoolClip[] {
   }
   const out: SpoolClip[] = [];
   for (const [cid, jobs] of byClip) {
-    const cut = jobs.find((j) => j.kind === "cut") ?? jobs.find((j) => j.kind === "pipeline");
+    const visibleJobs = jobs.filter((job) => !job.dismissed);
+    const cut = jobs.filter((j) => (j.kind === "cut" || j.kind === "pipeline") && j.status === "done").at(-1);
     const render = jobs.filter((j) => (j.kind === "export" || j.kind === "pipeline") && j.status === "done" && j.result.render_id).at(-1);
-    const active = jobs.filter((j) => j.status === "running" || j.status === "queued").at(-1);
+    const active = visibleJobs.filter((j) => j.status === "running" || j.status === "queued").at(-1);
     const reframe = jobs.filter((j) => (j.kind === "reframe" || j.kind === "pipeline") && j.status === "done").at(-1);
     const cap2 = jobs.filter((j) => (j.kind === "caption" || j.kind === "pipeline") && j.status === "done").at(-1);
-    const latest = jobs.at(-1);
+    const latest = visibleJobs.at(-1);
     const win = cut?.result;
     const mode = (cut?.params?.mode as string) || (jobs.find((j) => j.kind === "moments")?.result.mode as string) || "";
     const status = render
