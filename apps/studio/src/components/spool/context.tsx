@@ -80,7 +80,7 @@ export interface AgentMessage {
   jobChips?: { id: string; kind: string }[];
   /** source context the turn was asked with — re-sent when this elicit is answered */
   sourceId?: string;
-  /** set on a confirm elicit: re-ask payload for the approved turn */
+  /** Legacy persisted confirm payload. Phase 0 treats it as inert and never replays it. */
   confirmFor?: { text: string; tool: string };
 }
 
@@ -332,7 +332,7 @@ interface SpoolCtx {
   paletteOpen: boolean; openPalette: () => void; closePalette: () => void;
   shortcutsOpen: boolean; openShortcuts: () => void; closeShortcuts: () => void;
   agentMessages: AgentMessage[]; working: boolean;
-  askAgent: (text: string, sourceId?: string, confirmTool?: string) => void;
+  askAgent: (text: string, sourceId?: string) => void;
   answerElicit: (msg: AgentMessage, answer: unknown) => void;
   makeClipsFrom: (sel: { source_id?: string; start?: number; end?: number; id?: string; title?: string }[], opts?: { aspect?: string; mode?: string; style?: string; preset?: string }) => Promise<void>;
   /** Poll a clip job to a terminal state — pages sequence dependent jobs with it. */
@@ -420,14 +420,14 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
 
   const push = useCallback((m: AgentMessage) => setAgentMessages((a) => [...a, m]), []);
 
-  const askAgent = useCallback((text: string, sourceId?: string, confirmTool?: string) => {
+  const askAgent = useCallback((text: string, sourceId?: string) => {
     if (!text.trim() || agentInFlight.current) return;
     agentInFlight.current = true;
     setAgentOpen(true);
     push({ role: "user", text });
     setWorking(true);
     client
-      .agent(text, { sourceId, confirmTool })
+      .agent(text, { sourceId })
       .then((r) => {
         // Real per-step tool trace from the ReAct loop (read tools that start no job are visible too).
         if (r.tools?.length)
@@ -435,14 +435,6 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
         push({ role: "agent", text: r.reply });
         if (r.action === "clarify" && r.question)
           push({ role: "elicit", id: "e" + ++elicitSeq.current, kind: (r.kind as AgentMessage["kind"]) ?? "enum", tag: "agent needs you", q: r.question, options: r.options ?? [], sourceId });
-        if (r.action === "confirm" && r.pending)
-          push({
-            role: "elicit", id: "e" + ++elicitSeq.current, kind: "confirm",
-            tag: "agent needs approval",
-            q: r.question || `Allow ${r.pending.tool}?`,
-            options: r.options ?? ["Confirm", "Cancel"], yes: "Confirm",
-            sourceId, confirmFor: { text, tool: r.pending.tool },
-          });
       })
       .catch((error: unknown) => {
         push({ role: "agent", text: formatActionError(error) });
@@ -457,12 +449,10 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
     if (agentInFlight.current || msg.answered) return;
     setAgentMessages((a) => a.map((m) => (m === msg || (msg.id && m.id === msg.id) ? { ...m, answered: true, answer } : m)));
     if (msg.confirmFor) {
-      // Approval re-runs the SAME message with the tool pre-approved for one call — the
-      // loop re-plans, so args may differ from the pending preview; the gate's contract
-      // is "no gated tool without a human click", not arg-exact replay.
-      const approved = String(answer).toLowerCase() === "yes";
-      if (approved) askAgent(msg.confirmFor.text, msg.sourceId, msg.confirmFor.tool);
-      else push({ role: "agent", text: "Cancelled — nothing was run." });
+      push({
+        role: "agent",
+        text: "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
+      });
       return;
     }
     const text = Array.isArray(answer) ? answer.join(", ") : String(answer ?? "");

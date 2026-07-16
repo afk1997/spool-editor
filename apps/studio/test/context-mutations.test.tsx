@@ -221,66 +221,51 @@ describe("offline setting mutation", () => {
   });
 });
 
-describe("agent confirm flow: gated tools require a click before running", () => {
-  it("a confirm turn re-asks with confirmTool when the user approves", async () => {
+describe("agent Phase 0 mutation replay fuse", () => {
+  it("does not turn a malicious confirm response into an approval card", async () => {
+    const agentCall = vi.fn().mockResolvedValueOnce({
+      reply: "", action: "confirm", jobs: [], tools: [],
+      question: "Allow delete_recipe?", options: ["Confirm", "Cancel"], kind: "confirm",
+      pending: { tool: "delete_recipe", args: { recipe_id: "r1" } },
+    });
     client = {
       getSettings: vi.fn().mockResolvedValue({ offline: false }),
-      agent: vi
-        .fn()
-        .mockResolvedValueOnce({
-          reply: "", action: "confirm", jobs: [], tools: [],
-          question: "Allow delete_recipe?", options: ["Confirm", "Cancel"], kind: "confirm",
-          pending: { tool: "delete_recipe", args: { recipe_id: "r1" } },
-        })
-        .mockResolvedValueOnce({ reply: "deleted", action: "reply", jobs: [], tools: [] }),
+      agent: agentCall,
     };
     const ctx = mountCtx();
 
     act(() => { ctx.get().askAgent("delete my recipe"); });
 
-    // The confirm turn surfaces as an elicit card (kind confirm) carrying the re-ask payload.
-    await waitFor(() => {
-      const m = ctx.get().agentMessages.find((x) => x.role === "elicit" && x.kind === "confirm");
-      expect(m).toBeTruthy();
-      expect(m!.confirmFor).toEqual({ text: "delete my recipe", tool: "delete_recipe" });
-    });
-    const elicit = ctx.get().agentMessages.find((x) => x.role === "elicit" && x.kind === "confirm")!;
-
-    act(() => { ctx.get().answerElicit(elicit, "yes"); });
-
-    // Approval re-sends the SAME message with the gated tool pre-approved for one call.
-    await waitFor(() => expect(client.agent).toHaveBeenCalledTimes(2));
-    expect(client.agent).toHaveBeenNthCalledWith(2, "delete my recipe", {
-      sourceId: undefined,
-      confirmTool: "delete_recipe",
-    });
-    // The post-approval reply lands in the stream.
-    await waitFor(() => expect(ctx.get().agentMessages.some((x) => x.text === "deleted")).toBe(true));
+    await waitFor(() => expect(ctx.get().working).toBe(false));
+    expect(agentCall).toHaveBeenCalledTimes(1);
+    expect(agentCall.mock.calls[0]?.[1]).toEqual({ sourceId: undefined });
+    expect(agentCall.mock.calls[0]?.[1]).not.toHaveProperty("confirmTool");
+    expect(ctx.get().agentMessages.some((x) => x.confirmFor)).toBe(false);
   });
 
-  it("a declined confirm runs nothing", async () => {
+  it("a stale confirmation card cannot trigger a second Agent turn", async () => {
     client = {
       getSettings: vi.fn().mockResolvedValue({ offline: false }),
-      agent: vi.fn().mockResolvedValueOnce({
-        reply: "", action: "confirm", jobs: [], tools: [],
-        question: "Allow delete_recipe?", options: ["Confirm", "Cancel"], kind: "confirm",
-        pending: { tool: "delete_recipe", args: { recipe_id: "r1" } },
-      }),
+      agent: vi.fn(),
     };
     const ctx = mountCtx();
+    const stale = {
+      role: "elicit" as const,
+      id: "stale-confirm",
+      kind: "confirm" as const,
+      q: "Allow delete_recipe?",
+      options: ["Confirm", "Cancel"],
+      sourceId: "source-1",
+      confirmFor: { text: "delete my recipe", tool: "delete_recipe" },
+    };
 
-    act(() => { ctx.get().askAgent("delete my recipe"); });
-    await waitFor(() =>
-      expect(ctx.get().agentMessages.some((x) => x.role === "elicit" && x.kind === "confirm")).toBe(true),
-    );
-    const elicit = ctx.get().agentMessages.find((x) => x.role === "elicit" && x.kind === "confirm")!;
-
-    act(() => { ctx.get().answerElicit(elicit, "no"); });
+    act(() => { ctx.get().answerElicit(stale, "yes"); });
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
 
-    // No second agent call; a cancellation note is appended instead.
-    expect(client.agent).toHaveBeenCalledTimes(1);
-    expect(ctx.get().agentMessages.some((x) => x.text === "Cancelled — nothing was run.")).toBe(true);
+    expect(client.agent).not.toHaveBeenCalled();
+    expect(ctx.get().agentMessages.some((x) =>
+      x.text === "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
+    )).toBe(true);
   });
 });
 
