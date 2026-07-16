@@ -702,15 +702,19 @@ Before committing, inspect `git diff --cached --name-only` and unstage any gener
 - Modify: `engine/clip/llm.py`
 - Modify: `engine/models_store.py`
 - Modify: `engine/runner.py`
+- Modify: `engine/safety.py`
 - Modify: `engine/watcher.py`
 - Modify: `engine/routes/api_v1.py`
 - Modify: `engine/tests/test_settings.py`
 - Modify: `engine/tests/test_llm.py`
 - Modify: `engine/tests/test_moments.py`
 - Modify: `engine/tests/test_models_store.py`
+- Modify: `engine/tests/test_jobs.py`
 - Modify: `engine/tests/test_runner.py`
+- Modify: `engine/tests/test_safety.py`
 - Modify: `engine/tests/test_watcher.py`
 - Modify: `engine/tests/test_api_v1.py`
+- Modify: `engine/tests/test_api_v1_clips.py`
 - Modify: `packages/types/src/index.ts`
 - Modify: `packages/api-client/src/index.ts`
 - Modify: `apps/studio/src/app/layout.tsx`
@@ -720,6 +724,7 @@ Before committing, inspect `git diff --cached --name-only` and unstage any gener
 - Modify: `apps/studio/src/app/watches/page.tsx`
 - Modify: `apps/studio/src/components/spool/shell.tsx`
 - Modify: `apps/studio/src/components/spool/context.tsx`
+- Modify: `apps/studio/src/lib/action-error.ts`
 
 - [ ] **Step 1: Write provider, consent, and last-moment race tests**
 
@@ -755,7 +760,8 @@ cd engine
 .venv/bin/python -m pytest -q \
   tests/test_network_policy.py tests/test_settings.py tests/test_llm.py \
   tests/test_moments.py tests/test_models_store.py tests/test_runner.py \
-  tests/test_watcher.py tests/test_api_v1.py \
+  tests/test_jobs.py tests/test_safety.py tests/test_watcher.py \
+  tests/test_api_v1.py tests/test_api_v1_clips.py \
   -k "provider or consent or egress or offline or network_policy"
 cd ..
 pnpm --filter @spool/studio exec vitest run test/privacy-mode.test.tsx
@@ -783,6 +789,12 @@ Make `SettingsStore.update()` copy-on-write: build the next override dict, write
 
 Acquire a short `NetworkPolicy.egress("url_validation")` lease around DNS validation and any synchronous metadata probe before admission, then acquire a new worker lease around yt-dlp. Apply the same lease to model download, remote watcher listing/target validation, and Codex execution. The settings route, background poller, manual endpoints, CLI, MCP, and direct helper functions must all converge on those checks; a boolean precheck or UI-only toggle is insufficient.
 
+The direct boundaries are `safety.is_safe_url`, `runner.run_info`, `runner.run_download`,
+`models_store.download`, `watcher.list_playlist_items`, and `CodexProvider.complete`. Route
+admission and queued-worker execution both recheck the same shared policy instance. Broad
+download/watch exception handlers must re-raise policy denials instead of swallowing them as
+ordinary probe/listing failures.
+
 - [ ] **Step 6: Correct privacy copy and labels**
 
 Onboarding and Settings name the selected provider and state that transcripts leave the machine for remote reasoning. Show consent only for `codex`; failed persistence leaves the UI disabled. Render exactly one status:
@@ -804,7 +816,8 @@ cd engine
 .venv/bin/python -m pytest -q \
   tests/test_network_policy.py tests/test_settings.py tests/test_llm.py \
   tests/test_moments.py tests/test_models_store.py tests/test_runner.py \
-  tests/test_watcher.py tests/test_api_v1.py
+  tests/test_jobs.py tests/test_safety.py tests/test_watcher.py \
+  tests/test_api_v1.py tests/test_api_v1_clips.py
 .venv/bin/python -m pytest -q
 cd ..
 pnpm --filter @spool/studio exec vitest run test/privacy-mode.test.tsx
@@ -814,16 +827,18 @@ pnpm --filter @spool/studio lint
 pnpm --filter @spool/api-client lint
 pnpm --filter @spool/types lint
 git add engine/network_policy.py engine/settings.py engine/app.py engine/clip/llm.py \
-  engine/models_store.py engine/runner.py engine/watcher.py engine/routes/api_v1.py \
+  engine/models_store.py engine/runner.py engine/safety.py engine/watcher.py \
+  engine/routes/api_v1.py \
   engine/tests/test_network_policy.py engine/tests/test_settings.py engine/tests/test_llm.py \
   engine/tests/test_moments.py engine/tests/test_models_store.py engine/tests/test_runner.py \
-  engine/tests/test_watcher.py engine/tests/test_api_v1.py \
+  engine/tests/test_jobs.py engine/tests/test_safety.py engine/tests/test_watcher.py \
+  engine/tests/test_api_v1.py engine/tests/test_api_v1_clips.py \
   packages/types/src/index.ts packages/api-client/src/index.ts \
   apps/studio/test/privacy-mode.test.tsx apps/studio/src/app/layout.tsx \
   apps/studio/src/app/onboarding/page.tsx apps/studio/src/app/settings/page.tsx \
   apps/studio/src/app/import/page.tsx apps/studio/src/app/watches/page.tsx \
   apps/studio/src/components/spool/shell.tsx \
-  apps/studio/src/components/spool/context.tsx
+  apps/studio/src/components/spool/context.tsx apps/studio/src/lib/action-error.ts
 git diff --cached --check
 git commit -m "fix(privacy): require consent and enforce offline mode"
 ```
