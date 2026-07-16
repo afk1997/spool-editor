@@ -147,10 +147,11 @@ _OBS_CHARS = 3200          # truncate each tool observation so the re-sent trans
                            #  model misread a full list as empty)
 
 _LOOP_SYSTEM = (
-    "You are Spool's clip agent. Spool turns long videos into short vertical clips, fully on the "
-    "user's machine. You have TOOLS that drive the same engine the UI does — you can inspect and "
-    "act on the whole app (downloads, transcripts, the render queue, discovery, recipes, watches, "
-    "brand kits, models).\n\n"
+    "You are Spool's read-only clip inspection agent. Spool turns long videos into short vertical "
+    "clips, fully on the user's machine. Your TOOLS can inspect downloads, transcripts, the render "
+    "queue, recipes, watches, brand kits, models, storage, and capabilities. Phase 0 does not let "
+    "you start, edit, cancel, delete, install, or export anything. If the user asks for a change, "
+    "explain that Agent changes are disabled until the approval and undo contract ships.\n\n"
     "Work in steps. Each step, reply with EXACTLY ONE minified JSON object — no prose, no fences:\n"
     '- {"tool":"<name>","args":{...}} — run a tool. I will reply with its JSON result so you can continue.\n'
     '- {"clarify":{"question":"...","options":["..."],"kind":"enum|confirm"}} — ask the user a question when you need a human decision.\n'
@@ -159,11 +160,9 @@ _LOOP_SYSTEM = (
     "e.g. the render queue is list_clip_jobs, downloaded videos/sources are list_jobs. REPORT WHAT THE "
     "TOOL ACTUALLY RETURNS — count and name/title/id the items; never claim something is empty when the "
     "result has entries. If the user says 'queue' ambiguously, the render queue is list_clip_jobs and "
-    "downloaded videos are list_jobs — check the one they mean (or both). To make clips, prefer "
-    "make_clips (cut+reframe → the review queue); only call render_pipeline/render_clip (EXPORT) when "
-    "the user explicitly asks to render/export. Clips are never auto-published. Take start/end from the "
-    "transcript timestamps when present. Keep going until you can give a useful final answer; don't ask "
-    "the user for something a tool can fetch. Always finish with a {\"final\":...} once you have enough.\n\n"
+    "downloaded videos are list_jobs — check the one they mean (or both). Keep going until you can give "
+    "a useful factual answer; don't ask the user for something a read tool can fetch. Always finish "
+    "with a {\"final\":...} once you have enough.\n\n"
     "TOOLS:\n" + agent_tools.catalog_prompt()
 )
 
@@ -230,12 +229,9 @@ def run_agent(
 ) -> dict:
     """Run a bounded ReAct tool-loop for one user message. ``client`` is a TroveClient pointed at
     the engine (so tools hit the SAME /api/v1 surface as the UI). ``elapsed`` is an optional
-    ``() -> float`` ms clock for trace timing (injectable for tests). ``confirmed_tool`` is a single tool name pre-approved by the caller for ONE invocation
-    this turn (the /agent route's ``confirm_tool``): tools in :data:`agent_tools.CONFIRM_REQUIRED`
-    (exports + destructive config) otherwise return ``action="confirm"`` instead of running.
-    Confirmation matches by TOOL NAME only and is single-use; the confirmed run re-plans, so
-    its args may differ from the ``pending.args`` the user was shown -- the gate's contract is
-    "no gated tool without a human click", NOT arg-exact replay. Returns
+    ``() -> float`` ms clock for trace timing (injectable for tests). ``confirmed_tool`` remains an
+    accepted compatibility argument, but Phase 0 treats it as inert: no confirmation can bypass the
+    read-only mutation fuse. Returns
     ``{reply, action, jobs[], tools[], question?, options?, kind?, pending?}``. Propagates
     OfflineError always, and ProviderUnavailableError / RuntimeError when no tools have run yet
     (a setup problem); mid-loop transient failures after at least one tool ran are retried once
@@ -291,19 +287,10 @@ def run_agent(
             transcript.append(f"Tool result: ERROR unknown tool {name!r}. Pick one from the TOOLS list.")
             continue
 
+        if tool.name not in agent_tools.READ_ONLY_TOOLS or tool.writes:
+            return dict(agent_tools.MUTATION_DISABLED_ERROR)
+
         args = step.get("args") if isinstance(step.get("args"), dict) else {}
-        if tool.name in agent_tools.CONFIRM_REQUIRED and tool.name != confirmed_tool:
-            return {
-                "action": "confirm",
-                "reply": f"I'm ready to run {tool.name} — it needs your confirmation.",
-                "question": (f"Allow {tool.name} {_short_arg(args)}".rstrip() + "?"),
-                "options": ["Confirm", "Cancel"],
-                "kind": "confirm",
-                "pending": {"tool": tool.name, "args": args},
-                "tools": tools_trace, "jobs": jobs,
-            }
-        if tool.name == confirmed_tool:
-            confirmed_tool = None   # single-use: one confirmation buys exactly one call
         t0 = clock()
         try:
             result = tool.run(client, args)

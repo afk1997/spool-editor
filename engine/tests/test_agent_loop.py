@@ -65,21 +65,21 @@ def test_loop_runs_a_read_tool_then_answers():
     assert out["jobs"] == []          # a read tool starts no job
 
 
-def test_loop_collects_started_jobs_and_uses_review_gate():
+def test_loop_rejects_a_write_instead_of_starting_a_job():
     c = _FakeClient()
     out = agent.run_agent(
         "make a clip of the intro",
         client=c,
-        provider=_provider(
-            json.dumps({"tool": "make_clips", "args": {"source_id": "src1", "start": 0, "end": 18}}),
-            json.dumps({"final": {"reply": "Cut + reframed — it's in your review queue."}}),
-        ),
-        elapsed=iter([0.0, 1.0, 1.0]).__next__,
+        provider=_provider(json.dumps({
+            "tool": "make_clips",
+            "args": {"source_id": "src1", "start": 0, "end": 18},
+        })),
     )
-    # make_clips → render_pipeline with stop_after=reframe (the honest review gate, no export)
-    call = next(c for c in c.calls if c[0] == "render_pipeline")
-    assert call[1]["stop_after"] == "reframe"
-    assert out["jobs"] == [{"id": "cj9", "kind": "pipeline", "clip_id": "c9", "status": "queued"}]
+    assert out == {
+        "error": "agent_mutation_disabled",
+        "message": "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
+    }
+    assert c.calls == []
 
 
 def test_loop_clarify_carries_kind_and_options():
@@ -171,73 +171,51 @@ def test_catalog_tools_map_to_real_troveclient_methods():
     for m in needed:
         assert callable(getattr(TroveClient, m, None)), f"TroveClient.{m} missing — agent catalog would break"
     assert agent_tools.JOB_STARTING <= set(agent_tools.CATALOG)            # job-starting set is valid
-    assert agent_tools.catalog_prompt().count("\n") >= 40                  # full surface, not a toy
+    assert agent_tools.catalog_prompt().count("\n") >= 15                  # full read-only inspection surface
 
 
-# ---- confirmation gate: exports + destructive config must not run un-confirmed ----
-# The plan is steered by an UNTRUSTED transcript (whisper of arbitrary media), so a
-# prompt-injection payload must never reach a delete/export tool without a human go-ahead.
+# ---- Phase 0 read-only classification + defense-in-depth write fuse ----
 
-class _DeleteClient(_FakeClient):
-    """Records delete_recipe calls so we can assert NOTHING ran behind the gate."""
+READ_ONLY_TOOL_NAMES = {
+    "capabilities", "get_clip_job", "get_job", "get_recipe", "get_settings",
+    "get_transcript_status", "get_watch", "list_brand_kits", "list_clip_jobs",
+    "list_jobs", "list_models", "list_recipes", "list_transcripts", "list_watches",
+    "rank_candidates", "search_transcripts", "source_energy", "source_scenes",
+    "storage_info",
+}
 
-    def delete_recipe(self, rid):
-        self.calls.append(("delete_recipe", rid))
-        return {"ok": True}
 
-
-def test_gated_tool_returns_confirm_instead_of_running():
-    c = _DeleteClient()
-    out = agent.run_agent(
-        "delete my recipe",
-        client=c,
-        provider=_provider(json.dumps({"tool": "delete_recipe", "args": {"recipe_id": "r1"}})),
+def test_phase_zero_catalog_is_fully_classified_and_prompt_is_read_only():
+    assert set(agent_tools.READ_ONLY_TOOLS) == READ_ONLY_TOOL_NAMES
+    assert set(agent_tools.CATALOG) == (
+        set(agent_tools.READ_ONLY_TOOLS)
+        | {name for name, tool in agent_tools.CATALOG.items() if tool.writes}
     )
-    assert out["action"] == "confirm"
-    assert out["pending"] == {"tool": "delete_recipe", "args": {"recipe_id": "r1"}}
-    assert out["kind"] == "confirm"
-    assert [x for x in c.calls if x[0] == "delete_recipe"] == []     # NOTHING ran
+    prompt = agent_tools.catalog_prompt()
+    for name, tool in agent_tools.CATALOG.items():
+        assert (name in agent_tools.READ_ONLY_TOOLS) is (tool.writes is False)
+        assert (f"- {name}(" in prompt) is (name in agent_tools.READ_ONLY_TOOLS)
 
 
-def test_confirmed_tool_runs_once():
-    c = _DeleteClient()
+@pytest.mark.parametrize(
+    "tool_name",
+    sorted(set(agent_tools.CATALOG) - READ_ONLY_TOOL_NAMES),
+)
+def test_phase_zero_rejects_every_mutating_tool_without_touching_the_client(tool_name):
+    class ExplodingClient:
+        def __getattr__(self, name):
+            raise AssertionError(f"mutating client method was accessed: {name}")
+
     out = agent.run_agent(
-        "delete my recipe",
-        client=c,
-        provider=_provider(
-            json.dumps({"tool": "delete_recipe", "args": {"recipe_id": "r1"}}),
-            json.dumps({"final": {"reply": "deleted"}}),
-        ),
-        confirmed_tool="delete_recipe",
-        elapsed=iter([0.0, 1.0, 1.0]).__next__,
+        "do it",
+        client=ExplodingClient(),
+        provider=_provider(json.dumps({"tool": tool_name, "args": {}})),
+        confirmed_tool=tool_name,
     )
-    assert out["action"] == "reply"
-    assert [x for x in c.calls if x[0] == "delete_recipe"] == [("delete_recipe", "r1")]
-
-
-def test_confirmation_is_single_use():
-    # One confirmation buys exactly ONE call; a model that tries a SECOND delete is re-gated.
-    c = _DeleteClient()
-    out = agent.run_agent(
-        "delete my recipes",
-        client=c,
-        provider=_provider(
-            json.dumps({"tool": "delete_recipe", "args": {"recipe_id": "r1"}}),
-            json.dumps({"tool": "delete_recipe", "args": {"recipe_id": "r2"}}),
-        ),
-        confirmed_tool="delete_recipe",
-        elapsed=iter([0.0, 1.0, 1.0]).__next__,
-    )
-    assert [x for x in c.calls if x[0] == "delete_recipe"] == [("delete_recipe", "r1")]  # first ran
-    assert out["action"] == "confirm"                                # second re-gated
-    assert out["pending"]["args"] == {"recipe_id": "r2"}
-
-
-def test_confirm_required_covers_exports_and_destructive_config():
-    assert {"render_clip", "render_pipeline", "delete_recipe", "delete_watch",
-            "delete_brand_kit", "remove_model", "update_settings"} <= set(agent_tools.CONFIRM_REQUIRED)
-    # make_clips lands in the review queue (writes, NOT exports) → must stay UN-gated.
-    assert "make_clips" not in agent_tools.CONFIRM_REQUIRED
+    assert out == {
+        "error": "agent_mutation_disabled",
+        "message": "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
+    }
 
 
 # ---- LLM retry + partial-result degradation ----

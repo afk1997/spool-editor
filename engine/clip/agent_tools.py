@@ -1,6 +1,7 @@
 """The in-app Agent's tool catalog — the SAME /api/v1 surface the studio UI, the MCP server,
-and the CLI drive (the README "golden rule"). Every tool here delegates to a :class:`TroveClient`,
-so the conversational agent can do everything the UI can, and the four surfaces can't diverge.
+and the CLI drive (the README "golden rule"). Every tool here delegates to a :class:`TroveClient`.
+During Phase 0 the catalog remains fully classified for contract coverage, but the agent prompt and
+runtime expose only the explicit read-only allowlist; manual UI, REST, and CLI writes remain intact.
 
 Each :class:`Tool` is name + one-line description + a ``run(client, args)`` that calls the matching
 TroveClient method. The agent loop (``clip.agent.run_agent``) renders the catalog into its system
@@ -187,13 +188,39 @@ TOOLS: list[Tool] = [
 
 CATALOG: dict[str, Tool] = {t.name: t for t in TOOLS}
 
+# Phase 0's frozen read-only agent surface. Every catalog tool outside this set must be classified
+# ``writes=True`` and is rejected before its implementation or TroveClient method is evaluated.
+READ_ONLY_TOOLS: frozenset[str] = frozenset({
+    "capabilities",
+    "get_clip_job",
+    "get_job",
+    "get_recipe",
+    "get_settings",
+    "get_transcript_status",
+    "get_watch",
+    "list_brand_kits",
+    "list_clip_jobs",
+    "list_jobs",
+    "list_models",
+    "list_recipes",
+    "list_transcripts",
+    "list_watches",
+    "rank_candidates",
+    "search_transcripts",
+    "source_energy",
+    "source_scenes",
+    "storage_info",
+})
+
+MUTATION_DISABLED_ERROR = {
+    "error": "agent_mutation_disabled",
+    "message": "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
+}
+
 # Tools that must not run without an explicit human go-ahead: gates the exports-flagged
 # tools (render_clip / render_pipeline) plus the delete/settings/model-removal family --
-# the audit's scope. The agent's plan is steered by an UNTRUSTED transcript (whisper
-# output of arbitrary downloaded media), so a prompt-injection payload must never reach
-# these unconfirmed. The loop returns action="confirm" until the turn carries
-# confirm_tool=<name>. Known residual: produce_clips / scan_watch can transitively reach
-# the export stage via a recipe and remain un-gated by that scope.
+# retained as compatibility metadata for later approval work. Phase 0 rejects every write before
+# this historical confirmation classification is consulted.
 CONFIRM_REQUIRED: frozenset = frozenset(
     {t.name for t in TOOLS if t.exports}
     | {"delete_recipe", "delete_watch", "delete_brand_kit", "remove_model", "update_settings"}
@@ -208,9 +235,11 @@ JOB_STARTING = {
 
 
 def catalog_prompt() -> str:
-    """The tool list rendered for the agent's system prompt — one terse line per tool."""
+    """Render only the Phase 0 read-only inspection tools into the agent system prompt."""
     lines = []
     for t in TOOLS:
+        if t.name not in READ_ONLY_TOOLS:
+            continue
         ps = ", ".join(f"{k}" for k in t.params) if t.params else ""
         lines.append(f"- {t.name}({ps}) — {t.desc}")
     return "\n".join(lines)

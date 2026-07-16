@@ -1991,6 +1991,32 @@ def test_agent_route_clarify_carries_kind(client, monkeypatch):
     assert b["options"] == ["a", "b"] and b["kind"] == "enum"
 
 
+def test_agent_route_returns_exact_mutation_disabled_envelope(client, monkeypatch):
+    import clip.agent as clip_agent
+    captured = {}
+
+    def disabled(message, **kwargs):
+        captured.update(kwargs)
+        return {
+            "error": "agent_mutation_disabled",
+            "message": "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
+        }
+
+    monkeypatch.setattr(clip_agent, "run_agent", disabled)
+    _, c = client
+    r = c.post("/api/v1/agent", json={
+        "message": "delete my recipe",
+        "confirm_tool": "delete_recipe",
+    })
+
+    assert r.status_code == 409
+    assert r.get_json() == {
+        "error": "agent_mutation_disabled",
+        "message": "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
+    }
+    assert captured["confirmed_tool"] == "delete_recipe"
+
+
 def test_agent_route_missing_message_400(client):
     _, c = client
     assert c.post("/api/v1/agent", json={}).status_code == 400

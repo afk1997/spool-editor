@@ -2282,15 +2282,15 @@ def patch_settings():
 def agent_message():
     """The studio Agent panel's turn: a NL message (+ optional source context) driven through a
     bounded ReAct TOOL-LOOP (clip.agent.run_agent) over the SAME /api/v1 tool catalog the UI, MCP,
-    and CLI use (the golden rule) — so the in-app agent can do everything the app can: inspect the
-    render queue, download, transcribe, discover, produce, manage recipes/watches/brand-kits, etc.
+    and CLI use (the golden rule). Phase 0 exposes only the explicit read-only inspection allowlist;
+    manual Studio, direct REST, and CLI mutations remain available.
 
     Body: ``{message, source_id?, confirm_tool?}``. Returns ``{reply, action, jobs[], tools[],
     question?, options?, kind?}`` — ``tools`` is the real per-step tool trace, ``jobs`` any jobs
-    started this turn, and a ``clarify`` action carries the question/options/kind for the studio's
-    elicitation card. An export/destructive tool returns ``action="confirm"`` with a ``pending``
-    ``{tool,args}`` until the next turn echoes it back as ``confirm_tool`` (a one-shot human gate).
-    Blocks while the loop runs (each step is an LLM call), so the client shows a thinking state."""
+    observed this turn, and a ``clarify`` action carries the question/options/kind for the studio's
+    elicitation card. ``confirm_tool`` remains accepted as inert compatibility baggage and cannot
+    enable a write. Blocks while the loop runs (each step is an LLM call), so the client shows a
+    thinking state."""
     from clip import agent as clip_agent, llm as clip_llm, moments as clip_moments
     from trove_client import TroveClient
 
@@ -2326,6 +2326,13 @@ def agent_message():
         # The bridge died before the loop ran any tool (post-retry): a 503 with the
         # message beats an opaque 500 stack trace.
         return jsonify({"error": "llm_failed", "message": str(e)[:300]}), 503
+
+    if result.get("error") == "agent_mutation_disabled":
+        return jsonify({
+            "error": "agent_mutation_disabled",
+            "message": result.get("message")
+            or "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
+        }), 409
 
     resp = {"reply": result.get("reply", ""), "action": result.get("action", "reply"),
             "jobs": result.get("jobs", []), "tools": result.get("tools", [])}
