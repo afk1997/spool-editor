@@ -395,6 +395,69 @@ describe("visible mutation inventory: Source work", () => {
     expect(nav).not.toHaveBeenCalled();
   });
 
+  it("keeps discovery scans locked from admission through terminal settlement", async () => {
+    const terminal = deferred<void>();
+    const pushToast = vi.fn();
+    const findMoments = vi.fn((_sourceId: string, options: { mode: string }) =>
+      Promise.resolve({ id: `moments-${options.mode}` }),
+    );
+    const awaitClipJob = vi.fn((id?: string) =>
+      id === "moments-funny" ? terminal.promise : Promise.resolve(),
+    );
+    harness.ctx = baseCtx({
+      client: clientFixture({ findMoments }),
+      awaitClipJob,
+      pushToast,
+    });
+    render(<DiscoveryBody candidates={[]} sourceId="source-1" finding={false} />);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Scan all modes" })[0]!);
+    await waitFor(() => expect(findMoments).toHaveBeenCalledTimes(6));
+    await waitFor(() => expect(awaitClipJob).toHaveBeenCalledTimes(6));
+
+    const busy = screen.getAllByRole("button", { name: "Starting scans…" })[0]!;
+    expect(busy).toBeDisabled();
+    expect(pushToast).not.toHaveBeenCalled();
+    fireEvent.click(busy);
+    fireEvent.click(busy);
+    expect(findMoments).toHaveBeenCalledTimes(6);
+
+    await act(async () => {
+      terminal.resolve();
+      await terminal.promise;
+    });
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({
+      title: "Moment scans complete",
+      body: expect.stringMatching(/^6 succeeded · 0 failed\./),
+    })));
+    expect(screen.getAllByRole("button", { name: "Scan all modes" })[0]).toBeEnabled();
+  });
+
+  it("reports a discovery job that fails after admission", async () => {
+    const pushToast = vi.fn();
+    const findMoments = vi.fn((_sourceId: string, options: { mode: string }) =>
+      Promise.resolve({ id: `moments-${options.mode}` }),
+    );
+    const awaitClipJob = vi.fn((id?: string) =>
+      id === "moments-insightful" ? Promise.reject(structuredFailure()) : Promise.resolve(),
+    );
+    harness.ctx = baseCtx({
+      client: clientFixture({ findMoments }),
+      awaitClipJob,
+      pushToast,
+    });
+    render(<DiscoveryBody candidates={[]} sourceId="source-1" finding={false} />);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Scan all modes" })[0]!);
+
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({
+      title: "Some moment scans failed",
+      body: expect.stringMatching(/^5 succeeded · 1 failed\./),
+    })));
+    expect(pushToast.mock.calls[0]?.[0].body).toMatch(/queue_full/);
+    expect(awaitClipJob).toHaveBeenCalledTimes(6);
+  });
+
   it("does not reload or claim a transcript edit before a structured rejection", async () => {
     const delayed = deferred<void>();
     const pushToast = vi.fn();

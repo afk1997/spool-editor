@@ -180,27 +180,36 @@ export function DiscoveryBody({ candidates, sourceId, finding }: { candidates: C
     setScanning(true);
     const modes = mode === "All" ? ENGINE_MODES : [mode.toLowerCase()];
     try {
-      const results = await Promise.allSettled(modes.map((m) => ctx.client.findMoments(sourceId, { mode: m })));
-      const succeeded = results.filter((result) => result.status === "fulfilled").length;
-      const failures = results.flatMap((result) => result.status === "rejected"
+      const admissionResults = await Promise.allSettled(modes.map((m) => ctx.client.findMoments(sourceId, { mode: m })));
+      const admitted = admissionResults.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      const admissionFailures = admissionResults.flatMap((result) => result.status === "rejected"
         ? [formatActionError(result.reason, "Could not start moment scan.")]
         : []);
+      const terminalResults = await Promise.allSettled(admitted.map((job) => ctx.awaitClipJob(job.id)));
+      const terminalFailures = terminalResults.flatMap((result) => result.status === "rejected"
+        ? [formatActionError(result.reason, "Moment scan did not finish.")]
+        : []);
+      const succeeded = terminalResults.filter((result) => result.status === "fulfilled").length;
+      const failures = [...admissionFailures, ...terminalFailures];
       const failed = failures.length;
       const counts = `${succeeded} succeeded · ${failed} failed`;
       if (failed > 0) {
+        const admissionOnly = admissionFailures.length > 0 && terminalFailures.length === 0;
         ctx.pushToast({
           icon: "alert",
           tone: succeeded > 0 ? "warn" : "err",
-          title: succeeded > 0 ? "Some scans could not start" : "Moment scan failed",
+          title: succeeded > 0
+            ? admissionOnly ? "Some scans could not start" : "Some moment scans failed"
+            : "Moment scan failed",
           body: `${counts}. ${failures.join(" ")}`,
         });
         return;
       }
       ctx.pushToast({
         icon: "sparkles",
-        tone: "info",
-        title: mode === "All" ? "Moment scans started" : `Finding more ${mode.toLowerCase()} moments`,
-        body: `${counts}. New moments appear as each scan finishes; your current picks stay put.`,
+        tone: "ok",
+        title: mode === "All" ? "Moment scans complete" : `More ${mode.toLowerCase()} moments found`,
+        body: `${counts}. The latest moments are ready; your current picks stayed put.`,
       });
     } finally {
       scanInFlight.current = false;
