@@ -5,7 +5,7 @@ import { useParams } from "next/navigation";
 import { useSpool } from "@/components/spool/context";
 import { useEngineQuery } from "@/lib/engine-context";
 import { describeActionError } from "@/lib/action-error";
-import { Btn, Icon, Switch } from "@spool/ui";
+import { Btn, Empty, Icon, Switch } from "@spool/ui";
 
 /* S8 Caption Studio — 1:1 port of the demo (05), fully wired (Phase 2). Fine styling
  * (font / size / weight / outline / fill / active-word color / all-caps / position /
@@ -161,6 +161,18 @@ export default function CaptionScreen() {
       if (isCurrent()) setBurning(false);
     }
   };
+
+  if (!clip) {
+    if (!ctx.snapshot)
+      return <div className="mainpad fadein" style={{ color: "var(--text-faint)" }}>Loading clip…</div>;
+    return (
+      <div className="mainpad fadein">
+        <Empty icon="type" title="Clip not found" action={<Btn variant="primary" onClick={() => ctx.nav("clips")}>Back to clips</Btn>}>
+          This clip ID is not available in the current engine snapshot. Its import or render may still be incomplete.
+        </Empty>
+      </div>
+    );
+  }
 
   return (
     <div className="mainpad fadein" style={{ maxWidth: 1240 }}>

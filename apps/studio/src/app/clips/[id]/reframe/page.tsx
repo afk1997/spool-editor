@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { useSpool } from "@/components/spool/context";
 import { describeActionError } from "@/lib/action-error";
-import { Btn, Icon, Seg, fmtTC } from "@spool/ui";
+import { Btn, Empty, Icon, Seg, fmtTC } from "@spool/ui";
 
 /* S7 Reframe / ROI editor — 1:1 port of the demo (05), fully wired (Phase 2).
  * Real cut-clip video with draggable ROI boxes + a real scrub; an editable diar⊕ROI
@@ -64,6 +64,7 @@ function Knob({ label, value, min, max, step, fmt, onChange }: { label: string; 
 export default function ReframeScreen() {
   const ctx = useSpool();
   const id = String(useParams().id);
+  const clip = ctx.clips.find((candidate) => candidate.id === id);
   const [mode, setMode] = useState("pan");
   const [boxes, setBoxes] = useState<{ L: Box; R: Box }>(DEFAULT_BOXES);
   const [active, setActive] = useState<"L" | "R">("L");
@@ -152,6 +153,18 @@ export default function ReframeScreen() {
       if (mounted.current) setSubmitting(false);
     }
   };
+
+  if (!clip) {
+    if (!ctx.snapshot)
+      return <div className="mainpad fadein" style={{ color: "var(--text-faint)" }}>Loading clip…</div>;
+    return (
+      <div className="mainpad fadein">
+        <Empty icon="crop" title="Clip not found" action={<Btn variant="primary" onClick={() => ctx.nav("clips")}>Back to clips</Btn>}>
+          This clip ID is not available in the current engine snapshot. Its import or render may still be incomplete.
+        </Empty>
+      </div>
+    );
+  }
 
   return (
     <div className="mainpad fadein" style={{ maxWidth: 1240 }}>

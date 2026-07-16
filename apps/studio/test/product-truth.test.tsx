@@ -69,6 +69,7 @@ import { Shell } from "@/components/spool/shell";
 import { actionError, describeActionError, formatActionError } from "@/lib/action-error";
 import AnalyticsPage from "@/app/analytics/page";
 import BrandScreen from "@/app/brand/page";
+import CaptionScreen from "@/app/clips/[id]/caption/page";
 import EditorScreen from "@/app/clips/[id]/page";
 import ReframeScreen from "@/app/clips/[id]/reframe/page";
 import ClipsScreen from "@/app/clips/page";
@@ -708,6 +709,41 @@ describe("product truth: visible control inventory", () => {
     fireEvent.click(screen.getByRole("button", { name: "Back to clips" }));
     expect(nav).toHaveBeenCalledWith("clips");
     expect(screen.queryByText(/cleared from the working set/i)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { name: "Caption", Screen: CaptionScreen, mutation: "caption" },
+    { name: "Reframe", Screen: ReframeScreen, mutation: "reframe" },
+  ])("$name gates an unavailable clip ID and performs no mutation", ({ Screen, mutation }) => {
+    const mutate = vi.fn();
+    const nav = vi.fn();
+    importHarness.params = { id: "missing-clip" };
+    importHarness.ctx = baseCtx({
+      clips: [],
+      snapshot: importHarness.snapshot,
+      client: clientFixture({ [mutation]: mutate }),
+      nav,
+    });
+
+    render(<Screen />);
+
+    expect(screen.getByText("Clip not found")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Back to clips" }));
+    expect(nav).toHaveBeenCalledWith("clips");
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "Caption", Screen: CaptionScreen },
+    { name: "Reframe", Screen: ReframeScreen },
+  ])("$name shows loading while the clip snapshot is unresolved", ({ Screen }) => {
+    importHarness.params = { id: "pending-clip" };
+    importHarness.ctx = baseCtx({ clips: [], snapshot: null });
+
+    render(<Screen />);
+
+    expect(screen.getByText("Loading clip…")).toBeInTheDocument();
+    expect(screen.queryByText("Clip not found")).not.toBeInTheDocument();
   });
 
   it("does not leave unavailable future controls in the accessibility tree", () => {
