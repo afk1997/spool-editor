@@ -1608,6 +1608,18 @@ def _source_or_error(source_id):
     return src, words_path, None
 
 
+def _reasoning_preflight():
+    """Return a structured 409 before admitting work that requires remote reasoning."""
+    values = _settings().get()
+    if values.get("offline") is True:
+        return jsonify({"error": "offline_network_disabled"}), 409
+    if values.get("reasoning_provider") != "codex":
+        return jsonify({"error": "reasoning_provider_required"}), 409
+    if values.get("reasoning_egress_consent") is not True:
+        return jsonify({"error": "egress_consent_required"}), 409
+    return None
+
+
 @api_v1_bp.post("/sources/<source_id>/moments")
 @token_required
 def find_clip_moments(source_id):
@@ -1625,6 +1637,9 @@ def find_clip_moments(source_id):
             params["window"] = [float(win[0]), float(win[1])]
         except (TypeError, ValueError):
             return jsonify({"error": "bad_window"}), 400
+    privacy_error = _reasoning_preflight()
+    if privacy_error:
+        return privacy_error
     jid = _cm().submit(kind="moments", source_id=source_id, params=params,
                        target=_cr().find_moments_target(source_id=source_id, params=params))
     return jsonify(_clip_job_view(_cm().get(jid))), 201
@@ -1770,6 +1785,9 @@ def produce_clips(source_id):
         verr = _validate_recipe(recipe, require_name=False)
         if verr:
             return verr
+    privacy_error = _reasoning_preflight()
+    if privacy_error:
+        return privacy_error
     jid = _cm().submit(kind="produce", source_id=source_id, params={"recipe_id": rid},
                        target=_cr().produce_target(source_id=source_id, recipe=recipe))
     return jsonify(_clip_job_view(_cm().get(jid))), 201

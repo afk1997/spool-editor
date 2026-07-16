@@ -44,9 +44,13 @@ _TRUE = {"1", "true", "yes", "on"}
 class OfflineError(RuntimeError):
     """Raised when an egress provider is requested while offline-mode is on."""
 
+    error_category = "offline_network_disabled"
+
 
 class EgressConsentError(OfflineError):
     """Raised when a remote provider is selected without explicit transcript-egress consent."""
+
+    error_category = "egress_consent_required"
 
 
 class ProviderUnavailableError(RuntimeError):
@@ -55,6 +59,8 @@ class ProviderUnavailableError(RuntimeError):
 
 class ReasoningDisabledError(ProviderUnavailableError):
     """Raised when no reasoning provider has been selected."""
+
+    error_category = "reasoning_provider_required"
 
 
 def is_offline(env: dict | None = None) -> bool:

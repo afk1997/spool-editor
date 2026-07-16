@@ -23,6 +23,9 @@ def client(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TROVE_JOB_TTL_SECONDS", "60")
     monkeypatch.setenv("TROVE_RATE_LIMIT", "0")
+    monkeypatch.setenv("SPOOL_LLM_PROVIDER", "codex")
+    monkeypatch.setenv("SPOOL_LLM_EGRESS_CONSENT", "1")
+    monkeypatch.delenv("SPOOL_OFFLINE", raising=False)
     import app as _app_module
     (tmp_path / "downloads").mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(_app_module, "DOWNLOAD_DIR", tmp_path / "downloads")
@@ -115,6 +118,90 @@ def test_find_moments_409_when_no_transcript(client):
     _seed_source(app, with_transcript=False)
     r = c.post("/api/v1/sources/src1/moments", json={})
     assert r.status_code == 409 and r.get_json()["error"] == "no_transcript"
+
+
+@pytest.mark.parametrize(
+    "endpoint,payload",
+    [
+        ("/api/v1/sources/src1/moments", {"mode": "funny"}),
+        ("/api/v1/sources/src1/produce", {"content_mode": "funny", "count": 1}),
+    ],
+)
+@pytest.mark.parametrize(
+    "privacy_state,expected_error",
+    [
+        ("provider-none", "reasoning_provider_required"),
+        ("consent-missing", "egress_consent_required"),
+        ("offline", "offline_network_disabled"),
+    ],
+)
+def test_reasoning_routes_reject_before_clip_job_admission(
+    client, monkeypatch, endpoint, payload, privacy_state, expected_error,
+):
+    import clip_runner as cr
+
+    app, c = client
+    _seed_source(app)
+    provider_calls = []
+    monkeypatch.setattr(
+        cr.moments,
+        "find_moments",
+        lambda *args, **kwargs: provider_calls.append((args, kwargs)) or [],
+    )
+
+    if privacy_state == "provider-none":
+        assert c.patch("/api/v1/settings", json={"reasoning_provider": "none"}).status_code == 200
+    elif privacy_state == "consent-missing":
+        assert c.patch("/api/v1/settings", json={"reasoning_provider": "none"}).status_code == 200
+        assert c.patch("/api/v1/settings", json={"reasoning_provider": "codex"}).status_code == 200
+    else:
+        assert c.patch("/api/v1/settings", json={"offline": True}).status_code == 200
+
+    manager = app.extensions["trove.clips"]
+    before = len(manager.snapshot_jobs())
+    response = c.post(endpoint, json=payload)
+
+    assert response.status_code == 409
+    assert response.get_json()["error"] == expected_error
+    assert len(manager.snapshot_jobs()) == before
+    assert provider_calls == []
+
+
+def test_queued_reasoning_rechecks_consent_before_provider_execution(client, monkeypatch):
+    import clip_runner as cr
+    from clip import llm
+
+    app, c = client
+    _seed_source(app)
+    entered = threading.Event()
+    release = threading.Event()
+    provider_calls = []
+
+    def delayed_reasoning(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(2), "reasoning worker was not released"
+        llm.complete("transcript text", provider="codex")
+        return []
+
+    monkeypatch.setattr(cr.moments, "find_moments", delayed_reasoning)
+    monkeypatch.setattr(
+        llm.CodexProvider,
+        "complete",
+        lambda self, prompt, system=None: provider_calls.append(prompt) or "[]",
+    )
+
+    response = c.post("/api/v1/sources/src1/moments", json={"mode": "funny"})
+    assert response.status_code == 201
+    job_id = response.get_json()["id"]
+    assert entered.wait(2), "reasoning worker never reached the barrier"
+
+    revoked = c.patch("/api/v1/settings", json={"reasoning_egress_consent": False})
+    assert revoked.status_code == 200
+    release.set()
+
+    failed = _await(c, job_id, status="error")
+    assert failed["error_category"] == "egress_consent_required"
+    assert provider_calls == []
 
 
 # ---- cut -------------------------------------------------------------
