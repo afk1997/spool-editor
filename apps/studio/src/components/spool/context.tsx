@@ -164,15 +164,22 @@ export function mapClips(snap: EventsSnapshot | null): SpoolClip[] {
   }
   const out: SpoolClip[] = [];
   for (const [cid, jobs] of byClip) {
-    const visibleJobs = jobs.filter((job) => !job.dismissed);
-    const cut = jobs.filter((j) => (j.kind === "cut" || j.kind === "pipeline") && j.status === "done").at(-1);
-    const render = jobs.filter((j) => (j.kind === "export" || j.kind === "pipeline") && j.status === "done" && j.result.render_id).at(-1);
+    const canonicalJobs = jobs.filter((job) => job.params?.preview !== true);
+    const visibleJobs = canonicalJobs.filter((job) => !job.dismissed);
+    const cut = canonicalJobs.filter((j) => (j.kind === "cut" || j.kind === "pipeline") && j.status === "done").at(-1);
+    const render = canonicalJobs.filter((j) => (j.kind === "export" || j.kind === "pipeline") && j.status === "done" && j.result.render_id).at(-1);
     const active = visibleJobs.filter((j) => j.status === "running" || j.status === "queued").at(-1);
-    const reframe = jobs.filter((j) => (j.kind === "reframe" || j.kind === "pipeline") && j.status === "done").at(-1);
-    const cap2 = jobs.filter((j) => (j.kind === "caption" || j.kind === "pipeline") && j.status === "done").at(-1);
+    const reframe = canonicalJobs.filter((j) => (j.kind === "reframe" || j.kind === "pipeline") && j.status === "done").at(-1);
+    const cap2 = canonicalJobs.filter((j) =>
+      j.status === "done"
+      && (
+        j.kind === "caption"
+        || (j.kind === "pipeline" && j.params?.stop_after !== "reframe")
+      )
+    ).at(-1);
     const latest = visibleJobs.at(-1);
     const win = cut?.result;
-    const mode = (cut?.params?.mode as string) || (jobs.find((j) => j.kind === "moments")?.result.mode as string) || "";
+    const mode = (cut?.params?.mode as string) || (canonicalJobs.find((j) => j.kind === "moments")?.result.mode as string) || "";
     const status = render
       ? "ready"
       : active
@@ -190,7 +197,7 @@ export function mapClips(snap: EventsSnapshot | null): SpoolClip[] {
     out.push({
       id: cid,
       title: clipTitle(jobs, cid),
-      src: cut?.source_id || jobs[0]?.source_id || "",
+      src: cut?.source_id || canonicalJobs[0]?.source_id || jobs[0]?.source_id || "",
       dur: win?.start != null && win?.end != null ? win.end - win.start : 0,
       aspect,
       style,

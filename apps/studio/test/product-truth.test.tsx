@@ -362,6 +362,93 @@ describe("product truth: live view models", () => {
     });
   });
 
+  it.each(["queued", "done", "error"])(
+    "keeps %s preview reframe jobs out of canonical clip truth",
+    (previewStatus) => {
+      const base = {
+        source_id: "source-1",
+        clip_id: "clip-1",
+        progress_pct: 100,
+        elapsed_seconds: 1,
+        stage: null,
+        error_category: null,
+        error_message: null,
+        human: { summary: "done", elapsed: "0:01" },
+      };
+      const snapshot = {
+        ts: 4,
+        jobs: [],
+        transcripts: [],
+        clips: [
+          {
+            ...base,
+            id: "cut-done",
+            kind: "cut",
+            status: "done",
+            params: {},
+            result: { start: 0, end: 10 },
+          },
+          {
+            ...base,
+            id: "canonical-reframe",
+            kind: "reframe",
+            status: "done",
+            params: { aspect: "9:16" },
+            result: { aspect: "9:16" },
+          },
+          {
+            ...base,
+            id: "throwaway-preview",
+            kind: "reframe",
+            status: previewStatus,
+            progress_pct: previewStatus === "queued" ? 0 : 100,
+            params: { aspect: "1:1", preview: true },
+            result: previewStatus === "done" ? { aspect: "1:1" } : {},
+            error_category: previewStatus === "error" ? "preview_failed" : null,
+            error_message: previewStatus === "error" ? "Preview failed." : null,
+          },
+        ],
+      } as unknown as EventsSnapshot;
+
+      expect(mapClips(snapshot)[0]).toMatchObject({
+        id: "clip-1",
+        aspect: "9:16",
+        status: "ready",
+      });
+    },
+  );
+
+  it("does not claim a stop-after-reframe pipeline has caption styling", () => {
+    const snapshot = {
+      ts: 2,
+      jobs: [],
+      transcripts: [],
+      clips: [
+        {
+          id: "pipeline-review",
+          kind: "pipeline",
+          source_id: "source-1",
+          clip_id: "clip-1",
+          status: "done",
+          progress_pct: 100,
+          stage: "reframe",
+          elapsed_seconds: 1,
+          params: { aspect: "9:16", style: "opus", stop_after: "reframe" },
+          result: { start: 0, end: 10, aspect: "9:16" },
+          error_category: null,
+          error_message: null,
+          human: { summary: "done", elapsed: "0:01" },
+        },
+      ],
+    } as unknown as EventsSnapshot;
+
+    expect(mapClips(snapshot)[0]).toMatchObject({
+      id: "clip-1",
+      aspect: "9:16",
+      style: undefined,
+    });
+  });
+
   it("labels missing diarization as unknown instead of inventing Speaker A", () => {
     const transcript = buildTranscript([
       { idx: 0, w: "Hello", start: 0, end: 0.4 },
@@ -746,6 +833,55 @@ describe("product truth: visible control inventory", () => {
     expect(screen.queryByText("Clip not found")).not.toBeInTheDocument();
   });
 
+  it("Reframe ignores a completed throwaway preview when selecting canonical track history", () => {
+    const clipArtifactUrl = vi.fn((_id: string, name: string) => `https://files.example.test/${name}.mp4`);
+    importHarness.params = { id: "clip-1" };
+    importHarness.ctx = baseCtx({
+      clips: [clipFixture()],
+      client: clientFixture({ clipArtifactUrl }),
+      snapshot: {
+        ts: 3,
+        jobs: [],
+        transcripts: [],
+        clips: [
+          {
+            id: "canonical-reframe",
+            kind: "reframe",
+            clip_id: "clip-1",
+            source_id: "source-1",
+            status: "done",
+            params: { aspect: "9:16" },
+            result: {
+              source: "fused",
+              segments: [{ start: 0, end: 4, speaker: "left" }],
+            },
+          },
+          {
+            id: "throwaway-preview",
+            kind: "reframe",
+            clip_id: "clip-1",
+            source_id: "source-1",
+            status: "done",
+            params: { aspect: "1:1", preview: true },
+            result: {
+              source: "manual",
+              segments: [{ start: 0, end: 4, speaker: "right" }],
+            },
+          },
+        ],
+      } as unknown as EventsSnapshot,
+    });
+
+    const view = render(<ReframeScreen />);
+
+    expect(screen.getByTitle(/left ·/i)).toBeInTheDocument();
+    expect(screen.queryByTitle(/right ·/i)).not.toBeInTheDocument();
+    const renderedPreview = Array.from(view.container.querySelectorAll("video"))
+      .find((video) => video.src.includes("reframed.mp4"));
+    expect(renderedPreview?.src).toContain("v=canonical-reframe");
+    expect(renderedPreview?.src).not.toContain("throwaway-preview");
+  });
+
   it("does not leave unavailable future controls in the accessibility tree", () => {
     render(
       <FutureScreen code="Future" phase="4" icon="chart" title="Future" desc="Unavailable">
@@ -1000,6 +1136,7 @@ describe("product truth: visible mutations settle before success", () => {
     const nav = vi.fn();
     importHarness.params = { id: "clip-1" };
     importHarness.ctx = baseCtx({
+      clips: [clipFixture()],
       snapshot: importHarness.snapshot,
       client: clientFixture({ reframe: vi.fn().mockReturnValue(delayed.promise) }),
       pushToast,
@@ -1031,6 +1168,7 @@ describe("product truth: visible mutations settle before success", () => {
     const awaitClipJob = vi.fn().mockReturnValue(terminal.promise);
     importHarness.params = { id: "clip-1" };
     importHarness.ctx = baseCtx({
+      clips: [clipFixture()],
       snapshot: importHarness.snapshot,
       client: clientFixture({ reframe: vi.fn().mockResolvedValue({ id: "reframe-1" }) }),
       awaitClipJob,
@@ -1057,6 +1195,7 @@ describe("product truth: visible mutations settle before success", () => {
     const awaitClipJob = vi.fn().mockReturnValue(terminal.promise);
     importHarness.params = { id: "clip-1" };
     importHarness.ctx = baseCtx({
+      clips: [clipFixture()],
       snapshot: importHarness.snapshot,
       client: clientFixture({ reframe: vi.fn().mockResolvedValue({ id: "reframe-1" }) }),
       awaitClipJob,

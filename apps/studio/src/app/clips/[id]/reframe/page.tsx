@@ -100,7 +100,13 @@ export default function ReframeScreen() {
   };
 
   // the REAL diar⊕ROI track from the clip's latest reframe job, now editable in-place.
-  const reframeJob = (ctx.snapshot?.clips ?? []).filter((c) => c.clip_id === id && c.kind === "reframe" && c.status === "done" && ((c.result.segments as Seg2[] | undefined)?.length ?? 0) > 0).at(-1);
+  const reframeJob = (ctx.snapshot?.clips ?? []).filter((c) =>
+    c.clip_id === id
+    && c.kind === "reframe"
+    && c.params?.preview !== true
+    && c.status === "done"
+    && ((c.result.segments as Seg2[] | undefined)?.length ?? 0) > 0
+  ).at(-1);
   const segs = (reframeJob?.result.segments as Seg2[] | undefined) ?? [];
   const trackSource = (reframeJob?.result.source as string) || "";
   const [edited, setEdited] = useState<Seg2[] | null>(null);
