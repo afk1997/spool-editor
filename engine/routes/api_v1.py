@@ -483,6 +483,7 @@ def _validate_brand_kit(data, *, require_name: bool):
 # transport is Literal['stdio','sse','streamable-http']). stdio = the desktop-client default;
 # sse / streamable-http = headless / self-host.
 _MCP_TRANSPORTS = ("stdio", "sse", "streamable-http")
+_REASONING_PROVIDERS = ("none", "codex")
 
 
 def _validate_settings(data):
@@ -501,16 +502,23 @@ def _validate_settings(data):
             except (TypeError, ValueError):
                 return None, bad
     for key, allowed in (("default_preset", _CLIP_PRESETS),
-                         ("mcp_transport", _MCP_TRANSPORTS)):
+                         ("mcp_transport", _MCP_TRANSPORTS),
+                         ("reasoning_provider", _REASONING_PROVIDERS)):
         if key in data:
             if data[key] not in allowed:
                 return None, bad
             clean[key] = data[key]
-    for bkey in ("fast_default", "offline"):
+    for bkey in ("fast_default", "offline", "reasoning_egress_consent"):
         if bkey in data:
             if not isinstance(data[bkey], bool):
                 return None, bad
             clean[bkey] = data[bkey]
+    if clean.get("reasoning_egress_consent") is True:
+        effective_provider = clean.get(
+            "reasoning_provider", _settings().get()["reasoning_provider"]
+        )
+        if effective_provider != "codex":
+            return None, (jsonify({"error": "egress_consent_requires_codex"}), 400)
     return clean, None
 
 
@@ -2238,7 +2246,13 @@ def patch_settings():
     clean, err = _validate_settings(data)
     if err:
         return err
-    out = _settings().update(clean)
+    try:
+        out = _settings().update(clean)
+    except OSError as exc:
+        return jsonify({
+            "error": "settings_persist_failed",
+            "message": str(exc) or "Could not persist settings.",
+        }), 500
     apply_cb = current_app.extensions.get("trove.apply_settings")
     if apply_cb:
         apply_cb(out)

@@ -1,12 +1,13 @@
 """Pluggable LLM provider layer for the clip engine.
 
 Moment-finding (and, later, title/description generation) needs a language model.
-Spool is local-first, so there is no hosted API key by default. The DEFAULT provider
-is the **codex bridge**: it shells out to the user's own Codex CLI, authed with their
+Spool is local-first, so remote reasoning is disabled by default. Users can explicitly
+select the **codex bridge**, which shells out to their own Codex CLI, authed with their
 ChatGPT/Codex subscription — no API key, no local GPU. Other providers slot in behind
 the same tiny ``complete(prompt, *, system)`` interface:
 
-- ``codex``  (default) — bridge to the Codex CLI. Network egress: only the prompt text.
+- ``none``   (default) — no reasoning provider; transcript text stays local.
+- ``codex``  (opt-in) — bridge to the Codex CLI. Network egress: only the prompt text.
 - ``agent``  — the driving MCP agent's own LLM, injected as a :class:`CallableProvider`
                by the MCP layer (the engine itself performs no egress).
 - future ``claude`` (hosted key) / ``local`` (Ollama/llama.cpp) — offline-safe.
@@ -28,7 +29,7 @@ import tempfile
 from typing import Callable, Protocol, runtime_checkable
 
 # Configurable knobs (env). New Spool functionality → ``SPOOL_*`` namespace.
-DEFAULT_PROVIDER = "codex"
+DEFAULT_PROVIDER = "none"
 CODEX_BIN = os.environ.get("SPOOL_CODEX_BIN", "codex")
 CODEX_MODEL = os.environ.get("SPOOL_CODEX_MODEL") or None  # None → the CLI's own default
 CODEX_TIMEOUT = int(os.environ.get("SPOOL_CODEX_TIMEOUT", "180"))
@@ -44,8 +45,16 @@ class OfflineError(RuntimeError):
     """Raised when an egress provider is requested while offline-mode is on."""
 
 
+class EgressConsentError(OfflineError):
+    """Raised when a remote provider is selected without explicit transcript-egress consent."""
+
+
 class ProviderUnavailableError(RuntimeError):
     """Raised when a provider can't run (unknown name, or the Codex CLI is missing)."""
+
+
+class ReasoningDisabledError(ProviderUnavailableError):
+    """Raised when no reasoning provider has been selected."""
 
 
 def is_offline(env: dict | None = None) -> bool:
@@ -140,6 +149,19 @@ class CodexProvider:
             pass
 
 
+class NoneProvider:
+    """Explicitly disabled reasoning provider used by the privacy-safe default."""
+
+    name = "none"
+    egress = False
+
+    def complete(self, prompt: str, *, system: str | None = None) -> str:
+        raise ReasoningDisabledError(
+            "Remote reasoning is disabled. Select the Codex provider and explicitly "
+            "consent to transcript-text egress before using reasoning features."
+        )
+
+
 class CallableProvider:
     """Wraps an arbitrary ``fn(prompt, *, system) -> str``.
 
@@ -162,16 +184,18 @@ def get_provider(provider: "str | LLMProvider | None" = None, *, env: dict | Non
 
     ``provider`` may be an :class:`LLMProvider` instance (returned as-is — this is how
     the MCP layer injects the agent's own LLM), or a name string. ``None`` uses the
-    configured default (``SPOOL_LLM_PROVIDER`` env, else ``codex``).
+    configured default (``SPOOL_LLM_PROVIDER`` env, else ``none``).
     """
     if provider is not None and not isinstance(provider, str):
         return provider
     e = env if env is not None else os.environ
     name = (provider or e.get("SPOOL_LLM_PROVIDER") or DEFAULT_PROVIDER).lower()
+    if name == "none":
+        return NoneProvider()
     if name == "codex":
         return CodexProvider()
     raise ProviderUnavailableError(
-        f"unknown LLM provider {name!r}. Built-in providers: 'codex' (default). The "
+        f"unknown LLM provider {name!r}. Built-in providers: 'none', 'codex'. The "
         "'agent' provider is injected by the MCP layer — pass it as an instance, not a name."
     )
 
@@ -186,4 +210,11 @@ def complete(prompt: str, *, system: str | None = None,
             "(SPOOL_OFFLINE=1) is on. Use a local provider or turn offline-mode off. "
             "Only transcript text would have been sent — media never leaves the machine."
         )
+    if getattr(p, "egress", False):
+        e = env if env is not None else os.environ
+        if (e.get("SPOOL_LLM_EGRESS_CONSENT") or "").strip().lower() not in _TRUE:
+            raise EgressConsentError(
+                f"LLM provider {p.name!r} requires explicit consent before transcript "
+                "text can leave this machine."
+            )
     return p.complete(prompt, system=system)

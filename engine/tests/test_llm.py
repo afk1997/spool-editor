@@ -1,6 +1,6 @@
 """Tests for clip.llm — the pluggable moment-finding LLM provider layer.
 
-The default provider is the *codex bridge*: it shells out to the user's Codex CLI.
+Remote reasoning is disabled by default. The opt-in ``codex`` provider shells out to the user's Codex CLI.
 We never invoke the real CLI here — ``shutil.which`` and ``subprocess.run`` are
 mocked and we assert the ``codex exec`` argv/stdin contract + the offline guard.
 """
@@ -20,10 +20,12 @@ class _FakeProc:
 
 # --- provider resolution -------------------------------------------------
 
-def test_get_provider_defaults_to_codex():
+def test_get_provider_defaults_to_none():
     p = llm.get_provider(env={})
-    assert isinstance(p, llm.CodexProvider)
-    assert p.name == "codex" and p.egress is True
+    assert isinstance(p, llm.NoneProvider)
+    assert p.name == "none" and p.egress is False
+    with pytest.raises(llm.ReasoningDisabledError):
+        p.complete("hi")
 
 
 def test_get_provider_passes_through_an_instance():
@@ -113,7 +115,40 @@ def test_is_offline_parsing(val, offline):
 def test_complete_blocks_egress_provider_when_offline(monkeypatch):
     monkeypatch.setattr(llm.shutil, "which", lambda b: "/usr/local/bin/codex")
     with pytest.raises(llm.OfflineError, match="offline"):
-        llm.complete("hi", provider="codex", env={"SPOOL_OFFLINE": "1"})
+        llm.complete("hi", provider="codex", env={
+            "SPOOL_OFFLINE": "1",
+            "SPOOL_LLM_EGRESS_CONSENT": "1",
+        })
+
+
+def test_complete_blocks_egress_without_explicit_consent():
+    calls = []
+    remote = llm.CallableProvider(
+        lambda prompt, system=None: calls.append(prompt) or "should not run",
+        name="remote",
+        egress=True,
+    )
+
+    with pytest.raises(llm.EgressConsentError, match="consent"):
+        llm.complete("hi", provider=remote, env={})
+
+    assert calls == []
+
+
+def test_complete_allows_egress_with_explicit_consent():
+    calls = []
+    remote = llm.CallableProvider(
+        lambda prompt, system=None: calls.append(prompt) or "ok",
+        name="remote",
+        egress=True,
+    )
+
+    assert llm.complete(
+        "hi",
+        provider=remote,
+        env={"SPOOL_LLM_EGRESS_CONSENT": "1"},
+    ) == "ok"
+    assert calls == ["hi"]
 
 
 def test_complete_allows_local_provider_when_offline():

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import threading
 
 # The full set of writable keys + their defaults. Defaults mirror the engine's existing
@@ -41,6 +42,7 @@ DEFAULTS = {
 # Anything outside this set in an update body is ignored (defense in depth — the route
 # validator is the first gate, the store is the second).
 _FIELDS = tuple(DEFAULTS.keys())
+_REASONING_PROVIDERS = {"none", "codex"}
 
 
 class SettingsStore:
@@ -59,13 +61,33 @@ class SettingsStore:
             return {}
         if not isinstance(doc, dict):
             return {}
-        return {k: doc[k] for k in _FIELDS if k in doc}
+        loaded = {k: doc[k] for k in _FIELDS if k in doc}
+        if loaded.get("reasoning_provider", "none") not in _REASONING_PROVIDERS:
+            loaded.pop("reasoning_provider", None)
+        if not isinstance(loaded.get("reasoning_egress_consent", False), bool):
+            loaded.pop("reasoning_egress_consent", None)
+        if (
+            loaded.get("reasoning_provider", DEFAULTS["reasoning_provider"]) == "none"
+            and loaded.get("reasoning_egress_consent") is True
+        ):
+            loaded["reasoning_egress_consent"] = False
+        return loaded
 
     def _save(self, overrides: dict) -> None:
-        tmp = self.path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(overrides, f)
-        os.replace(tmp, self.path)
+        parent = os.path.dirname(self.path) or "."
+        prefix = os.path.basename(self.path) + "."
+        fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=parent)
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(overrides, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.path)
+        finally:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
 
     def get(self) -> dict:
         """Every key: defaults merged with the user's overrides (a fresh copy)."""
@@ -80,6 +102,16 @@ class SettingsStore:
     def update(self, data: dict) -> dict:
         """Merge the whitelisted keys of ``data`` into the overrides, persist, return ``get()``."""
         clean = {k: data[k] for k in _FIELDS if k in (data or {})}
+        if (
+            "reasoning_provider" in clean
+            and clean["reasoning_provider"] not in _REASONING_PROVIDERS
+        ):
+            raise ValueError("invalid reasoning_provider")
+        if (
+            "reasoning_egress_consent" in clean
+            and not isinstance(clean["reasoning_egress_consent"], bool)
+        ):
+            raise ValueError("invalid reasoning_egress_consent")
         with self._lock:
             if clean:
                 current = {**DEFAULTS, **self._overrides}

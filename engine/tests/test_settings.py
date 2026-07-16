@@ -106,3 +106,25 @@ def test_failed_atomic_replace_leaves_memory_and_persisted_settings_unchanged(tm
 
     assert s.get() == before
     assert SettingsStore(path).get() == before
+
+
+def test_store_rejects_invalid_reasoning_values(tmp_path):
+    s = SettingsStore(str(tmp_path / "settings.json"))
+
+    with pytest.raises(ValueError, match="reasoning_provider"):
+        s.update({"reasoning_provider": "mystery-cloud"})
+    with pytest.raises(ValueError, match="reasoning_egress_consent"):
+        s.update({"reasoning_egress_consent": "yes"})
+
+    assert s.get()["reasoning_provider"] == "none"
+    assert s.get()["reasoning_egress_consent"] is False
+
+
+def test_load_sanitizes_impossible_reasoning_consent(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text('{"reasoning_provider":"none","reasoning_egress_consent":true}')
+
+    loaded = SettingsStore(path)
+
+    assert loaded.get()["reasoning_provider"] == "none"
+    assert loaded.get()["reasoning_egress_consent"] is False

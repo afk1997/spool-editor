@@ -21,6 +21,9 @@ def client(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TROVE_JOB_TTL_SECONDS", "60")
     monkeypatch.setenv("TROVE_RATE_LIMIT", "0")
+    monkeypatch.delenv("SPOOL_OFFLINE", raising=False)
+    monkeypatch.delenv("SPOOL_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("SPOOL_LLM_EGRESS_CONSENT", raising=False)
     # Isolate download dir so storage / search tests don't see real
     # files (and don't write transcribe_jobs.json into the repo).
     import app as _app_module
@@ -1677,11 +1680,16 @@ def test_settings_defaults_and_patch_roundtrip(client):
     assert r.status_code == 200
     body = r.get_json()
     # every writable key is present with its default
-    for k in ("fast_default", "default_preset", "clip_workers", "max_workers", "mcp_transport"):
+    for k in (
+        "fast_default", "default_preset", "clip_workers", "max_workers", "mcp_transport",
+        "reasoning_provider", "reasoning_egress_consent",
+    ):
         assert k in body
     assert body["fast_default"] is True
     assert body["clip_workers"] == 2
     assert body["default_preset"] == "tiktok"
+    assert body["reasoning_provider"] == "none"
+    assert body["reasoning_egress_consent"] is False
 
     r = c.patch("/api/v1/settings",
                 json={"fast_default": False, "clip_workers": 4, "default_preset": "reels"})
@@ -1705,10 +1713,60 @@ def test_settings_clamps_numeric_and_rejects_bad_enums(client):
     # invalid enums are a 400 (don't silently coerce)
     assert c.patch("/api/v1/settings", json={"default_preset": "myspace"}).status_code == 400
     assert c.patch("/api/v1/settings", json={"mcp_transport": "carrier-pigeon"}).status_code == 400
+    assert c.patch("/api/v1/settings", json={"reasoning_provider": "surprise-cloud"}).status_code == 400
     # a non-bool for a bool field is a 400 (avoid bool("false") == True footguns)
     assert c.patch("/api/v1/settings", json={"fast_default": "yes"}).status_code == 400
+    assert c.patch("/api/v1/settings", json={"reasoning_egress_consent": "yes"}).status_code == 400
+    assert c.patch("/api/v1/settings", json={"reasoning_egress_consent": True}).status_code == 400
     # the rejected writes left the store untouched
     assert c.get("/api/v1/settings").get_json()["default_preset"] == "tiktok"
+
+
+def test_reasoning_provider_and_consent_roundtrip_reset(client):
+    _, c = client
+
+    enabled = c.patch("/api/v1/settings", json={
+        "reasoning_provider": "codex",
+        "reasoning_egress_consent": True,
+    })
+    assert enabled.status_code == 200
+    assert enabled.get_json()["reasoning_egress_consent"] is True
+    assert os.environ["SPOOL_LLM_PROVIDER"] == "codex"
+    assert os.environ["SPOOL_LLM_EGRESS_CONSENT"] == "1"
+
+    disabled = c.patch("/api/v1/settings", json={"reasoning_provider": "none"})
+    assert disabled.get_json()["reasoning_egress_consent"] is False
+    assert os.environ["SPOOL_LLM_PROVIDER"] == "none"
+    assert "SPOOL_LLM_EGRESS_CONSENT" not in os.environ
+
+    selected_again = c.patch("/api/v1/settings", json={"reasoning_provider": "codex"})
+    assert selected_again.get_json()["reasoning_egress_consent"] is False
+    assert os.environ["SPOOL_LLM_PROVIDER"] == "codex"
+    assert "SPOOL_LLM_EGRESS_CONSENT" not in os.environ
+
+
+def test_failed_settings_persistence_does_not_change_runtime_state(client, monkeypatch):
+    app, c = client
+    enabled = c.patch("/api/v1/settings", json={
+        "reasoning_provider": "codex",
+        "reasoning_egress_consent": True,
+    }).get_json()
+    store = app.extensions["trove.settings"]
+
+    def fail_save(_overrides):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "_save", fail_save)
+    failed = c.patch("/api/v1/settings", json={
+        "reasoning_provider": "none",
+        "offline": True,
+    })
+
+    assert failed.status_code == 500
+    assert store.get() == enabled
+    assert os.environ["SPOOL_LLM_PROVIDER"] == "codex"
+    assert os.environ["SPOOL_LLM_EGRESS_CONSENT"] == "1"
+    assert "SPOOL_OFFLINE" not in os.environ
 
 
 def test_create_app_applies_persisted_concurrency_at_startup(tmp_path, monkeypatch):
@@ -1759,6 +1817,38 @@ def test_create_app_seeds_offline_from_env_at_boot(tmp_path, monkeypatch):
     application = _app_module.create_app()
     body = application.test_client().get("/api/v1/settings").get_json()
     assert body["offline"] is True
+
+
+@pytest.mark.parametrize(
+    "provider,consent,expected_provider,expected_consent",
+    [
+        ("codex", "1", "codex", True),
+        ("codex", None, "codex", False),
+        ("none", "1", "none", False),
+        ("invalid-provider", "1", "none", False),
+    ],
+)
+def test_create_app_seeds_only_valid_explicit_reasoning_consent(
+    tmp_path, monkeypatch, provider, consent, expected_provider, expected_consent,
+):
+    import app as _app_module
+    dl = tmp_path / f"downloads-{provider}-{consent}"
+    dl.mkdir(parents=True)
+    monkeypatch.setattr(_app_module, "DOWNLOAD_DIR", dl)
+    monkeypatch.setenv("TROVE_RATE_LIMIT", "0")
+    monkeypatch.setenv("SPOOL_LLM_PROVIDER", provider)
+    if consent is None:
+        monkeypatch.delenv("SPOOL_LLM_EGRESS_CONSENT", raising=False)
+    else:
+        monkeypatch.setenv("SPOOL_LLM_EGRESS_CONSENT", consent)
+
+    application = _app_module.create_app()
+    body = application.test_client().get("/api/v1/settings").get_json()
+
+    assert body["reasoning_provider"] == expected_provider
+    assert body["reasoning_egress_consent"] is expected_consent
+    assert os.environ["SPOOL_LLM_PROVIDER"] == expected_provider
+    assert (os.environ.get("SPOOL_LLM_EGRESS_CONSENT") == "1") is expected_consent
 
 
 # ---- glass-box re-rank (POST /sources/<id>/rank) ------------------------

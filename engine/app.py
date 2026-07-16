@@ -79,19 +79,41 @@ def create_app() -> Flask:
     effective_clip_workers = int(_settings_ov.get("clip_workers", os.environ.get("TROVE_CLIP_WORKERS", "2")))
     app.extensions["trove.settings"] = settings_store
 
-    # The studio's Offline toggle is ENFORCED by clip.llm.is_offline (SPOOL_OFFLINE) —
-    # keep that single enforcement point in sync with the persisted setting. An env var
-    # set at launch seeds the setting (the badge must reflect reality); from then on the
-    # UI toggle drives the env. Single-process deploy, so process-env mutation is sound.
-    def _apply_offline(values: dict) -> None:
+    # Privacy settings are persisted truth, while the LLM boundary reads a process-local
+    # applied snapshot immediately before egress. Boot env may seed only valid explicit
+    # choices; provider + consent land in ONE patch so consent is never reset between writes.
+    true_env = {"1", "true", "yes", "on"}
+    seed: dict = {}
+    env_provider = (os.environ.get("SPOOL_LLM_PROVIDER") or "").strip().lower()
+    if env_provider in ("none", "codex"):
+        seed["reasoning_provider"] = env_provider
+    effective_provider = seed.get(
+        "reasoning_provider", settings_store.get()["reasoning_provider"]
+    )
+    if (
+        effective_provider == "codex"
+        and (os.environ.get("SPOOL_LLM_EGRESS_CONSENT") or "").strip().lower() in true_env
+    ):
+        seed["reasoning_egress_consent"] = True
+    if (os.environ.get("SPOOL_OFFLINE") or "").strip().lower() in true_env:
+        seed["offline"] = True
+    if seed:
+        settings_store.update(seed)
+
+    def _apply_settings(values: dict) -> None:
         if values.get("offline"):
             os.environ["SPOOL_OFFLINE"] = "1"
         else:
             os.environ.pop("SPOOL_OFFLINE", None)
-    if (os.environ.get("SPOOL_OFFLINE") or "").strip().lower() in ("1", "true", "yes", "on"):
-        settings_store.update({"offline": True})
-    _apply_offline(settings_store.get())
-    app.extensions["trove.apply_settings"] = _apply_offline
+        provider = values.get("reasoning_provider")
+        os.environ["SPOOL_LLM_PROVIDER"] = provider if provider in ("none", "codex") else "none"
+        if provider == "codex" and values.get("reasoning_egress_consent") is True:
+            os.environ["SPOOL_LLM_EGRESS_CONSENT"] = "1"
+        else:
+            os.environ.pop("SPOOL_LLM_EGRESS_CONSENT", None)
+
+    _apply_settings(settings_store.get())
+    app.extensions["trove.apply_settings"] = _apply_settings
 
     # FTS5 (trigram) transcript index — an additive accelerator for /transcripts/search (spec
     # §7.2). The in-memory word-scan stays the source of truth; this only narrows which
