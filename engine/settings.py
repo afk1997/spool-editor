@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 
 # The full set of writable keys + their defaults. Defaults mirror the engine's existing
 # env/arg defaults (TROVE_CLIP_WORKERS=2, TROVE_MAX_WORKERS=4, exporter fast=True,
@@ -30,6 +31,8 @@ DEFAULTS = {
     "fast_default": True,        # export fast vs quality when a render omits `fast` (hot)
     "default_preset": "tiktok",  # platform preset when a render omits `preset` (hot)
     "offline": False,            # block LLM egress (drives SPOOL_OFFLINE; hot)
+    "reasoning_provider": "none",  # none | codex; remote reasoning is opt-in
+    "reasoning_egress_consent": False,  # explicit consent required for codex transcript egress
     "clip_workers": 2,           # render-queue concurrency (applies on restart)
     "max_workers": 4,            # download-queue concurrency (applies on restart)
     "mcp_transport": "stdio",    # MCP server transport (applies on restart)
@@ -45,6 +48,7 @@ class SettingsStore:
 
     def __init__(self, path):
         self.path = str(path)
+        self._lock = threading.RLock()
         self._overrides = self._load()
 
     def _load(self) -> dict:
@@ -57,24 +61,46 @@ class SettingsStore:
             return {}
         return {k: doc[k] for k in _FIELDS if k in doc}
 
-    def _save(self) -> None:
+    def _save(self, overrides: dict) -> None:
         tmp = self.path + ".tmp"
         with open(tmp, "w") as f:
-            json.dump(self._overrides, f)
+            json.dump(overrides, f)
         os.replace(tmp, self.path)
 
     def get(self) -> dict:
         """Every key: defaults merged with the user's overrides (a fresh copy)."""
-        return {**DEFAULTS, **self._overrides}
+        with self._lock:
+            return {**DEFAULTS, **self._overrides}
 
     def overrides(self) -> dict:
         """Only the keys the user explicitly wrote (a fresh copy)."""
-        return dict(self._overrides)
+        with self._lock:
+            return dict(self._overrides)
 
     def update(self, data: dict) -> dict:
         """Merge the whitelisted keys of ``data`` into the overrides, persist, return ``get()``."""
         clean = {k: data[k] for k in _FIELDS if k in (data or {})}
-        if clean:
-            self._overrides.update(clean)
-            self._save()
-        return self.get()
+        with self._lock:
+            if clean:
+                current = {**DEFAULTS, **self._overrides}
+                next_overrides = {**self._overrides, **clean}
+                next_provider = next_overrides.get(
+                    "reasoning_provider", DEFAULTS["reasoning_provider"]
+                )
+                provider_changed = (
+                    "reasoning_provider" in clean
+                    and clean["reasoning_provider"] != current["reasoning_provider"]
+                )
+                if provider_changed and "reasoning_egress_consent" not in clean:
+                    next_overrides["reasoning_egress_consent"] = False
+                if next_provider == "none" and (
+                    "reasoning_provider" in clean
+                    or "reasoning_egress_consent" in clean
+                    or current["reasoning_egress_consent"] is True
+                ):
+                    next_overrides["reasoning_egress_consent"] = False
+
+                # Copy-on-write: persistence must succeed before the live in-memory view changes.
+                self._save(next_overrides)
+                self._overrides = next_overrides
+            return {**DEFAULTS, **self._overrides}

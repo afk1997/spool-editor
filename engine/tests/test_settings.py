@@ -7,12 +7,16 @@ what was explicitly written (so ``create_app`` can prefer a UI-set value over th
 without confusing "user set 2" with "default 2")."""
 from __future__ import annotations
 
+import pytest
+
 from settings import SettingsStore, DEFAULTS
 
 
 def test_defaults_when_empty(tmp_path):
     s = SettingsStore(str(tmp_path / "settings.json"))
     assert s.get() == DEFAULTS
+    assert s.get()["reasoning_provider"] == "none"
+    assert s.get()["reasoning_egress_consent"] is False
     assert s.overrides() == {}
     # get() returns a copy — mutating it must not corrupt the store's defaults.
     s.get()["fast_default"] = "mutated"
@@ -55,3 +59,50 @@ def test_corrupt_file_falls_back_to_defaults(tmp_path):
     s = SettingsStore(str(p))
     assert s.get() == DEFAULTS
     assert s.overrides() == {}
+
+
+def test_provider_changes_reset_consent_unless_explicitly_regranted(tmp_path):
+    s = SettingsStore(str(tmp_path / "settings.json"))
+
+    enabled = s.update({
+        "reasoning_provider": "codex",
+        "reasoning_egress_consent": True,
+    })
+    assert enabled["reasoning_provider"] == "codex"
+    assert enabled["reasoning_egress_consent"] is True
+
+    disabled = s.update({"reasoning_provider": "none", "reasoning_egress_consent": True})
+    assert disabled["reasoning_provider"] == "none"
+    assert disabled["reasoning_egress_consent"] is False
+
+    selected_again = s.update({"reasoning_provider": "codex"})
+    assert selected_again["reasoning_provider"] == "codex"
+    assert selected_again["reasoning_egress_consent"] is False
+
+    consented_later = s.update({"reasoning_egress_consent": True})
+    assert consented_later["reasoning_egress_consent"] is True
+
+
+def test_failed_atomic_replace_leaves_memory_and_persisted_settings_unchanged(tmp_path, monkeypatch):
+    path = str(tmp_path / "settings.json")
+    s = SettingsStore(path)
+    s.update({
+        "reasoning_provider": "codex",
+        "reasoning_egress_consent": True,
+        "offline": False,
+    })
+    before = s.get()
+
+    def fail_replace(_src, _dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("settings.os.replace", fail_replace)
+    with pytest.raises(OSError, match="disk full"):
+        s.update({
+            "reasoning_provider": "none",
+            "reasoning_egress_consent": False,
+            "offline": True,
+        })
+
+    assert s.get() == before
+    assert SettingsStore(path).get() == before
