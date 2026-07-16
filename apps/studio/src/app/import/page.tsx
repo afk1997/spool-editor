@@ -9,6 +9,12 @@ import { Btn, Chip, Icon, Progress, Seg, Switch, Thumb } from "@spool/ui";
 type VisibleError = { code: string; message: string };
 type BatchError = VisibleError & { url: string };
 type DownloadAction = "pause" | "resume";
+type PendingDownloadAction = { action: DownloadAction; acknowledged: boolean };
+
+const downloadActionReflected = (action: DownloadAction, status: string) =>
+  action === "pause"
+    ? status === "paused" || status === "done" || status === "error" || status === "cancelled"
+    : status !== "paused";
 
 /* ImportScreen — 1:1 port of the demo (03), wired: Resolve submits real downloads via
  * ingest.download; the Downloads list is the live jobs snapshot. A `?url=` query (e.g. from
@@ -24,8 +30,8 @@ function ImportScreen() {
   const submittingRef = useRef(false);
   const [submitError, setSubmitError] = useState<{ summary: string; failures: BatchError[] } | null>(null);
   const [pauseErrors, setPauseErrors] = useState<Record<string, VisibleError>>({});
-  const pendingDownloadActionsRef = useRef<Record<string, DownloadAction>>({});
-  const [pendingDownloadActions, setPendingDownloadActions] = useState<Record<string, DownloadAction>>({});
+  const pendingDownloadActionsRef = useRef<Record<string, PendingDownloadAction>>({});
+  const [pendingDownloadActions, setPendingDownloadActions] = useState<Record<string, PendingDownloadAction>>({});
   const downloads = ctx.downloads;
 
   const resolve = async () => {
@@ -102,9 +108,16 @@ function ImportScreen() {
   };
 
   const runDownloadAction = async (id: string, action: DownloadAction) => {
-    if (pendingDownloadActionsRef.current[id]) return;
-    pendingDownloadActionsRef.current[id] = action;
-    setPendingDownloadActions((current) => ({ ...current, [id]: action }));
+    const existing = pendingDownloadActionsRef.current[id];
+    if (existing) {
+      const currentDownload = downloads.find((download) => download.id === id);
+      if (!existing.acknowledged || !currentDownload
+        || !downloadActionReflected(existing.action, currentDownload.status)) return;
+      delete pendingDownloadActionsRef.current[id];
+    }
+    const pending = { action, acknowledged: false };
+    pendingDownloadActionsRef.current[id] = pending;
+    setPendingDownloadActions((current) => ({ ...current, [id]: pending }));
     setPauseErrors((current) => {
       const next = { ...current };
       delete next[id];
@@ -113,15 +126,20 @@ function ImportScreen() {
     try {
       if (action === "pause") await ctx.client.pauseJob(id);
       else await ctx.client.resumeJob(id);
+      const current = pendingDownloadActionsRef.current[id];
+      if (current?.action === action) {
+        const acknowledged = { action, acknowledged: true };
+        pendingDownloadActionsRef.current[id] = acknowledged;
+        setPendingDownloadActions((entries) => ({ ...entries, [id]: acknowledged }));
+      }
     } catch (error) {
-      setPauseErrors((current) => ({ ...current, [id]: describeActionError(error) }));
-    } finally {
       delete pendingDownloadActionsRef.current[id];
       setPendingDownloadActions((current) => {
         const next = { ...current };
         delete next[id];
         return next;
       });
+      setPauseErrors((current) => ({ ...current, [id]: describeActionError(error) }));
     }
   };
 
@@ -203,7 +221,11 @@ function ImportScreen() {
               const err = d.status === "error";
               const cancelled = d.status === "cancelled";
               const terminalFailure = err || cancelled;
-              const pendingAction = pendingDownloadActions[d.id];
+              const pendingEntry = pendingDownloadActions[d.id];
+              const pendingAction = pendingEntry
+                && !(pendingEntry.acknowledged && downloadActionReflected(pendingEntry.action, d.status))
+                ? pendingEntry.action
+                : undefined;
               return (
                 <div key={d.id} className="card" style={{ display: "flex", gap: 14, padding: 12, alignItems: "center", borderColor: terminalFailure ? "rgba(190,81,73,0.4)" : "var(--line)", background: terminalFailure ? "var(--err-soft)" : "var(--bg-2)" }}>
                   <div style={{ width: 96, flex: "none", borderRadius: 8, overflow: "hidden" }}><Thumb seed={d.id} kind={d.src} label={false} /></div>

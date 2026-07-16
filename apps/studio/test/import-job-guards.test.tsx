@@ -88,6 +88,54 @@ describe("Import download mutation guards", () => {
     expect(screen.getByRole("button", { name: "Resume download" })).toBeEnabled();
   });
 
+  it.each([
+    {
+      action: "pause",
+      initialStatus: "downloading",
+      settledStatus: "paused",
+      triggerLabel: "Pause download",
+      busyLabel: "Pausing download…",
+      finalLabel: "Resume download",
+    },
+    {
+      action: "resume",
+      initialStatus: "paused",
+      settledStatus: "downloading",
+      triggerLabel: "Resume download",
+      busyLabel: "Resuming download…",
+      finalLabel: "Pause download",
+    },
+  ] as const)(
+    "keeps an accepted $action locked until the download snapshot reflects it",
+    async ({ action, initialStatus, settledStatus, triggerLabel, busyLabel, finalLabel }) => {
+      const pauseJob = vi.fn().mockResolvedValue(undefined);
+      const resumeJob = vi.fn().mockResolvedValue(undefined);
+      const mutation = action === "pause" ? pauseJob : resumeJob;
+      const ctx = importCtx([downloadFixture({ status: initialStatus })], { pauseJob, resumeJob });
+      harness.ctx = ctx;
+      const { rerender } = render(<ImportPage />);
+
+      await act(async () => {
+        screen.getByRole("button", { name: triggerLabel }).click();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      const busy = screen.getByRole("button", { name: busyLabel });
+      expect(busy).toBeDisabled();
+      busy.click();
+      expect(mutation).toHaveBeenCalledTimes(1);
+
+      ctx.downloads = [downloadFixture({ status: initialStatus })];
+      rerender(<ImportPage />);
+      expect(screen.getByRole("button", { name: busyLabel })).toBeDisabled();
+
+      ctx.downloads = [downloadFixture({ status: settledStatus })];
+      rerender(<ImportPage />);
+      expect(screen.getByRole("button", { name: finalLabel })).toBeEnabled();
+    },
+  );
+
   it("locks duplicate Resume clicks and restores the structured failure after settlement", async () => {
     const pending = deferred<void>();
     const pauseJob = vi.fn().mockResolvedValue(undefined);
