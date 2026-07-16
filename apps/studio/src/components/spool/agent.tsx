@@ -29,7 +29,7 @@ function ToolTrace({ tools }: { tools: NonNullable<AgentMessage["tools"]> }) {
   );
 }
 
-function ClarificationCard({ msg, onAnswer }: { msg: AgentMessage; onAnswer: (msg: AgentMessage, answer: unknown) => void }) {
+function ClarificationCard({ msg, onAnswer, disabled = false }: { msg: AgentMessage; onAnswer: (msg: AgentMessage, answer: unknown) => void; disabled?: boolean }) {
   const choices = (msg.options ?? []).map((option) => typeof option === "string"
     ? { value: option, label: option, description: undefined as string | undefined, selected: msg.answer === option }
     : { value: option.id, label: option.title, description: option.sub, selected: Array.isArray(msg.answer) ? msg.answer.includes(option.id) : msg.answer === option.id });
@@ -44,7 +44,7 @@ function ClarificationCard({ msg, onAnswer }: { msg: AgentMessage; onAnswer: (ms
         {choices.map((choice) => {
           const selected = multi ? picked.includes(choice.value) : choice.selected;
           return (
-            <button type="button" key={choice.value} className={"chip" + (selected ? " solid" : "")} aria-pressed={selected} disabled={msg.answered}
+            <button type="button" key={choice.value} className={"chip" + (selected ? " solid" : "")} aria-pressed={selected} disabled={disabled || msg.answered}
               title={choice.description} onClick={() => multi
                 ? setPicked((current) => current.includes(choice.value) ? current.filter((value) => value !== choice.value) : [...current, choice.value])
                 : onAnswer(msg, choice.value)}>
@@ -53,7 +53,7 @@ function ClarificationCard({ msg, onAnswer }: { msg: AgentMessage; onAnswer: (ms
           );
         })}
         {multi && (
-          <button type="button" className="btn primary sm" disabled={msg.answered || picked.length === 0} onClick={() => onAnswer(msg, picked)}>Answer</button>
+          <button type="button" className="btn primary sm" disabled={disabled || msg.answered || picked.length === 0} onClick={() => onAnswer(msg, picked)}>Answer</button>
         )}
       </div>
     </div></div>
@@ -94,7 +94,7 @@ export function AgentPanel() {
               <div style={{ color: "var(--text-faint)", fontSize: 12 }}>Agent mutations are unavailable in Phase 0. Inspection remains available.</div>
             </div></div>
           );
-          if (m.role === "elicit") return <ClarificationCard key={i} msg={m} onAnswer={ctx.answerElicit} />;
+          if (m.role === "elicit") return <ClarificationCard key={i} msg={m} onAnswer={ctx.answerElicit} disabled={ctx.working} />;
           return <div key={i} className="msg"><div className="who"><Icon name="sparkles" size={12} style={{ color: "var(--accent)" }} />spool</div><div className="bubble">{m.text}</div></div>;
         })}
       </div>

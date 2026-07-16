@@ -284,6 +284,54 @@ describe("agent confirm flow: gated tools require a click before running", () =>
   });
 });
 
+describe("agent clarification admission", () => {
+  it("does not consume an old clarification while a newer agent request is running", async () => {
+    let release!: () => void;
+    const newerRequest = new Promise<{
+      reply: string;
+      action: string;
+      jobs: never[];
+      tools: never[];
+    }>((resolve) => {
+      release = () => resolve({ reply: "newer answer", action: "reply", jobs: [], tools: [] });
+    });
+    client = {
+      agent: vi
+        .fn()
+        .mockResolvedValueOnce({
+          reply: "I need one detail.",
+          action: "clarify",
+          jobs: [],
+          tools: [],
+          question: "Which source?",
+          options: ["Interview", "Keynote"],
+          kind: "enum",
+        })
+        .mockReturnValueOnce(newerRequest),
+    };
+    const ctx = mountCtx();
+
+    act(() => { ctx.get().askAgent("inspect a source"); });
+    await waitFor(() =>
+      expect(ctx.get().agentMessages.some((message) => message.role === "elicit")).toBe(true),
+    );
+    const clarification = ctx.get().agentMessages.find((message) => message.role === "elicit")!;
+
+    act(() => {
+      ctx.get().askAgent("inspect the queue instead");
+      ctx.get().answerElicit(clarification, "Keynote");
+    });
+
+    expect(client.agent).toHaveBeenCalledTimes(2);
+    expect(ctx.get().agentMessages.find((message) => message.id === clarification.id)?.answered).not.toBe(true);
+
+    await act(async () => {
+      release();
+      await newerRequest;
+    });
+  });
+});
+
 describe("SpoolCtx exposes awaitClipJob for pages to sequence dependent jobs", () => {
   it("awaitClipJob is on the context and resolves when the job is already terminal", async () => {
     client = { getClipJob: vi.fn().mockResolvedValue({ id: "j", status: "done" }) };

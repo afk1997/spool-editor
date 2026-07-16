@@ -511,6 +511,25 @@ describe("editor controls expose their real accessible actions", () => {
     expect(screen.queryByRole("button", { name: "Confirm" })).not.toBeInTheDocument();
   });
 
+  it("disables clarification choices while another Agent request is running", () => {
+    harness.ctx = baseCtx({
+      agentOpen: true,
+      working: true,
+      agentMessages: [{
+        role: "elicit",
+        id: "clarify-busy",
+        kind: "enum",
+        q: "Which source should I inspect?",
+        options: ["Interview", "Keynote"],
+      }],
+    });
+
+    render(<AgentPanel />);
+
+    expect(screen.getByRole("button", { name: "Interview" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Keynote" })).toBeDisabled();
+  });
+
   it("labels the range-adjustment close control", () => {
     render(
       <AdjustModal

@@ -447,6 +447,7 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   }, [client, push]);
 
   const answerElicit = useCallback((msg: AgentMessage, answer: unknown) => {
+    if (agentInFlight.current || msg.answered) return;
     setAgentMessages((a) => a.map((m) => (m === msg || (msg.id && m.id === msg.id) ? { ...m, answered: true, answer } : m)));
     if (msg.confirmFor) {
       // Approval re-runs the SAME message with the tool pre-approved for one call — the
