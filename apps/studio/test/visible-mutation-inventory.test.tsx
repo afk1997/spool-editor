@@ -333,9 +333,12 @@ describe("visible mutation inventory: Queue", () => {
 });
 
 describe("visible mutation inventory: Source work", () => {
-  it("starts one retranscription across same-tick repeated clicks", async () => {
-    const delayed = deferred<{ id: string }>();
-    const startTranscribe = vi.fn().mockReturnValue(delayed.promise);
+  it("keeps an accepted retranscription locked until its SSE job is terminal and surfaces failure", async () => {
+    const startTranscribe = vi.fn().mockResolvedValue({
+      id: "transcript-2",
+      parent_job_id: "source-1",
+      status: "queued",
+    });
     harness.params = { id: "source-1" };
     harness.queryData = {
       getTranscriptDoc: undefined,
@@ -345,21 +348,60 @@ describe("visible mutation inventory: Source work", () => {
       sources: [sourceFixture()],
       client: clientFixture({ startTranscribe }),
     });
-    render(<ProjectScreen />);
+    const view = render(<ProjectScreen />);
 
     const retranscribe = screen.getByRole("button", { name: "Re-transcribe" });
-    act(() => {
-      retranscribe.click();
-      retranscribe.click();
-    });
-    const callsBeforeSettlement = startTranscribe.mock.calls.length;
+    fireEvent.click(retranscribe);
+    await waitFor(() => expect(startTranscribe).toHaveBeenCalledTimes(1));
+    const queued = await screen.findByRole("button", { name: "Queued…" });
+    expect(queued).toBeDisabled();
+    fireEvent.click(queued);
+    fireEvent.click(queued);
+    expect(startTranscribe).toHaveBeenCalledTimes(1);
 
-    await act(async () => {
-      delayed.resolve({ id: "transcript-2" });
-      await delayed.promise;
-      await Promise.resolve();
+    harness.snapshot = {
+      ts: 2,
+      jobs: [],
+      clips: [],
+      transcripts: [{
+        id: "transcript-2",
+        parent_job_id: "source-1",
+        status: "error",
+        model_used: "ggml-base.bin",
+        progress_pct: 12,
+        duration_seconds: 90,
+        language_detected: "en",
+        elapsed_seconds: 3,
+        error_category: "decode_failed",
+        error_message: "bad audio",
+        diarization_status: null,
+        diarization_error: null,
+        speaker_count: null,
+        human: { summary: "failed" },
+      }],
+    } as unknown as EventsSnapshot;
+    view.rerender(<ProjectScreen />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Re-transcribe" })).toBeEnabled();
+      expect(screen.getByRole("alert")).toHaveTextContent("decode_failed · bad audio");
     });
-    expect(callsBeforeSettlement).toBe(1);
+  });
+
+  it("disables re-transcription while the source already has an active transcript job", () => {
+    harness.params = { id: "source-1" };
+    harness.queryData = {
+      getTranscriptDoc: undefined,
+      sourceEnergy: { bars: [], buckets: 0 },
+    };
+    harness.ctx = baseCtx({
+      sources: [sourceFixture({ status: "transcribing" })],
+      client: clientFixture({ startTranscribe: vi.fn() }),
+    });
+
+    render(<ProjectScreen />);
+
+    expect(screen.getByRole("button", { name: "Transcribing…" })).toBeDisabled();
   });
 
   it("waits for all discovery modes before surfacing a structured scan failure", async () => {

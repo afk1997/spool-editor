@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { useSpool, buildTranscript, mapCandidates } from "@/components/spool/context";
 import { useEngineQuery, useLive } from "@/lib/engine-context";
@@ -20,7 +20,8 @@ export default function ProjectScreen() {
   // Seed the tab from ?tab= so "Make clips" can land you straight on the Clips tab to review.
   const [tab, setTab] = useState(useSearchParams().get("tab") || "Overview");
   const [retranscribing, setRetranscribing] = useState(false);
-  const retranscribingRef = useRef(false);
+  const [pendingRetranscribeId, setPendingRetranscribeId] = useState<string | null>(null);
+  const retranscribingRef = useRef<"idle" | "submitting" | "waiting">("idle");
   const [actionError, setActionError] = useState<ReturnType<typeof describeActionError> | null>(null);
 
   const s = ctx.sources.find((x) => x.id === id);
@@ -31,17 +32,46 @@ export default function ProjectScreen() {
   const energyQ = useEngineQuery((c) => (s && s.status !== "transcribing" ? c.sourceEnergy(id, 96) : Promise.resolve({ bars: [], buckets: 0 })), [id, s?.status]);
   const finding = (snapshot?.clips ?? []).some((c) => c.kind === "moments" && c.source_id === id && (c.status === "running" || c.status === "queued"));
   const myClips = ctx.clips.filter((c) => c.src === id);
+  const pendingRetranscribe = pendingRetranscribeId
+    ? snapshot?.transcripts.find((job) => job.id === pendingRetranscribeId)
+    : undefined;
+  const pendingRetranscribeTerminal = !!pendingRetranscribe
+    && pendingRetranscribe.status !== "queued"
+    && pendingRetranscribe.status !== "running";
+  const pendingRetranscribeActive = pendingRetranscribeId !== null && !pendingRetranscribeTerminal;
+  const pendingRetranscribeError = pendingRetranscribe?.status === "error"
+    ? {
+        code: pendingRetranscribe.error_category || "transcribe_failed",
+        message: pendingRetranscribe.error_message || "The transcription job failed.",
+      }
+    : pendingRetranscribe?.status === "cancelled"
+      ? {
+          code: pendingRetranscribe.error_category || "cancelled",
+          message: pendingRetranscribe.error_message || "The transcription job was cancelled.",
+        }
+      : null;
+  const visibleActionError = actionError ?? pendingRetranscribeError;
+
+  useEffect(() => {
+    if (pendingRetranscribeTerminal) retranscribingRef.current = "idle";
+  }, [pendingRetranscribeTerminal]);
 
   const retranscribe = async () => {
-    if (!s || retranscribingRef.current) return;
-    retranscribingRef.current = true;
+    if (!s || retranscribingRef.current !== "idle") return;
+    retranscribingRef.current = "submitting";
+    setPendingRetranscribeId(null);
     setRetranscribing(true); setActionError(null);
     try {
-      await ctx.client.startTranscribe(s.id);
+      const accepted = await ctx.client.startTranscribe(s.id);
+      retranscribingRef.current = "waiting";
+      setPendingRetranscribeId(accepted.id);
       ctx.pushToast({ icon: "type", tone: "info", title: "Transcription queued", body: s.title });
     } catch (error) {
+      retranscribingRef.current = "idle";
       setActionError(describeActionError(error));
-    } finally { retranscribingRef.current = false; setRetranscribing(false); }
+    } finally {
+      setRetranscribing(false);
+    }
   };
 
   if (!s) {
@@ -55,6 +85,12 @@ export default function ProjectScreen() {
   }
 
   const transcribing = s.status === "transcribing";
+  const retranscribeBusy = retranscribing || pendingRetranscribeActive || transcribing;
+  const retranscribeLabel = retranscribing
+    ? "Starting…"
+    : pendingRetranscribeActive
+      ? pendingRetranscribe?.status === "running" ? "Transcribing…" : "Queued…"
+      : transcribing ? "Transcribing…" : "Re-transcribe";
   const duration = s.dur > 0 ? fmtDur(s.dur) : "—";
   const knownOrigin = s.src !== "—";
 
@@ -72,9 +108,9 @@ export default function ProjectScreen() {
           <div className="row" style={{ gap: 8, color: "var(--text-faint)", fontSize: 13, marginBottom: 16 }}>{knownOrigin && <SourceGlyph type={s.src} />} {s.channel} · {s.lang} · added {s.added}</div>
           <div className="row" style={{ gap: 9, flexWrap: "wrap" }}>
             <Btn variant="primary" icon="scissors" onClick={() => ctx.nav("discovery", { id: s.id })}>Find clips</Btn>
-            <Btn variant="ghost" icon="refresh" disabled={retranscribing} onClick={retranscribe}>{retranscribing ? "Starting…" : "Re-transcribe"}</Btn>
+            <Btn variant="ghost" icon="refresh" disabled={retranscribeBusy} onClick={retranscribe}>{retranscribeLabel}</Btn>
           </div>
-          {actionError && <div role="alert" className="card" style={{ marginTop: 12, padding: 10, color: "var(--err)", borderColor: "rgba(190,81,73,0.4)", background: "var(--err-soft)", fontSize: 12.5 }}><span className="mono">{actionError.code}</span> · {actionError.message}</div>}
+          {visibleActionError && <div role="alert" className="card" style={{ marginTop: 12, padding: 10, color: "var(--err)", borderColor: "rgba(190,81,73,0.4)", background: "var(--err-soft)", fontSize: 12.5 }}><span className="mono">{visibleActionError.code}</span> · {visibleActionError.message}</div>}
         </div>
       </div>
 
