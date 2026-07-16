@@ -3,12 +3,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { useSpool } from "@/components/spool/context";
+import { describeActionError } from "@/lib/action-error";
 import { Btn, Icon, Seg, fmtTC } from "@spool/ui";
 
 /* S7 Reframe / ROI editor — 1:1 port of the demo (05), fully wired (Phase 2).
  * Real cut-clip video with draggable ROI boxes + a real scrub; an editable diar⊕ROI
  * speaker track (click a segment to flip L/R); real min-dwell / smoothing / crop-margin
- * knobs; a live 9:16 preview that plays the actual reframed render. Everything POSTs to
+ * knobs; the latest completed 9:16 render when one exists. Everything POSTs to
  * the real /clips/<id>/reframe endpoint (fractional ROIs, knobs, edited segments). */
 
 interface Box { x: number; y: number; w: number; h: number }
@@ -55,7 +56,7 @@ function Knob({ label, value, min, max, step, fmt, onChange }: { label: string; 
         <span style={{ fontSize: 12.5 }}>{label}</span><span className="spacer" />
         <span className="mono" style={{ fontSize: 11.5, color: "var(--text-dim)" }}>{fmt(value)}</span>
       </div>
-      <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(+e.target.value)} style={{ width: "100%", accentColor: "var(--accent)" }} />
+      <input type="range" aria-label={label} min={min} max={max} step={step} value={value} onChange={(e) => onChange(+e.target.value)} style={{ width: "100%", accentColor: "var(--accent)" }} />
     </div>
   );
 }
@@ -75,6 +76,27 @@ export default function ReframeScreen() {
   const [cur, setCur] = useState(0);
   const [dur, setDur] = useState(0);
   const [videoOk, setVideoOk] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
+  const mounted = useRef(true);
+  const [actionError, setActionError] = useState<ReturnType<typeof describeActionError> | null>(null);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  const setBoxValue = (side: "L" | "R", key: keyof Box, raw: number) => {
+    if (!Number.isFinite(raw)) return;
+    setBoxes((current) => {
+      const box = { ...current[side] };
+      if (key === "x") box.x = Math.max(0, Math.min(100 - box.w, raw));
+      else if (key === "y") box.y = Math.max(0, Math.min(100 - box.h, raw));
+      else if (key === "w") box.w = Math.max(12, Math.min(100 - box.x, raw));
+      else box.h = Math.max(12, Math.min(100 - box.y, raw));
+      return { ...current, [side]: box };
+    });
+  };
 
   // the REAL diar⊕ROI track from the clip's latest reframe job, now editable in-place.
   const reframeJob = (ctx.snapshot?.clips ?? []).filter((c) => c.clip_id === id && c.kind === "reframe" && c.status === "done" && ((c.result.segments as Seg2[] | undefined)?.length ?? 0) > 0).at(-1);
@@ -106,23 +128,36 @@ export default function ReframeScreen() {
   };
 
   // "Verify" recomputes + shows the track without leaving; "Apply" proceeds to captions.
-  const submit = (proceed: boolean) => {
-    ctx.client.reframe(id, reframeParams()).catch(() => {});
-    if (proceed) {
-      ctx.pushToast({ icon: "refresh", tone: "info", title: "Reframing", body: `${mode} · 9:16 · track in the queue` });
-      ctx.nav("caption", { id });
-    } else {
-      ctx.pushToast({ icon: "scan", tone: "info", title: "Recomputing diar⊕ROI", body: "The speaker track updates here when the job finishes." });
+  const submit = async (proceed: boolean) => {
+    if (submittingRef.current) return;
+    const startedAtLocation = window.location.href;
+    submittingRef.current = true;
+    setSubmitting(true); setActionError(null);
+    try {
+      const job = await ctx.client.reframe(id, reframeParams());
+      if (!mounted.current || window.location.href !== startedAtLocation) return;
+      if (proceed) {
+        await ctx.awaitClipJob(job.id);
+        if (!mounted.current || window.location.href !== startedAtLocation) return;
+        ctx.pushToast({ icon: "refresh", tone: "ok", title: "Reframe complete", body: `${mode} · 9:16` });
+        ctx.nav("caption", { id });
+      } else {
+        ctx.pushToast({ icon: "scan", tone: "info", title: "Verification queued", body: "Any track returned by the engine will appear here." });
+      }
+    } catch (error) {
+      if (mounted.current && window.location.href === startedAtLocation)
+        setActionError(describeActionError(error));
+    } finally {
+      submittingRef.current = false;
+      if (mounted.current) setSubmitting(false);
     }
   };
-
-  const autoDetect = () => { setBoxes(DEFAULT_BOXES); ctx.pushToast({ icon: "scan", tone: "info", title: "Boxes reset", body: "Adjust the L/R boxes, then Apply — the engine refines detection on render." }); };
 
   return (
     <div className="mainpad fadein" style={{ maxWidth: 1240 }}>
       <button className="btn subtle sm" style={{ marginBottom: 12, paddingLeft: 0 }} onClick={() => ctx.nav("editor", { id })}><Icon name="chevL" size={15} /> Editor</button>
       <div className="row" style={{ marginBottom: 18 }}>
-        <div><div className="eyebrow" style={{ marginBottom: 6 }}>Reframe</div><h1 style={{ fontSize: 28 }}>Frame the speakers</h1></div>
+        <div><div className="eyebrow" style={{ marginBottom: 6 }}>Reframe</div><h1 style={{ fontSize: 28 }}>Set crop regions</h1></div>
         <span className="spacer" />
         <Seg value={mode} onChange={setMode} options={[{ value: "pan", label: "Pan", icon: "flip" }, { value: "split", label: "Split", icon: "layout" }, { value: "center", label: "Center", icon: "crop" }]} />
       </div>
@@ -133,21 +168,21 @@ export default function ReframeScreen() {
             {videoOk
               ? <video ref={videoRef} src={clipUrl} muted playsInline preload="metadata" onLoadedMetadata={(e) => setDur(e.currentTarget.duration || 0)} onTimeUpdate={(e) => setCur(e.currentTarget.currentTime)} onError={() => setVideoOk(false)} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", background: "#000" }} />
               : <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: "var(--text-faint)", fontSize: 12.5 }}>cut the clip to load its frame</div>}
-            {mode !== "center" && <ROIBox box={boxes.L} color="var(--roi-l)" label="L · speaker 1" containerRef={frameRef} onChange={(b) => { setBoxes((s) => ({ ...s, L: b })); setActive("L"); }} />}
-            {mode !== "center" && <ROIBox box={boxes.R} color="var(--roi-r)" label="R · speaker 2" containerRef={frameRef} onChange={(b) => { setBoxes((s) => ({ ...s, R: b })); setActive("R"); }} />}
+            {mode !== "center" && <ROIBox box={boxes.L} color="var(--roi-l)" label="Left ROI" containerRef={frameRef} onChange={(b) => { setBoxes((s) => ({ ...s, L: b })); setActive("L"); }} />}
+            {mode !== "center" && <ROIBox box={boxes.R} color="var(--roi-r)" label="Right ROI" containerRef={frameRef} onChange={(b) => { setBoxes((s) => ({ ...s, R: b })); setActive("R"); }} />}
             {mode === "center" && <div style={{ position: "absolute", top: 0, bottom: 0, left: "31%", width: "38%", border: "2px solid var(--accent)", boxShadow: "0 0 0 9999px rgba(0,0,0,0.3)" }}><div style={{ position: "absolute", top: -22, left: 0, fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--accent)" }}>center crop 9:16</div></div>}
           </div>
           <div className="row" style={{ gap: 12, marginTop: 12 }}>
             <Icon name="film" size={15} style={{ color: "var(--text-faint)" }} />
-            <input type="range" min={0} max={dur || 0.001} step={0.04} value={Math.min(cur, dur || 0)} onChange={(e) => { const t = +e.target.value; setCur(t); if (videoRef.current) videoRef.current.currentTime = t; }} style={{ flex: 1, accentColor: "var(--accent)" }} />
-            <span className="mono" style={{ fontSize: 11.5, color: "var(--text-dim)" }}>{fmtTC(cur)}</span>
+            <input type="range" aria-label="Reframe preview position" min={0} max={dur || 0.001} step={0.04} value={Math.min(cur, dur || 0)} onChange={(e) => { const t = +e.target.value; setCur(t); if (videoRef.current) videoRef.current.currentTime = t; }} style={{ flex: 1, accentColor: "var(--accent)" }} />
+            <span className="mono" style={{ fontSize: 11.5, color: "var(--text-dim)" }}>{dur > 0 ? fmtTC(cur) : "—"}</span>
           </div>
           <div className="row" style={{ gap: 10, marginTop: 14 }}>
-            <Btn variant="primary" icon="scan" onClick={autoDetect}>Auto-detect</Btn>
-            <Btn variant="ghost" icon="check" onClick={() => submit(false)}>Verify diar⊕ROI</Btn>
+            <Btn variant="primary" icon="check" disabled={submitting} onClick={() => void submit(false)}>{submitting ? "Submitting…" : "Verify ROI track"}</Btn>
             <span className="spacer" />
-            <Btn variant="ghost" icon="refresh" onClick={() => submit(true)}>Apply &amp; re-render</Btn>
+            <Btn variant="ghost" icon="refresh" disabled={submitting} onClick={() => void submit(true)}>{submitting ? "Working…" : "Apply & continue to captions"}</Btn>
           </div>
+          {actionError && <div role="alert" className="card" style={{ marginTop: 12, padding: 10, color: "var(--err)", borderColor: "rgba(190,81,73,0.4)", background: "var(--err-soft)", fontSize: 12.5 }}><span className="mono">{actionError.code}</span> · {actionError.message}</div>}
 
           <div className="card" style={{ padding: 16, marginTop: 18 }}>
             <div className="row" style={{ marginBottom: 12 }}><div className="eyebrow">Speaker track · diar⊕ROI</div><span className="spacer" />{trackSource && <span className="chip acc">{trackSource === "fused" ? "fused · diar⊕ROI" : trackSource === "manual" ? "edited by hand" : "ROI-only"}</span>}</div>
@@ -162,14 +197,14 @@ export default function ReframeScreen() {
                 <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 8 }}>Click a segment to flip the speaker{edited ? " · edited — Apply to re-render" : ""}.</div>
               </>
             ) : (
-              <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.6 }}>No track yet — hit <b>Verify diar⊕ROI</b> and the engine fuses audio diarization with ROI motion. Then drag/flip the segments and Apply.</div>
+              <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.6 }}>No track has been returned. Submit a verification job; any resulting track will appear here.</div>
             )}
           </div>
         </div>
 
         <div style={{ position: "sticky", top: 0, display: "flex", flexDirection: "column", gap: 16 }}>
           <div className="card" style={{ padding: 14 }}>
-            <div className="eyebrow" style={{ marginBottom: 10 }}>Live 9:16 preview</div>
+            <div className="eyebrow" style={{ marginBottom: 10 }}>Latest rendered preview</div>
             <div style={{ width: 140, margin: "0 auto", aspectRatio: "9/16", borderRadius: 10, overflow: "hidden", position: "relative", border: "1px solid var(--line-str)", background: "#000" }}>
               {reframedUrl
                 ? <video key={reframedUrl} src={reframedUrl} muted loop autoPlay playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
@@ -182,6 +217,28 @@ export default function ReframeScreen() {
             </div>
           </div>
 
+          {mode !== "center" && (
+            <div className="card" style={{ padding: 16 }}>
+              <div className="eyebrow" style={{ marginBottom: 12 }}>ROI coordinates (%)</div>
+              {(["L", "R"] as const).map((side) => (
+                <fieldset key={side} style={{ border: 0, padding: 0, margin: side === "L" ? "0 0 14px" : 0 }}>
+                  <legend style={{ fontSize: 12, fontWeight: 700, marginBottom: 7 }}>{side === "L" ? "Left" : "Right"} ROI</legend>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 7 }}>
+                    {(["x", "y", "w", "h"] as const).map((key) => (
+                      <label key={key} style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 10.5, color: "var(--text-faint)", textTransform: "uppercase" }}>
+                        {key}
+                        <input type="number" min={key === "w" || key === "h" ? 12 : 0} max={100} step={1} value={Math.round(boxes[side][key] * 10) / 10}
+                          aria-label={`${side === "L" ? "Left" : "Right"} ROI ${key} percent`}
+                          onFocus={() => setActive(side)} onChange={(e) => setBoxValue(side, key, Number(e.target.value))}
+                          style={{ width: "100%", minWidth: 0, padding: "5px 4px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg-1)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }} />
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+              ))}
+            </div>
+          )}
+
           <div className="card" style={{ padding: 16, display: "flex", flexDirection: "column", gap: 14 }}>
             <div className="eyebrow">Speaker switching</div>
             <Knob label="Min-dwell" value={minDwell} min={0.3} max={3} step={0.1} fmt={(v) => `${v.toFixed(1)}s`} onChange={setMinDwell} />
@@ -189,12 +246,6 @@ export default function ReframeScreen() {
             <Knob label="Crop margin" value={cropMargin} min={0} max={0.5} step={0.05} fmt={(v) => `${Math.round(v * 100)}%`} onChange={setCropMargin} />
             <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", lineHeight: 1.6 }}>Tuning the speaker pan: longer dwell + heavier smoothing = fewer cuts; crop-margin zooms the pan in.</div>
           </div>
-
-          {mode === "pan" && (
-            <div className="card" style={{ padding: 14, borderColor: "var(--ok)", background: "var(--ok-soft)" }}>
-              <div className="row" style={{ gap: 9, fontSize: 12.5 }}><Icon name="check" size={15} style={{ color: "var(--ok)" }} /><span>Single scene — fixed ROI boxes work great for pan.</span></div>
-            </div>
-          )}
         </div>
       </div>
     </div>

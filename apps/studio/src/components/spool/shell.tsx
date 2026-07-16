@@ -18,12 +18,7 @@ const NAV = [
   { href: "/import", icon: "import", label: "Import" },
   { href: "/library", icon: "film", label: "Library" },
   { href: "/clips", icon: "scissors", label: "Clips" },
-  { href: "/recipes", icon: "wand", label: "Recipes" },
-  { href: "/watches", icon: "eye", label: "Watches" },
   { href: "/queue", icon: "layers", label: "Queue" },
-  { sep: true },
-  { href: "/publish", icon: "send", label: "Publish" },
-  { href: "/analytics", icon: "chart", label: "Analyze" },
 ] as const;
 
 export function Shell({ children }: { children: React.ReactNode }) {
@@ -31,7 +26,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const onboarding = pathname === "/onboarding";
 
-  // global keys — ⌘K palette · ? shortcuts · / focus agent · Esc dismiss (app.jsx)
+  // Global keys only advertise controls that are implemented in this phase.
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       const el = document.activeElement as HTMLElement | null;
@@ -39,7 +34,6 @@ export function Shell({ children }: { children: React.ReactNode }) {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); if (ctx.paletteOpen) ctx.closePalette(); else ctx.openPalette(); }
       else if (e.key === "?" && !typing) { e.preventDefault(); if (ctx.shortcutsOpen) ctx.closeShortcuts(); else ctx.openShortcuts(); }
       else if (e.key === "Escape") { ctx.closeShortcuts(); }
-      else if (e.key === "/" && !typing) { e.preventDefault(); ctx.openAgent(); }
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
@@ -87,17 +81,13 @@ function Rail() {
         <SpoolMark size={40} />
       </Link>
       <div className="railnav">
-        {NAV.map((n, i) =>
-          "sep" in n ? (
-            <div key={i} className="railsep" />
-          ) : (
-            <Link key={n.href} href={n.href} className={"railbtn" + (active(n.href) ? " active" : "")}>
-              <Icon name={n.icon} size={20} />
-              <span className="rlabel">{n.label}</span>
-              {n.href === "/queue" && running > 0 && <span className="dotbadge">{running}</span>}
-            </Link>
-          ),
-        )}
+        {NAV.map((n) => (
+          <Link key={n.href} href={n.href} className={"railbtn" + (active(n.href) ? " active" : "")}>
+            <Icon name={n.icon} size={20} />
+            <span className="rlabel">{n.label}</span>
+            {n.href === "/queue" && running > 0 && <span className="dotbadge">{running}</span>}
+          </Link>
+        ))}
       </div>
       <div className="spacer" />
       <Link href="/settings" className={"railbtn" + (active("/settings") ? " active" : "")}>
@@ -118,7 +108,7 @@ function TopBar() {
       </div>
       <div className="cmdk" onClick={ctx.openPalette}>
         <Icon name="search" size={15} />
-        <span style={{ fontSize: 13 }}>Search, run actions, or ask the agent…</span>
+        <span style={{ fontSize: 13 }}>Search sources, clips, and transcripts…</span>
         <span className="kbd">⌘K</span>
       </div>
       <span className="spacer" />

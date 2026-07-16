@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { useSpool, buildTranscript, mapCandidates } from "@/components/spool/context";
 import { useEngineQuery, useLive } from "@/lib/engine-context";
+import { describeActionError } from "@/lib/action-error";
 import { ClipCard } from "@/components/spool/cards";
 import { DiscoveryBody, TranscriptView } from "@/components/spool/work";
 import { EnergyWave } from "@/components/spool/energy";
@@ -18,6 +19,9 @@ export default function ProjectScreen() {
   const id = String(useParams().id);
   // Seed the tab from ?tab= so "Make clips" can land you straight on the Clips tab to review.
   const [tab, setTab] = useState(useSearchParams().get("tab") || "Overview");
+  const [retranscribing, setRetranscribing] = useState(false);
+  const retranscribingRef = useRef(false);
+  const [actionError, setActionError] = useState<ReturnType<typeof describeActionError> | null>(null);
 
   const s = ctx.sources.find((x) => x.id === id);
   const doc = useEngineQuery((c) => (s?.transcriptId ? c.getTranscriptDoc(s.transcriptId) : Promise.resolve(undefined)), [s?.transcriptId]);
@@ -28,38 +32,55 @@ export default function ProjectScreen() {
   const finding = (snapshot?.clips ?? []).some((c) => c.kind === "moments" && c.source_id === id && (c.status === "running" || c.status === "queued"));
   const myClips = ctx.clips.filter((c) => c.src === id);
 
-  if (!s) return (
-    <div className="mainpad fadein">
-      <button className="btn subtle sm" style={{ marginBottom: 14, paddingLeft: 0 }} onClick={() => ctx.nav("library")}><Icon name="chevL" size={15} /> Library</button>
-      <Empty icon="film" title="Source not found" action={<Btn variant="primary" icon="import" onClick={() => ctx.nav("import")}>Import a video</Btn>}>It may have been cleared from the working set — re-import to continue.</Empty>
-    </div>
-  );
+  const retranscribe = async () => {
+    if (!s || retranscribingRef.current) return;
+    retranscribingRef.current = true;
+    setRetranscribing(true); setActionError(null);
+    try {
+      await ctx.client.startTranscribe(s.id);
+      ctx.pushToast({ icon: "type", tone: "info", title: "Transcription queued", body: s.title });
+    } catch (error) {
+      setActionError(describeActionError(error));
+    } finally { retranscribingRef.current = false; setRetranscribing(false); }
+  };
+
+  if (!s) {
+    if (!snapshot) return <div className="mainpad fadein" style={{ color: "var(--text-faint)" }}>Loading source…</div>;
+    return (
+      <div className="mainpad fadein">
+        <button className="btn subtle sm" style={{ marginBottom: 14, paddingLeft: 0 }} onClick={() => ctx.nav("library")}><Icon name="chevL" size={15} /> Library</button>
+        <Empty icon="film" title="Source unavailable" action={<Btn variant="primary" icon="import" onClick={() => ctx.nav("import")}>Import a video</Btn>}>This source ID is unavailable, or its import has not completed.</Empty>
+      </div>
+    );
+  }
 
   const transcribing = s.status === "transcribing";
+  const duration = s.dur > 0 ? fmtDur(s.dur) : "—";
+  const knownOrigin = s.src !== "—";
 
   return (
     <div className="mainpad fadein">
       <button className="btn subtle sm" style={{ marginBottom: 14, paddingLeft: 0 }} onClick={() => ctx.nav("library")}><Icon name="chevL" size={15} /> Library</button>
       <div className="row" style={{ gap: 18, marginBottom: 22, alignItems: "flex-start" }}>
-        <div style={{ width: 220, flex: "none", borderRadius: "var(--radius)", overflow: "hidden" }}><Thumb seed={s.id} kind={s.kind}><div className="tl"><SourceGlyph type={s.src} /></div><div className="br"><span className="badge mono">{fmtDur(s.dur)}</span></div></Thumb></div>
+        <div style={{ width: 220, flex: "none", borderRadius: "var(--radius)", overflow: "hidden" }}><Thumb seed={s.id} kind={s.kind}>{knownOrigin && <div className="tl"><SourceGlyph type={s.src} /></div>}<div className="br"><span className="badge mono">{duration}</span></div></Thumb></div>
         <div className="grow" style={{ minWidth: 0 }}>
           <div className="row" style={{ gap: 9, marginBottom: 8 }}>
-            {transcribing ? <Chip tone="info" dot>transcribing · {s.prog}%</Chip> : <Chip tone="ok" dot>ready</Chip>}
+            {transcribing ? <Chip tone="info" dot>transcribing · {s.prog == null ? "—" : `${Math.round(s.prog)}%`}</Chip> : s.transcriptId ? <Chip tone="ok" dot>transcript ready</Chip> : <Chip dot>source available</Chip>}
             <span className="mono" style={{ fontSize: 12, color: "var(--text-faint)" }}>{s.size} · {s.kind}</span>
           </div>
           <h1 style={{ fontSize: 24, marginBottom: 8, lineHeight: 1.2 }}>{s.title}</h1>
-          <div className="row" style={{ gap: 8, color: "var(--text-faint)", fontSize: 13, marginBottom: 16 }}><SourceGlyph type={s.src} /> {s.channel} · {s.lang} · added {s.added}</div>
+          <div className="row" style={{ gap: 8, color: "var(--text-faint)", fontSize: 13, marginBottom: 16 }}>{knownOrigin && <SourceGlyph type={s.src} />} {s.channel} · {s.lang} · added {s.added}</div>
           <div className="row" style={{ gap: 9, flexWrap: "wrap" }}>
             <Btn variant="primary" icon="scissors" onClick={() => ctx.nav("discovery", { id: s.id })}>Find clips</Btn>
-            <Btn variant="ghost" icon="bolt" onClick={() => ctx.askAgent("Make 3 funny shorts from this source", s.id)}>Make with recipe ▾</Btn>
-            <Btn variant="ghost" icon="refresh" onClick={() => { ctx.client.startTranscribe(s.id).catch(() => {}); ctx.pushToast({ icon: "type", tone: "info", title: "Re-transcribing", body: s.title }); }}>Re-transcribe</Btn>
+            <Btn variant="ghost" icon="refresh" disabled={retranscribing} onClick={retranscribe}>{retranscribing ? "Starting…" : "Re-transcribe"}</Btn>
           </div>
+          {actionError && <div role="alert" className="card" style={{ marginTop: 12, padding: 10, color: "var(--err)", borderColor: "rgba(190,81,73,0.4)", background: "var(--err-soft)", fontSize: 12.5 }}><span className="mono">{actionError.code}</span> · {actionError.message}</div>}
         </div>
       </div>
 
-      <div className="tabs" style={{ marginBottom: 22 }}>
+      <div className="tabs" role="tablist" aria-label="Source sections" style={{ marginBottom: 22 }}>
         {["Overview", "Transcript", "Candidates", "Clips"].map((t) => (
-          <div key={t} className={"tab" + (tab === t ? " on" : "")} onClick={() => setTab(t)}>{t}{t === "Candidates" && candidates.length > 0 && <span className="chip acc" style={{ marginLeft: 7, height: 18, padding: "0 6px" }}>{candidates.length}</span>}{t === "Clips" && myClips.length > 0 && <span className="chip" style={{ marginLeft: 7, height: 18, padding: "0 6px" }}>{myClips.length}</span>}</div>
+          <button type="button" role="tab" aria-selected={tab === t} key={t} className={"tab" + (tab === t ? " on" : "")} style={{ fontFamily: "inherit", background: "transparent", borderTop: 0, borderLeft: 0, borderRight: 0 }} onClick={() => setTab(t)}>{t}{t === "Candidates" && candidates.length > 0 && <span className="chip acc" style={{ marginLeft: 7, height: 18, padding: "0 6px" }}>{candidates.length}</span>}{t === "Clips" && myClips.length > 0 && <span className="chip" style={{ marginLeft: 7, height: 18, padding: "0 6px" }}>{myClips.length}</span>}</button>
         ))}
       </div>
 
@@ -87,21 +108,21 @@ export default function ProjectScreen() {
                 ) : energyQ.data?.bars?.length ? (
                   <>
                     <EnergyWave bars={energyQ.data.bars} height={68} groups={4} color="#7c89a8" />
-                    <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 12 }}>peaks ≈ moments of high engagement</div>
+                    <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 12 }}>Relative audio amplitude across the source.</div>
                   </>
                 ) : (
-                  <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)" }}>no audio track detected</div>
+                  <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)" }}>Audio energy unavailable.</div>
                 )}
               </div>
             </div>
             <div className="card" style={{ padding: 18 }}>
               <div className="eyebrow" style={{ marginBottom: 16 }}>At a glance</div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
-                <Stat v={fmtDur(s.dur)} l="Length" />
+                <Stat v={duration} l="Length" />
                 <Stat v={s.lang} l="Language" />
                 <Stat v={candidates.length} l="Candidates" />
                 <Stat v={myClips.length} l="Clips made" />
-                <Stat v={s.speakerCount || 1} l="Speakers" />
+                {(s.speakerCount ?? 0) > 0 && <Stat v={s.speakerCount!} l="Speakers" />}
                 <Stat v={s.size} l="Size" />
               </div>
               <div className="divider" style={{ margin: "18px 0" }} />

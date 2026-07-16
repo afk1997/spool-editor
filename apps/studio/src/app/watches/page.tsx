@@ -1,9 +1,10 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { Watch } from "@spool/api-client";
 import { useSpool } from "@/components/spool/context";
 import { useEngineQuery } from "@/lib/engine-context";
+import { describeActionError } from "@/lib/action-error";
 import { Btn, Icon } from "@spool/ui";
 
 /* Watches (Phase 3) — folder / channel / playlist automations. Point at a local folder or a
@@ -35,34 +36,69 @@ export default function WatchesScreen() {
   const [f, setF] = useState<Form>(EMPTY);
   const [synced, setSynced] = useState(false);
   const [busy, setBusy] = useState(false);
+  const operationRef = useRef<"save" | "delete" | "scan" | null>(null);
 
   if (!synced && sel === null && watches[0]) { setSel(watches[0].id); setF(toForm(watches[0])); setSynced(true); }
 
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setF((s) => ({ ...s, [k]: v }));
-  const selectWatch = (w: Watch) => { setSel(w.id); setF(toForm(w)); };
-  const newWatch = () => { setSel(null); setF(EMPTY); setSynced(true); };
+  const selectWatch = (w: Watch) => { if (operationRef.current) return; setSel(w.id); setF(toForm(w)); };
+  const newWatch = () => { if (operationRef.current) return; setSel(null); setF(EMPTY); setSynced(true); };
   const recipeName = (id?: string) => recipes.find((r) => r.id === id)?.name || "—";
 
-  const save = () => {
+  const save = async () => {
+    if (operationRef.current) return;
     if (!f.name.trim() || !f.target.trim()) { ctx.pushToast({ icon: "alert", tone: "warn", title: "Name and a folder/URL are required" }); return; }
+    operationRef.current = "save";
     setBusy(true);
-    const body: Partial<Watch> = { name: f.name.trim(), kind: f.kind, target: f.target.trim(), recipe_id: f.recipe_id || undefined, enabled: f.enabled };
-    const p = sel ? ctx.client.updateWatch(sel, body) : ctx.client.createWatch(body);
-    p.then((w) => { setSel(w.id); watchesQ.reload(); ctx.pushToast({ icon: "check", tone: "ok", title: "Watch saved", body: w.name }); })
-      .catch(() => ctx.pushToast({ icon: "alert", tone: "warn", title: "Couldn't save the watch" }))
-      .finally(() => setBusy(false));
+    try {
+      const body: Partial<Watch> = { name: f.name.trim(), kind: f.kind, target: f.target.trim(), recipe_id: f.recipe_id || undefined, enabled: f.enabled };
+      const watch = sel ? await ctx.client.updateWatch(sel, body) : await ctx.client.createWatch(body);
+      setSel(watch.id);
+      watchesQ.reload();
+      ctx.pushToast({ icon: "check", tone: "ok", title: "Watch saved", body: watch.name });
+    } catch (error) {
+      const failure = describeActionError(error);
+      ctx.pushToast({ icon: "alert", tone: "warn", title: "Couldn't save the watch", body: `${failure.code}: ${failure.message}` });
+    } finally {
+      if (operationRef.current === "save") operationRef.current = null;
+      setBusy(false);
+    }
   };
-  const del = () => {
-    if (!sel) return;
-    ctx.client.deleteWatch(sel).then(() => { newWatch(); watchesQ.reload(); ctx.pushToast({ icon: "trash", tone: "info", title: "Watch deleted" }); }).catch(() => ctx.pushToast({ icon: "alert", tone: "warn", title: "Couldn't delete the watch" }));
-  };
-  const scan = (w: Watch) => {
+  const del = async () => {
+    if (!sel || operationRef.current) return;
+    operationRef.current = "delete";
     setBusy(true);
-    ctx.client.scanWatch(w.id)
-      .then((r) => { watchesQ.reload(); ctx.pushToast({ icon: "eye", tone: "info", title: `Scanned “${w.name}”`,
-        body: `${r.ingested.length} new ingested · ${r.produced.length} produced · ${Object.keys(r.producing).length} producing · ${Object.keys(r.pending).length} transcribing · ${Object.keys(r.ingesting).length} retrying` }); })
-      .catch(() => ctx.pushToast({ icon: "alert", tone: "warn", title: "Scan failed", body: "Is the folder path / URL reachable?" }))
-      .finally(() => setBusy(false));
+    try {
+      await ctx.client.deleteWatch(sel);
+      setSel(null);
+      setF(EMPTY);
+      setSynced(true);
+      watchesQ.reload();
+      ctx.pushToast({ icon: "trash", tone: "info", title: "Watch deleted" });
+    } catch (error) {
+      const failure = describeActionError(error);
+      ctx.pushToast({ icon: "alert", tone: "warn", title: "Couldn't delete the watch", body: `${failure.code}: ${failure.message}` });
+    } finally {
+      if (operationRef.current === "delete") operationRef.current = null;
+      setBusy(false);
+    }
+  };
+  const scan = async (w: Watch) => {
+    if (operationRef.current) return;
+    operationRef.current = "scan";
+    setBusy(true);
+    try {
+      const result = await ctx.client.scanWatch(w.id);
+      watchesQ.reload();
+      ctx.pushToast({ icon: "eye", tone: "info", title: `Scanned “${w.name}”`,
+        body: `${result.ingested.length} ingested · ${result.produced.length} produced · ${Object.keys(result.producing).length} producing · ${Object.keys(result.pending).length} transcribing · ${Object.keys(result.ingesting).length} ingesting` });
+    } catch (error) {
+      const failure = describeActionError(error);
+      ctx.pushToast({ icon: "alert", tone: "warn", title: "Scan failed", body: `${failure.code}: ${failure.message}` });
+    } finally {
+      if (operationRef.current === "scan") operationRef.current = null;
+      setBusy(false);
+    }
   };
 
   const selWatch = watches.find((w) => w.id === sel) || null;
@@ -73,7 +109,7 @@ export default function WatchesScreen() {
       <div className="row" style={{ marginBottom: 18 }}>
         <div><div className="eyebrow" style={{ marginBottom: 6 }}>Watches</div><h1 style={{ fontSize: 28 }}>Hands-off production</h1></div>
         <span className="spacer" />
-        <Btn variant="ghost" icon="plus" onClick={newWatch}>New watch</Btn>
+        <Btn variant="ghost" icon="plus" onClick={newWatch} disabled={busy}>New watch</Btn>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 20, alignItems: "start" }}>
@@ -81,7 +117,7 @@ export default function WatchesScreen() {
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {watches.length === 0 && <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.6 }}>No watches yet — point one at a folder or a channel/playlist + a recipe. New videos auto-produce ranked clips into the review queue.</div>}
           {watches.map((w) => (
-            <div key={w.id} className="card" onClick={() => selectWatch(w)} style={{ padding: 13, cursor: "pointer", borderColor: sel === w.id ? "var(--accent)" : "var(--line)" }}>
+            <button type="button" key={w.id} className="card" aria-pressed={sel === w.id} disabled={busy} onClick={() => selectWatch(w)} style={{ padding: 13, cursor: busy ? "not-allowed" : "pointer", borderColor: sel === w.id ? "var(--accent)" : "var(--line)", opacity: busy && sel !== w.id ? 0.65 : 1, width: "100%", textAlign: "left", color: "inherit", fontFamily: "inherit" }}>
               <div className="row" style={{ gap: 8, marginBottom: 5 }}>
                 <span style={{ width: 7, height: 7, borderRadius: "50%", background: w.enabled ?? true ? "var(--ok)" : "var(--text-faint)" }} />
                 <span style={{ fontWeight: 600, fontSize: 13.5 }}>{w.name}</span>
@@ -90,7 +126,7 @@ export default function WatchesScreen() {
               </div>
               <div className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{w.target}</div>
               <div className="mono" style={{ fontSize: 10.5, color: "var(--text-dim)", marginTop: 5 }}>{(w.produced?.length ?? 0)} produced · {(w.seen?.length ?? 0)} seen</div>
-            </div>
+            </button>
           ))}
         </div>
 
@@ -101,7 +137,7 @@ export default function WatchesScreen() {
               style={{ font: "inherit", fontSize: 17, fontWeight: 600, background: "transparent", border: 0, borderBottom: "1px solid var(--line)", color: "var(--text)", outline: "none", padding: "2px 0", flex: 1 }} />
             <span className="spacer" />
             {selWatch && <Btn variant="ghost" icon="eye" onClick={() => scan(selWatch)} disabled={busy}>Scan now</Btn>}
-            {sel && <button className="btn subtle sm" style={{ color: "var(--err, #e5484d)" }} onClick={del} title="Delete watch"><Icon name="trash" size={14} /></button>}
+            {sel && <button className="btn subtle sm" disabled={busy} style={{ color: "var(--err, #e5484d)" }} onClick={del} title="Delete watch"><Icon name="trash" size={14} /></button>}
             <Btn variant="primary" icon="check" onClick={save} disabled={busy}>{sel ? "Save" : "Create"}</Btn>
           </div>
 

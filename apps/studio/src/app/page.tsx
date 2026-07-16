@@ -6,7 +6,17 @@ import { useSpool } from "@/components/spool/context";
 import { MediaCard, ClipCard } from "@/components/spool/cards";
 import { Btn, Icon, Progress } from "@spool/ui";
 
-const URL_RE = /\bhttps?:\/\/\S+/i;
+function isHttpUrlBatch(text: string): boolean {
+  const tokens = text.split(/\s+/).filter(Boolean);
+  return tokens.length > 0 && tokens.every((token) => {
+    try {
+      const url = new URL(token);
+      return url.protocol === "http:" || url.protocol === "https:";
+    } catch {
+      return false;
+    }
+  });
+}
 
 /* HomeScreen — 1:1 port of the demo (03), wired to live data via useSpool. */
 export default function Home() {
@@ -16,36 +26,30 @@ export default function Home() {
   const recent = ctx.sources.slice(0, 4);
   const recentClips = ctx.clips.filter((c) => c.status === "ready").slice(0, 5);
   const active = ctx.jobs.filter((j) => j.status === "running");
-  const submit = () => { if (!prompt.trim()) return; ctx.askAgent(prompt.trim()); setPrompt(""); ctx.openAgent(); };
+  const submit = () => { const text = prompt.trim(); if (!text) return; if (isHttpUrlBatch(text)) router.push("/import?url=" + encodeURIComponent(text)); else { if (ctx.working) return; ctx.askAgent(text); ctx.openAgent(); } setPrompt(""); };
   // If the box holds a URL, carry it to /import pre-filled; otherwise just open Import.
-  const goImport = () => { const t = prompt.trim(); if (URL_RE.test(t)) { router.push("/import?url=" + encodeURIComponent(t)); setPrompt(""); } else ctx.nav("import"); };
+  const goImport = () => { const t = prompt.trim(); if (isHttpUrlBatch(t)) { router.push("/import?url=" + encodeURIComponent(t)); setPrompt(""); } else ctx.nav("import"); };
 
   return (
     <div className="mainpad fadein">
       <div style={{ marginBottom: 6 }} className="eyebrow">Welcome back</div>
-      <h1 style={{ fontSize: 34, marginBottom: 24 }}>What are we clipping today?</h1>
+      <h1 style={{ fontSize: 34, marginBottom: 24 }}>Import or inspect your library</h1>
 
       <div className="panel" style={{ padding: 20, marginBottom: 34, background: "linear-gradient(135deg, var(--bg-1), var(--bg-2))" }}>
         <div className="agent-input" style={{ marginBottom: 16, padding: "12px 14px" }}>
           <div className="row" style={{ gap: 10 }}>
             <Icon name="sparkles" size={18} style={{ color: "var(--accent)", flex: "none" }} />
             <input className="input" style={{ border: 0, background: "transparent", padding: 0, height: 26, fontSize: 15 }}
-              placeholder="Tell the agent what to clip…  e.g. “grab 3 funny moments from my last import”"
-              value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
-            <Btn variant="primary" size="sm" icon="arrowR" onClick={submit}>Run</Btn>
+              placeholder="Paste a URL, or ask about sources, transcripts, clips, or queue status…"
+              value={prompt} disabled={ctx.working} onChange={(e) => setPrompt(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
+            <Btn variant="primary" size="sm" icon="arrowR" onClick={submit} disabled={ctx.working}>{ctx.working ? "Inspecting…" : "Inspect"}</Btn>
           </div>
         </div>
         <div className="row" style={{ gap: 12 }}>
           <Btn variant="primary" size="lg" icon="import" onClick={goImport}>Import / Paste URL</Btn>
-          <Btn variant="ghost" size="lg" icon="scissors" onClick={() => ctx.nav("library")}>Make clips</Btn>
+          <Btn variant="ghost" size="lg" icon="film" onClick={() => ctx.nav("library")}>Open library</Btn>
           <div className="spacer" />
-          <div className="kbar">
-            {ctx.recipes.slice(0, 3).map((r) => (
-              <button key={r} className="chip" style={{ cursor: "pointer", height: 30 }} onClick={() => { ctx.askAgent(r); ctx.openAgent(); }}>
-                <Icon name="zap" size={13} />{r}
-              </button>
-            ))}
-          </div>
+          <span className="mono" style={{ color: "var(--text-faint)", fontSize: 11 }}>Agent inspection is read-only</span>
         </div>
       </div>
 

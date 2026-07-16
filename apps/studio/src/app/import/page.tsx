@@ -1,9 +1,14 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useSpool } from "@/components/spool/context";
+import { describeActionError } from "@/lib/action-error";
 import { Btn, Chip, Icon, Progress, Seg, Switch, Thumb } from "@spool/ui";
+
+type VisibleError = { code: string; message: string };
+type BatchError = VisibleError & { url: string };
+type DownloadAction = "pause" | "resume";
 
 /* ImportScreen — 1:1 port of the demo (03), wired: Resolve submits real downloads via
  * ingest.download; the Downloads list is the live jobs snapshot. A `?url=` query (e.g. from
@@ -11,66 +16,168 @@ import { Btn, Chip, Icon, Progress, Seg, Switch, Thumb } from "@spool/ui";
 function ImportScreen() {
   const ctx = useSpool();
   const params = useSearchParams();
-  const [tab, setTab] = useState("URL");
   const [url, setUrl] = useState(() => params.get("url") ?? "");
-  const [quality, setQuality] = useState("1080p");
+  const [format, setFormat] = useState("Video");
   const [opts, setOpts] = useState({ subs: true, chapters: true, meta: false });
   const [legal, setLegal] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
+  const [submitError, setSubmitError] = useState<{ summary: string; failures: BatchError[] } | null>(null);
+  const [pauseErrors, setPauseErrors] = useState<Record<string, VisibleError>>({});
+  const pendingDownloadActionsRef = useRef<Record<string, DownloadAction>>({});
+  const [pendingDownloadActions, setPendingDownloadActions] = useState<Record<string, DownloadAction>>({});
   const downloads = ctx.downloads;
 
-  const resolve = () => {
+  const resolve = async () => {
+    if (submittingRef.current) return;
     const urls = url.split(/\s+/).filter(Boolean);
-    if (!urls.length) return;
-    for (const u of urls) {
-      ctx.client.submitDownload({ url: u, format: quality === "Audio" ? "audio" : "video", auto_transcribe: true, subtitles: opts.subs, chapters: opts.chapters, embed: opts.meta }).catch(() => {});
+    if (!urls.length) {
+      setSubmitError({
+        summary: "The URL batch was not submitted.",
+        failures: [{ url: "", code: "invalid_url", message: "Invalid URL input. Enter at least one HTTP or HTTPS URL." }],
+      });
+      return;
     }
-    ctx.pushToast({ icon: "download", tone: "info", title: `Downloading ${urls.length} URL${urls.length > 1 ? "s" : ""}`, body: "Progress shows below + in the queue" });
-    setUrl("");
+
+    const invalid = urls.find((value) => {
+      try {
+        const parsed = new URL(value);
+        return parsed.protocol !== "http:" && parsed.protocol !== "https:";
+      } catch {
+        return true;
+      }
+    });
+    if (invalid) {
+      setSubmitError({
+        summary: "The URL batch was not submitted.",
+        failures: [{
+          url: invalid,
+          code: "invalid_url",
+          message: `Invalid URL "${invalid}". Enter complete HTTP or HTTPS URLs separated by whitespace.`,
+        }],
+      });
+      return;
+    }
+
+    submittingRef.current = true;
+    setSubmitError(null);
+    setSubmitting(true);
+    try {
+      const results = await Promise.allSettled(
+        urls.map((value) => ctx.client.submitDownload({
+          url: value,
+          format: format === "Audio" ? "audio" : "video",
+          auto_transcribe: true,
+          subtitles: opts.subs,
+          chapters: opts.chapters,
+          embed: opts.meta,
+        })),
+      );
+      const failures = results.flatMap<BatchError>((result, index) => {
+        if (result.status === "fulfilled") return [];
+        return [{ ...describeActionError(result.reason), url: urls[index]! }];
+      });
+      const succeeded = results.length - failures.length;
+
+      if (failures.length) {
+        setUrl(failures.map((failure) => failure.url).join("\n"));
+        setSubmitError({
+          summary: `${succeeded} succeeded, ${failures.length} failed. Only the failed URLs remain so you can retry them without duplicating successful imports.`,
+          failures,
+        });
+        return;
+      }
+
+      setUrl("");
+      ctx.pushToast({
+        icon: "download",
+        tone: "info",
+        title: `${succeeded} succeeded, 0 failed`,
+        body: "Every download was accepted. Progress appears below and in the queue.",
+      });
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
+  };
+
+  const runDownloadAction = async (id: string, action: DownloadAction) => {
+    if (pendingDownloadActionsRef.current[id]) return;
+    pendingDownloadActionsRef.current[id] = action;
+    setPendingDownloadActions((current) => ({ ...current, [id]: action }));
+    setPauseErrors((current) => {
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    try {
+      if (action === "pause") await ctx.client.pauseJob(id);
+      else await ctx.client.resumeJob(id);
+    } catch (error) {
+      setPauseErrors((current) => ({ ...current, [id]: describeActionError(error) }));
+    } finally {
+      delete pendingDownloadActionsRef.current[id];
+      setPendingDownloadActions((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+    }
   };
 
   return (
     <div className="mainpad fadein">
       <div className="eyebrow" style={{ marginBottom: 6 }}>Import</div>
       <h1 style={{ fontSize: 30, marginBottom: 4 }}>Import a source</h1>
-      <p style={{ color: "var(--text-faint)", marginTop: 0, marginBottom: 22 }}>Paste video URLs (downloaded with yt-dlp) or drop local files. Everything stays on your machine.</p>
+      <p style={{ color: "var(--text-faint)", marginTop: 0, marginBottom: 22 }}>Paste one or more HTTP or HTTPS media URLs. Downloads run through yt-dlp on this machine.</p>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 320px", gap: 24, alignItems: "start" }}>
         <div className="panel" style={{ overflow: "hidden" }}>
           <div className="tabs" style={{ padding: "0 16px" }}>
-            {["URL", "Files"].map((t) => <div key={t} className={"tab" + (tab === t ? " on" : "")} onClick={() => setTab(t)}>{t === "URL" ? "Paste URL" : "Drop files"}</div>)}
+            <div className="tab on">Paste URL</div>
           </div>
           <div style={{ padding: 20 }}>
-            {tab === "URL" ? (
-              <div>
-                <textarea className="input" rows={3} placeholder={"https://youtube.com/watch?v=…\nPaste multiple URLs or a playlist link"} value={url} onChange={(e) => setUrl(e.target.value)} />
-                <div className="row" style={{ gap: 14, marginTop: 14, flexWrap: "wrap" }}>
-                  <div><span className="field-label">Quality</span><Seg value={quality} onChange={setQuality} neutral options={["Best", "1080p", "720p", "Audio"]} /></div>
-                  <div className="spacer" />
-                  <Btn variant="primary" icon="download" onClick={resolve} style={{ alignSelf: "flex-end" }}>Download</Btn>
-                </div>
-                <div className="divider" style={{ margin: "18px 0" }} />
-                <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
-                  {([["subs", "Download subtitles if available"], ["chapters", "Keep chapters as clip boundaries"], ["meta", "Embed metadata & thumbnail"]] as const).map(([k, l]) => (
-                    <label key={k} className="row" style={{ gap: 9, cursor: "pointer", fontSize: 13 }}>
-                      <Switch on={opts[k]} onClick={() => setOpts((o) => ({ ...o, [k]: !o[k] }))} /> {l}
-                    </label>
+            <div>
+              <textarea
+                className="input"
+                rows={3}
+                placeholder={"https://youtube.com/watch?v=…\nPaste multiple URLs separated by whitespace"}
+                value={url}
+                disabled={submitting}
+                onChange={(e) => {
+                  setUrl(e.target.value);
+                  setSubmitError(null);
+                }}
+                aria-describedby={submitError ? "import-error" : undefined}
+              />
+              {submitError && (
+                <div id="import-error" role="alert" style={{ marginTop: 10, padding: 12, borderRadius: "var(--radius-sm)", background: "var(--err-soft)", color: "var(--err)", fontSize: 12.5 }}>
+                  <b>{submitError.summary}</b>
+                  {submitError.failures.map((failure, index) => (
+                    <div key={`${failure.url}-${index}`} style={{ marginTop: 5 }}>
+                      <span className="mono" style={{ fontWeight: 700 }}>{failure.code}</span>
+                      {failure.url && <span> · {failure.url}</span>}
+                      <div style={{ color: "var(--text-dim)", marginTop: 2 }}>{failure.message}</div>
+                    </div>
                   ))}
                 </div>
-                <details className="trace" style={{ marginTop: 16 }}>
-                  <summary><Icon name="shield" size={14} /> Authentication (advanced) · default off</summary>
-                  <div className="tracebody" style={{ fontFamily: "var(--font-ui)", fontSize: 12.5, color: "var(--text-dim)" }}>
-                    Use your browser cookies for member-only or age-gated videos. Spool reads them locally and never uploads them. <span style={{ color: "var(--warn)" }}>Use responsibly.</span>
-                  </div>
-                </details>
+              )}
+              <div className="row" style={{ gap: 14, marginTop: 14, flexWrap: "wrap" }}>
+                <div><span className="field-label">Format</span><Seg value={format} onChange={setFormat} neutral options={["Video", "Audio"]} /></div>
+                <div className="spacer" />
+                <Btn variant="primary" icon="download" onClick={resolve} disabled={submitting} style={{ alignSelf: "flex-end" }}>
+                  {submitting ? "Submitting…" : "Download"}
+                </Btn>
               </div>
-            ) : (
-              <div onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); ctx.pushToast({ icon: "alert", tone: "warn", title: "Local file import", body: "Drag-drop ingest lands in a later build — paste a URL for now." }); }}
-                style={{ border: "1.5px dashed var(--line-str)", borderRadius: "var(--radius)", padding: "46px 20px", textAlign: "center", background: "var(--bg-2)" }}>
-                <div className="ill" style={{ margin: "0 auto 14px", width: 64, height: 64, borderRadius: 18 }}><Icon name="upload" size={26} /></div>
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>Drop video files here</div>
-                <div style={{ color: "var(--text-faint)", fontSize: 13, marginBottom: 14 }}>MP4, MOV, MKV, WebM · or browse your disk</div>
+              <div className="divider" style={{ margin: "18px 0" }} />
+              <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
+                {([["subs", "Download subtitles if available"], ["chapters", "Keep chapters as clip boundaries"], ["meta", "Embed metadata & thumbnail"]] as const).map(([k, l]) => (
+                  <label key={k} className="row" style={{ gap: 9, cursor: "pointer", fontSize: 13 }}>
+                    <Switch label={l} on={opts[k]} onClick={() => setOpts((o) => ({ ...o, [k]: !o[k] }))} /> {l}
+                  </label>
+                ))}
               </div>
-            )}
+            </div>
           </div>
         </div>
 
@@ -94,8 +201,11 @@ function ImportScreen() {
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {downloads.map((d) => {
               const err = d.status === "error";
+              const cancelled = d.status === "cancelled";
+              const terminalFailure = err || cancelled;
+              const pendingAction = pendingDownloadActions[d.id];
               return (
-                <div key={d.id} className="card" style={{ display: "flex", gap: 14, padding: 12, alignItems: "center", borderColor: err ? "rgba(190,81,73,0.4)" : "var(--line)", background: err ? "var(--err-soft)" : "var(--bg-2)" }}>
+                <div key={d.id} className="card" style={{ display: "flex", gap: 14, padding: 12, alignItems: "center", borderColor: terminalFailure ? "rgba(190,81,73,0.4)" : "var(--line)", background: terminalFailure ? "var(--err-soft)" : "var(--bg-2)" }}>
                   <div style={{ width: 96, flex: "none", borderRadius: 8, overflow: "hidden" }}><Thumb seed={d.id} kind={d.src} label={false} /></div>
                   <div className="grow" style={{ minWidth: 0 }}>
                     <div className="row" style={{ marginBottom: 7, gap: 8 }}>
@@ -103,15 +213,33 @@ function ImportScreen() {
                       <span className="spacer" />
                       {d.status === "done" ? <Chip tone="ok" dot>done</Chip>
                         : err ? <Chip tone="err" dot>failed</Chip>
+                        : cancelled ? <Chip tone="err" dot>cancelled</Chip>
+                        : d.status === "paused" ? <Chip tone="warn" dot>paused</Chip>
+                        : d.status === "queued" ? <Chip dot>queued</Chip>
                         : <span className="mono" style={{ fontSize: 12, color: "var(--text-dim)" }}>{Math.round(d.prog)}% · {d.size} · {d.speed} · ETA {d.eta}</span>}
                     </div>
-                    {err ? <div className="row" style={{ gap: 7, fontSize: 12, color: "var(--err)" }}><Icon name="alert" size={13} />{d.err}</div>
-                      : <Progress value={d.prog} tone={d.status === "done" ? "ok" : "info"} striped={d.status !== "done"} />}
+                    {terminalFailure ? <div className="row" style={{ gap: 7, fontSize: 12, color: "var(--err)" }}><Icon name="alert" size={13} />{d.err || (cancelled ? "Download was cancelled." : "Download failed.")}</div>
+                      : <Progress value={d.prog} tone={d.status === "done" ? "ok" : "info"} striped={d.status === "downloading"} />}
+                    {pauseErrors[d.id] && (
+                      <div role="alert" style={{ marginTop: 7, fontSize: 12, color: "var(--err)" }}>
+                        <span className="mono" style={{ fontWeight: 700 }}>{pauseErrors[d.id]!.code}</span> · {pauseErrors[d.id]!.message}
+                      </div>
+                    )}
                   </div>
                   {d.status === "done"
                     ? <div className="row" style={{ gap: 8 }}><Btn variant="ghost" size="sm" onClick={() => ctx.nav("project", { id: d.id })}>Open</Btn></div>
-                    : err ? <Btn variant="primary" size="sm" icon="refresh" onClick={() => ctx.client.resumeJob(d.id).catch(() => {})}>Retry</Btn>
-                    : <button className="iconbtn" aria-label="Pause download" onClick={() => ctx.client.pauseJob(d.id).catch(() => {})}><Icon name="pause" size={16} /></button>}
+                    : terminalFailure || d.status === "queued" ? null
+                    : pendingAction
+                      ? <button
+                          className="iconbtn"
+                          aria-label={`${pendingAction === "pause" ? "Pausing" : "Resuming"} download…`}
+                          aria-busy="true"
+                          title={`${pendingAction === "pause" ? "Pausing" : "Resuming"} download…`}
+                          disabled
+                        ><Icon name={pendingAction === "pause" ? "pause" : "play"} size={16} /></button>
+                    : d.status === "paused"
+                      ? <button className="iconbtn" aria-label="Resume download" onClick={() => void runDownloadAction(d.id, "resume")}><Icon name="play" size={16} /></button>
+                      : <button className="iconbtn" aria-label="Pause download" onClick={() => void runDownloadAction(d.id, "pause")}><Icon name="pause" size={16} /></button>}
                 </div>
               );
             })}

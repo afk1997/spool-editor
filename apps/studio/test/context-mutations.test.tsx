@@ -47,53 +47,79 @@ function mountCtx(): { get: () => Ctx } {
 
 beforeEach(() => {
   router.push.mockClear();
+  window.history.replaceState({}, "", "/");
 });
 
 describe("makeClipsFrom surfaces mutation-chain failures (no silent fire-and-forget)", () => {
-  it("fresh path: a partially-failed batch warns '1 of 2' AND still fires the info toast", async () => {
+  it("fresh path: waits for the full batch, then reports exact success/failure counts", async () => {
+    let release!: () => void;
+    const delayed = new Promise<{ id: string }>((resolve) => {
+      release = () => resolve({ id: "j1" });
+    });
     client = {
       renderPipeline: vi
         .fn()
-        .mockResolvedValueOnce({ id: "j1" })
+        .mockReturnValueOnce(delayed)
         .mockRejectedValueOnce(new Error("409")),
     };
     const ctx = mountCtx();
+    let work!: Promise<void>;
 
     act(() => {
-      ctx.get().makeClipsFrom([
+      work = ctx.get().makeClipsFrom([
         { source_id: "s", start: 0, end: 1 },
         { source_id: "s", start: 2, end: 3 },
       ]);
     });
 
-    // The info "Cutting" toast is synchronous; the user lands in the Clips tab immediately.
-    expect(ctx.get().toasts.some((t) => /Cutting 2 clips/.test(t.title))).toBe(true);
-    expect(router.push).toHaveBeenCalledWith("/sources/s?tab=Clips");
+    expect(ctx.get().toasts).toEqual([]);
+    expect(router.push).not.toHaveBeenCalled();
     expect(client.renderPipeline).toHaveBeenCalledTimes(2);
 
-    // The warn toast appears once Promise.allSettled resolves the rejected start.
-    await waitFor(() =>
-      expect(ctx.get().toasts.some((t) => /1 of 2 clips failed to start/.test(t.title))).toBe(true),
-    );
-    const warn = ctx.get().toasts.find((t) => /1 of 2 clips failed to start/.test(t.title));
+    await act(async () => {
+      release();
+      await work;
+    });
+    const warn = ctx.get().toasts.find((t) => /1 clip started · 1 failed/.test(t.title));
+    expect(warn).toBeTruthy();
     expect(warn?.tone).toBe("warn");
+    expect(warn?.body).toMatch(/action_failed/);
+    expect(router.push).toHaveBeenCalledWith("/sources/s?tab=Clips");
   });
 
-  it("fresh path: an all-success batch fires NO warn toast", async () => {
+  it("fresh path: reports success only after every start settles", async () => {
     client = { renderPipeline: vi.fn().mockResolvedValue({ id: "j1" }) };
     const ctx = mountCtx();
 
-    act(() => {
-      ctx.get().makeClipsFrom([{ source_id: "s", start: 0, end: 1 }]);
+    await act(async () => {
+      await ctx.get().makeClipsFrom([{ source_id: "s", start: 0, end: 1 }]);
     });
-    // Let any pending allSettled().then() flush.
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
 
-    expect(ctx.get().toasts.some((t) => /Cutting 1 clip\b/.test(t.title))).toBe(true);
-    expect(ctx.get().toasts.some((t) => /failed to start/.test(t.title))).toBe(false);
+    expect(ctx.get().toasts.some((t) => /1 clip started · 0 failed/.test(t.title))).toBe(true);
+    expect(ctx.get().toasts.find((t) => /1 clip started/.test(t.title))?.tone).toBe("ok");
+    expect(router.push).toHaveBeenCalledWith("/sources/s?tab=Clips");
   });
 
-  it("existing path: a caption submit rejection warns 'Render chain failed' and never calls render", async () => {
+  it("fresh path: never redirects after the initiating route is left", async () => {
+    let release!: () => void;
+    const delayed = new Promise<{ id: string }>((resolve) => {
+      release = () => resolve({ id: "j1" });
+    });
+    client = { renderPipeline: vi.fn().mockReturnValue(delayed) };
+    const ctx = mountCtx();
+    let work!: Promise<void>;
+    window.history.replaceState({}, "", "/sources/s");
+
+    act(() => {
+      work = ctx.get().makeClipsFrom([{ source_id: "s", start: 0, end: 1 }]);
+    });
+    window.history.pushState({}, "", "/library");
+    await act(async () => { release(); await work; });
+
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("existing path: a caption rejection reports exact counts and never calls render", async () => {
     client = {
       reframe: vi.fn().mockResolvedValue({ id: "r1" }),
       caption: vi.fn().mockRejectedValue(new Error("boom")),
@@ -102,16 +128,17 @@ describe("makeClipsFrom surfaces mutation-chain failures (no silent fire-and-for
     };
     const ctx = mountCtx();
 
-    act(() => {
-      ctx.get().makeClipsFrom([{ id: "c1" }]); // no aspect/mode → skips reframe, goes straight to caption
+    await act(async () => {
+      await ctx.get().makeClipsFrom([{ id: "c1" }]); // no aspect/mode → skips reframe, goes straight to caption
     });
 
-    await waitFor(() =>
-      expect(ctx.get().toasts.some((t) => /Render chain failed/.test(t.title))).toBe(true),
-    );
-    expect(ctx.get().toasts.find((t) => /Render chain failed/.test(t.title))?.tone).toBe("warn");
+    const warn = ctx.get().toasts.find((t) => /0 renders started · 1 failed/.test(t.title));
+    expect(warn).toBeTruthy();
+    expect(warn?.tone).toBe("warn");
+    expect(warn?.body).toMatch(/action_failed/);
     expect(client.caption).toHaveBeenCalledWith("c1", { style: "opus" });
     expect(client.render).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
   });
 
   it("existing path: a successful chain awaits caption then calls render with the preset", async () => {
@@ -122,15 +149,75 @@ describe("makeClipsFrom surfaces mutation-chain failures (no silent fire-and-for
     };
     const ctx = mountCtx();
 
-    act(() => {
-      ctx.get().makeClipsFrom([{ id: "c1" }], { preset: "reels", style: "karaoke" });
+    await act(async () => {
+      await ctx.get().makeClipsFrom([{ id: "c1" }], { preset: "reels", style: "karaoke" });
     });
 
-    await waitFor(() => expect(client.render).toHaveBeenCalledWith("c1", { preset: "reels" }));
     // caption ran with the chosen style, and the job was polled to terminal before render.
     expect(client.caption).toHaveBeenCalledWith("c1", { style: "karaoke" });
     expect(client.getClipJob).toHaveBeenCalledWith("cap1");
+    expect(client.render).toHaveBeenCalledWith("c1", { preset: "reels" });
     expect(ctx.get().toasts.some((t) => /Render chain failed/.test(t.title))).toBe(false);
+    expect(ctx.get().toasts.some((t) => t.title === "1 render started · 0 failed" && t.tone === "ok")).toBe(true);
+    expect(router.push).toHaveBeenCalledWith("/queue");
+  });
+
+  it("existing path: a terminal polling failure stops the chain and surfaces a visible warning", async () => {
+    client = {
+      caption: vi.fn().mockResolvedValue({ id: "cap1" }),
+      render: vi.fn().mockResolvedValue({ id: "x1" }),
+      getClipJob: vi.fn().mockResolvedValue({
+        id: "cap1",
+        status: "error",
+        error_category: "caption_failed",
+        error_message: "Caption worker exited.",
+      }),
+    };
+    const ctx = mountCtx();
+
+    await act(async () => {
+      await ctx.get().makeClipsFrom([{ id: "c1" }], { preset: "reels", style: "karaoke" });
+    });
+
+    expect(client.caption).toHaveBeenCalledWith("c1", { style: "karaoke" });
+    expect(client.getClipJob).toHaveBeenCalledWith("cap1");
+    expect(client.render).not.toHaveBeenCalled();
+    expect(ctx.get().toasts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        title: "0 renders started · 1 failed",
+        tone: "warn",
+        body: "Caption worker exited. (caption_failed)",
+      }),
+    ]));
+    expect(router.push).not.toHaveBeenCalled();
+  });
+});
+
+describe("offline setting mutation", () => {
+  it("single-flights repeated toggles and exposes a pending state until persistence settles", async () => {
+    let release!: () => void;
+    const delayed = new Promise<Record<string, unknown>>((resolve) => {
+      release = () => resolve({ offline: true });
+    });
+    client = { updateSettings: vi.fn().mockReturnValue(delayed) };
+    const ctx = mountCtx();
+
+    act(() => {
+      ctx.get().toggleOffline();
+      ctx.get().toggleOffline();
+    });
+
+    expect(client.updateSettings).toHaveBeenCalledTimes(1);
+    expect(client.updateSettings).toHaveBeenCalledWith({ offline: true });
+    expect(ctx.get().offlinePending).toBe(true);
+
+    await act(async () => {
+      release();
+      await delayed;
+      await Promise.resolve();
+    });
+
+    expect(ctx.get().offlinePending).toBe(false);
   });
 });
 
@@ -211,5 +298,62 @@ describe("SpoolCtx exposes awaitClipJob for pages to sequence dependent jobs", (
     const ctx = mountCtx();
     await act(async () => { await ctx.get().awaitClipJob(undefined); });
     expect(client.getClipJob).not.toHaveBeenCalled();
+  });
+
+  it("awaitClipJob propagates a getClipJob rejection", async () => {
+    client = { getClipJob: vi.fn().mockRejectedValue(new Error("poll transport failed")) };
+    const ctx = mountCtx();
+
+    await expect(ctx.get().awaitClipJob("j-reject")).rejects.toThrow("poll transport failed");
+    expect(client.getClipJob).toHaveBeenCalledTimes(1);
+    expect(client.getClipJob).toHaveBeenCalledWith("j-reject");
+  });
+
+  it("awaitClipJob rejects with the engine's terminal error details", async () => {
+    client = {
+      getClipJob: vi.fn().mockResolvedValue({
+        id: "j-error",
+        status: "error",
+        error_category: "encode_failed",
+        error_message: "Encoder stopped.",
+      }),
+    };
+    const ctx = mountCtx();
+
+    await expect(ctx.get().awaitClipJob("j-error")).rejects.toMatchObject({
+      code: "encode_failed",
+      message: "Encoder stopped.",
+    });
+    expect(client.getClipJob).toHaveBeenCalledTimes(1);
+  });
+
+  it("awaitClipJob rejects a cancelled job instead of treating it as complete", async () => {
+    client = { getClipJob: vi.fn().mockResolvedValue({ id: "j-cancel", status: "cancelled" }) };
+    const ctx = mountCtx();
+
+    await expect(ctx.get().awaitClipJob("j-cancel")).rejects.toMatchObject({
+      code: "cancelled",
+      message: "Clip job j-cancel was cancelled.",
+    });
+    expect(client.getClipJob).toHaveBeenCalledTimes(1);
+  });
+
+  it("awaitClipJob times out after its bounded polling window", async () => {
+    vi.useFakeTimers();
+    try {
+      client = { getClipJob: vi.fn().mockResolvedValue({ id: "j-running", status: "running" }) };
+      const ctx = mountCtx();
+      const rejection = ctx.get().awaitClipJob("j-running").catch((error: unknown) => error);
+
+      await vi.runAllTimersAsync();
+
+      await expect(rejection).resolves.toMatchObject({
+        code: "timeout",
+        message: "Timed out waiting for clip job j-running.",
+      });
+      expect(client.getClipJob).toHaveBeenCalledTimes(600);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

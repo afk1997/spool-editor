@@ -17,9 +17,11 @@ export default function ClipsScreen() {
   const [q, setQ] = useState("");
   const [sel, setSel] = useState<string[]>([]);
   const allTags = [...new Set(ctx.clips.flatMap((c) => c.tags || []))];
+  const hasScores = ctx.clips.some((c) => c.score != null);
+  const activeCollection = hasScores ? coll : "all";
   const clips = ctx.clips.filter((c) =>
     (aspect === "all" || c.aspect === aspect) &&
-    (coll === "all" || (coll === "best" && (c.score ?? 0) >= 85) || coll === "week") &&
+    (activeCollection === "all" || (activeCollection === "best" && (c.score ?? 0) >= 85)) &&
     (!tag || (c.tags || []).includes(tag)) &&
     (!q || c.title.toLowerCase().includes(q.toLowerCase())));
   const toggle = (id: string) => setSel((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
@@ -43,10 +45,10 @@ export default function ClipsScreen() {
       <div className="row" style={{ marginBottom: 18 }}>
         <div><div className="eyebrow" style={{ marginBottom: 6 }}>Clips</div><h1 style={{ fontSize: 30 }}>Finished clips</h1></div>
         <span className="spacer" />
-        {sel.length > 0 && <><span className="chip acc">{sel.length} selected</span><Btn variant="ghost" size="sm" icon="download" onClick={exportSel}>Export</Btn><Btn variant="primary" size="sm" icon="send" onClick={() => ctx.nav("publish")}>Publish</Btn></>}
+        {sel.length > 0 && <><span className="chip acc">{sel.length} selected</span><Btn variant="ghost" size="sm" icon="download" onClick={exportSel}>Export</Btn></>}
       </div>
       <div className="row" style={{ gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
-        <Seg value={coll} onChange={setColl} neutral options={[{ value: "all", label: "All clips" }, { value: "best", label: "Best (85+)" }, { value: "week", label: "This week" }]} />
+        <Seg value={activeCollection} onChange={setColl} neutral options={hasScores ? [{ value: "all", label: "All clips" }, { value: "best", label: "Best (85+)" }] : [{ value: "all", label: "All clips" }]} />
         <div className="divider" style={{ width: 1, height: 24, background: "var(--line)" }} />
         <Seg value={aspect} onChange={setAspect} neutral options={[{ value: "all", label: "All" }, { value: "9:16", label: "9:16" }, { value: "1:1", label: "1:1" }, { value: "16:9", label: "16:9" }]} />
         <div className="spacer" />
@@ -64,7 +66,7 @@ export default function ClipsScreen() {
             // content-visibility skips render/layout for off-screen cards (native windowing for
             // a large library) with zero layout change; contain-intrinsic-size reserves space.
             <div key={c.id} style={{ position: "relative", contentVisibility: "auto", containIntrinsicSize: "auto 360px" }}>
-              <div onClick={() => toggle(c.id)} className="checkbox" style={{ position: "absolute", top: 10, left: 10, zIndex: 5, background: sel.includes(c.id) ? "var(--accent)" : "rgba(0,0,0,0.5)", borderColor: sel.includes(c.id) ? "transparent" : "var(--line-str)", color: "var(--accent-ink)", cursor: "pointer" }}>{sel.includes(c.id) && <Icon name="check" size={12} />}</div>
+              <button type="button" aria-label={`Select ${c.title}`} aria-pressed={sel.includes(c.id)} onClick={() => toggle(c.id)} className="checkbox" style={{ position: "absolute", top: 10, left: 10, zIndex: 5, background: sel.includes(c.id) ? "var(--accent)" : "rgba(0,0,0,0.5)", borderColor: sel.includes(c.id) ? "transparent" : "var(--line-str)", color: "var(--accent-ink)", cursor: "pointer" }}>{sel.includes(c.id) && <Icon name="check" size={12} />}</button>
               <ClipCard c={c} />
             </div>
           ))}

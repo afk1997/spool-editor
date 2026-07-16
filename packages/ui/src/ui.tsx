@@ -130,19 +130,20 @@ export function Ring({ value = 0, size = 34, w = 3 }: { value?: number; size?: n
   );
 }
 
-export function Switch({ on, onClick }: { on?: boolean; onClick?: () => void }) {
-  return <div className={"switch" + (on ? " on" : "")} onClick={onClick}><i /></div>;
+export function Switch({ on, onClick, label, disabled = false }: { on?: boolean; onClick?: () => void; label: string; disabled?: boolean }) {
+  return <button type="button" role="switch" aria-checked={!!on} aria-label={label} disabled={disabled} className={"switch" + (on ? " on" : "")} onClick={onClick}><i /></button>;
 }
 
-type SegOpt = string | { value: string; label: string; icon?: string };
-export function Seg({ value, onChange, options, neutral = false }: { value: string; onChange: (v: string) => void; options: SegOpt[]; neutral?: boolean }) {
+type SegOpt = string | { value: string; label: string; icon?: string; ariaLabel?: string };
+export function Seg({ value, onChange, options, neutral = false, disabled = false }: { value: string; onChange: (v: string) => void; options: SegOpt[]; neutral?: boolean; disabled?: boolean }) {
   return (
     <div className={"seg" + (neutral ? " neutral" : "")}>
       {options.map((o) => {
         const val = typeof o === "string" ? o : o.value;
         const lbl = typeof o === "string" ? o : o.label;
         const ic = typeof o === "string" ? undefined : o.icon;
-        return <button key={val} className={value === val ? "on" : ""} onClick={() => onChange(val)}>{ic && <Icon name={ic} size={14} />}{lbl}</button>;
+        const ariaLabel = typeof o === "string" ? undefined : o.ariaLabel;
+        return <button type="button" key={val} className={value === val ? "on" : ""} aria-label={ariaLabel} aria-pressed={value === val} disabled={disabled} onClick={() => onChange(val)}>{ic && <Icon name={ic} size={14} />}{lbl}</button>;
       })}
     </div>
   );

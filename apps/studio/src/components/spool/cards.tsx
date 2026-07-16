@@ -9,15 +9,18 @@ export function MediaCard({ s, onOpen }: { s: SpoolSource; onOpen: (s: SpoolSour
   const ctx = useSpool();
   const statusChip: Record<string, React.ReactNode> = {
     ready: <Chip tone="ok" dot>ready</Chip>,
+    downloaded: <Chip dot>downloaded</Chip>,
     transcribing: <Chip tone="info" dot>transcribing</Chip>,
     downloading: <Chip tone="info" dot>downloading</Chip>,
     "no-candidates": <Chip tone="warn" dot>no clips yet</Chip>,
   };
+  const knownOrigin = s.src && s.src !== "—";
+  const knownKind = s.kind && s.kind !== "—";
   return (
     <div className="mcard" onClick={() => onOpen(s)}>
-      <Thumb seed={s.id} kind={s.kind}>
-        <div className="tl"><SourceGlyph type={s.src} /></div>
-        <div className="br"><span className="badge mono">{fmtDur(s.dur)}</span></div>
+      <Thumb seed={s.id} kind={knownKind ? s.kind : ""}>
+        {knownOrigin && <div className="tl"><SourceGlyph type={s.src} /></div>}
+        {s.dur > 0 && <div className="br"><span className="badge mono">{fmtDur(s.dur)}</span></div>}
         {s.status === "transcribing" && (
           <div className="hoveractions" style={{ opacity: 1, background: "rgba(8,9,11,0.45)" }}>
             <div style={{ textAlign: "center", width: "78%" }}>
@@ -36,7 +39,11 @@ export function MediaCard({ s, onOpen }: { s: SpoolSource; onOpen: (s: SpoolSour
         <div className="ttl">{s.title}</div>
         <div className="subline">
           {statusChip[s.status]}
-          <span style={{ marginLeft: "auto" }} className="mono">{s.clips > 0 ? `${s.clips} clips` : s.kind.split(" · ")[0]}</span>
+          {(s.clips > 0 || knownKind) && (
+            <span style={{ marginLeft: "auto" }} className="mono">
+              {s.clips > 0 ? `${s.clips} clips` : s.kind.split(" · ")[0]}
+            </span>
+          )}
         </div>
       </div>
     </div>
@@ -49,8 +56,8 @@ export function ClipCard({ c, onOpen }: { c: SpoolClip; onOpen?: (c: SpoolClip) 
   return (
     <div className="mcard" onClick={() => (onOpen ? onOpen(c) : ctx.nav("editor", { id: c.id }))}>
       <Thumb seed={c.id} vertical={c.aspect === "9:16"} kind={c.style} label={false}>
-        <div className="tr"><AspectBadge a={c.aspect} /></div>
-        <div className="br"><span className="badge mono">{fmtDur(c.dur)}</span></div>
+        {c.aspect && <div className="tr"><AspectBadge a={c.aspect} /></div>}
+        {c.dur > 0 && <div className="br"><span className="badge mono">{fmtDur(c.dur)}</span></div>}
         <div style={{ position: "absolute", left: 0, right: 0, bottom: "24%", textAlign: "center", padding: "0 10%" }}>
           <span style={{ fontFamily: "var(--font-caption)", fontSize: c.aspect === "9:16" ? 15 : 13, color: "#fff", textShadow: "0 2px 6px #000", lineHeight: 1.1 }}>
             {c.title.split(" ").slice(0, 3).map((w, i) => <span key={i} style={{ color: i === 1 ? "var(--caption-hl)" : "#fff" }}>{w} </span>)}
@@ -71,7 +78,13 @@ export function ClipCard({ c, onOpen }: { c: SpoolClip; onOpen?: (c: SpoolClip) 
       </Thumb>
       <div className="meta">
         <div className="ttl" style={{ WebkitLineClamp: 1 }}>{c.title}</div>
-        <div className="subline"><span className="chip">{c.style}</span>{c.tags && c.tags[0] && <span className="chip acc">{c.tags[0]}</span>}<span style={{ marginLeft: "auto" }}>{plat[c.platform]}</span></div>
+        {(c.style || c.tags?.[0] || (c.platform && plat[c.platform])) && (
+          <div className="subline">
+            {c.style && <span className="chip">{c.style}</span>}
+            {c.tags?.[0] && <span className="chip acc">{c.tags[0]}</span>}
+            {c.platform && plat[c.platform] && <span style={{ marginLeft: "auto" }}>{plat[c.platform]}</span>}
+          </div>
+        )}
       </div>
     </div>
   );

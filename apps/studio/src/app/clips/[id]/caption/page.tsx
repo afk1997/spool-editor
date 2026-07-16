@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { useSpool } from "@/components/spool/context";
 import { useEngineQuery } from "@/lib/engine-context";
-import { SpoolApiError } from "@spool/api-client";
+import { describeActionError } from "@/lib/action-error";
 import { Btn, Icon, Switch } from "@spool/ui";
 
 /* S8 Caption Studio — 1:1 port of the demo (05), fully wired (Phase 2). Fine styling
@@ -33,7 +33,7 @@ function Slider({ label, value, min, max, step, fmt, onChange }: { label: string
   return (
     <div>
       <div className="row" style={{ marginBottom: 4 }}><span style={{ fontSize: 12.5 }}>{label}</span><span className="spacer" /><span className="mono" style={{ fontSize: 11.5, color: "var(--text-dim)" }}>{fmt(value)}</span></div>
-      <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(+e.target.value)} style={{ width: "100%", accentColor: "var(--accent)" }} />
+      <input type="range" aria-label={label} min={min} max={max} step={step} value={value} onChange={(e) => onChange(+e.target.value)} style={{ width: "100%", accentColor: "var(--accent)" }} />
     </div>
   );
 }
@@ -42,9 +42,9 @@ function Swatches({ colors, value, onPick, allowNone }: { colors: string[]; valu
   return (
     <div className="row" style={{ gap: 7, flexWrap: "wrap" }}>
       {colors.map((c) => (
-        <button key={c} onClick={() => onPick(c)} title={c} style={{ width: 24, height: 24, borderRadius: 6, background: c, cursor: "pointer", border: value?.toLowerCase() === c.toLowerCase() ? "2px solid var(--accent)" : "1px solid var(--line-str)", boxShadow: c.toLowerCase() === "#ffffff" ? "inset 0 0 0 1px var(--line)" : "none" }} />
+        <button key={c} aria-pressed={value?.toLowerCase() === c.toLowerCase()} onClick={() => onPick(c)} title={c} style={{ width: 24, height: 24, borderRadius: 6, background: c, cursor: "pointer", border: value?.toLowerCase() === c.toLowerCase() ? "2px solid var(--accent)" : "1px solid var(--line-str)", boxShadow: c.toLowerCase() === "#ffffff" ? "inset 0 0 0 1px var(--line)" : "none" }} />
       ))}
-      {allowNone && <button onClick={() => onPick(null)} title="none" style={{ width: 24, height: 24, borderRadius: 6, cursor: "pointer", border: value === null ? "2px solid var(--accent)" : "1px solid var(--line-str)", display: "grid", placeItems: "center", fontSize: 11, color: "var(--text-faint)" }}>∅</button>}
+      {allowNone && <button aria-pressed={value === null} onClick={() => onPick(null)} title="none" style={{ width: 24, height: 24, borderRadius: 6, cursor: "pointer", border: value === null ? "2px solid var(--accent)" : "1px solid var(--line-str)", display: "grid", placeItems: "center", fontSize: 11, color: "var(--text-faint)" }}>∅</button>}
     </div>
   );
 }
@@ -79,6 +79,14 @@ export default function CaptionScreen() {
   const [colorSpeakers, setColorSpeakers] = useState(false);
   const [emphasis, setEmphasis] = useState(false);
   const [balanceLines, setBalanceLines] = useState(false);
+  const [burning, setBurning] = useState(false);
+  const burnInFlight = useRef(false);
+  const burnOp = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; burnOp.current += 1; };
+  }, []);
 
   const applyPreset = (p: string) => {
     const c = PRESETS[p]; if (!c) return;
@@ -123,28 +131,35 @@ export default function CaptionScreen() {
     img.src = url;
   };
 
-  const burn = () => {
-    ctx.pushToast({ icon: "zap", tone: "info", title: "Burning captions", body: `${preset} · custom style · track it in the queue` });
-    void (async () => {
-      try {
-        // Submit captions FIRST: the common failure (409 no_transcript) surfaces here, where the
-        // old fire-and-forget toasted success and navigated to an empty queue regardless. Render
-        // waits for the caption job to finish (it reads caption's output file).
-        const cap = await ctx.client.caption(id, {
-          style: preset,
-          overrides: { size, outline, words: wpl, fill, highlight, position, allcaps, weight, font },
-          color_speakers: colorSpeakers, emphasis, balance_lines: balanceLines,
-        });
-        ctx.nav("queue");
-        await ctx.awaitClipJob(cap.id);
-        await ctx.client.render(id, { preset: clip?.platform || "tiktok" });
-      } catch (e) {
-        ctx.pushToast({ icon: "alert", tone: "warn", title: "Caption failed",
-          body: e instanceof SpoolApiError && e.code === "no_transcript"
-            ? "Transcribe the source first — captions need words."
-            : "See the Render Queue for details." });
+  const burn = async () => {
+    if (burnInFlight.current) return;
+    const startedAtLocation = window.location.href;
+    const op = ++burnOp.current;
+    const isCurrent = () => mounted.current && burnOp.current === op && window.location.href === startedAtLocation;
+    burnInFlight.current = true;
+    setBurning(true);
+    try {
+      const cap = await ctx.client.caption(id, {
+        style: preset,
+        overrides: { size, outline, words: wpl, fill, highlight, position, allcaps, weight, font },
+        color_speakers: colorSpeakers, emphasis, balance_lines: balanceLines,
+      });
+      if (!isCurrent()) return;
+      await ctx.awaitClipJob(cap.id);
+      if (!isCurrent()) return;
+      await ctx.client.render(id, clip?.platform ? { preset: clip.platform } : {});
+      if (!isCurrent()) return;
+      ctx.pushToast({ icon: "zap", tone: "info", title: "Caption render submitted", body: `${preset} · custom style` });
+      ctx.nav("queue");
+    } catch (error) {
+      if (isCurrent()) {
+        const failure = describeActionError(error);
+        ctx.pushToast({ icon: "alert", tone: "warn", title: "Caption failed", body: `${failure.code}: ${failure.message}` });
       }
-    })();
+    } finally {
+      if (burnOp.current === op) burnInFlight.current = false;
+      if (isCurrent()) setBurning(false);
+    }
   };
 
   return (
@@ -153,7 +168,7 @@ export default function CaptionScreen() {
       <div className="row" style={{ marginBottom: 18 }}>
         <div><div className="eyebrow" style={{ marginBottom: 6 }}>Caption Studio</div><h1 style={{ fontSize: 28 }}>Style the captions</h1></div>
         <span className="spacer" />
-        <Btn variant="primary" icon="zap" onClick={burn}>Burn captions</Btn>
+        <Btn variant="primary" icon="zap" onClick={burn} disabled={burning}>{burning ? "Burning…" : "Burn captions"}</Btn>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "380px 1fr", gap: 24, alignItems: "start" }}>
@@ -172,7 +187,7 @@ export default function CaptionScreen() {
             </div>
           </div>
           <div className="kbar" style={{ marginTop: 14, justifyContent: "center" }}>
-            {["opus", "karaoke", "minimal"].map((p) => <button key={p} className={"chip" + (preset === p ? " solid" : "")} style={{ cursor: "pointer", height: 30, textTransform: "capitalize" }} onClick={() => applyPreset(p)}>{p}</button>)}
+            {["opus", "karaoke", "minimal"].map((p) => <button key={p} aria-pressed={preset === p} className={"chip" + (preset === p ? " solid" : "")} style={{ cursor: "pointer", height: 30, textTransform: "capitalize" }} onClick={() => applyPreset(p)}>{p}</button>)}
           </div>
           <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", textAlign: "center", marginTop: 10 }}>{hasReal ? `${words.length} words · from the transcript` : doc.loading ? "loading transcript…" : "source not transcribed — showing the title"}</div>
         </div>
@@ -197,11 +212,11 @@ export default function CaptionScreen() {
 
           <div><div className="eyebrow" style={{ marginBottom: 8 }}>Fill</div><Swatches colors={FILLS} value={fill} onPick={(c) => c && setFill(c)} /></div>
           <div>
-            <div className="row" style={{ marginBottom: 8 }}><div className="eyebrow">Active word</div><span className="spacer" /><Switch on={highlight !== null} onClick={() => setHighlight((h) => (h === null ? "#FFE94D" : null))} /></div>
+            <div className="row" style={{ marginBottom: 8 }}><div className="eyebrow">Active word</div><span className="spacer" /><Switch label="Active word highlight" on={highlight !== null} onClick={() => setHighlight((h) => (h === null ? "#FFE94D" : null))} /></div>
             <Swatches colors={HLS} value={highlight} onPick={setHighlight} allowNone />
           </div>
 
-          <div className="row"><span style={{ fontSize: 12.5 }}>All-caps</span><span className="spacer" /><Switch on={allcaps} onClick={() => setAllcaps((a) => !a)} /></div>
+          <div className="row"><span style={{ fontSize: 12.5 }}>All-caps</span><span className="spacer" /><Switch label="All-caps" on={allcaps} onClick={() => setAllcaps((a) => !a)} /></div>
 
           <Slider label="Position" value={position} min={4} max={60} step={1} fmt={(v) => `${v}%`} onChange={setPosition} />
           <Slider label="Words / line" value={wpl} min={1} max={8} step={1} fmt={(v) => `${v}`} onChange={setWpl} />
@@ -210,15 +225,15 @@ export default function CaptionScreen() {
             <div className="eyebrow" style={{ marginBottom: 10 }}>Caption craft</div>
             <div className="row" style={{ marginBottom: 10 }}>
               <div><div style={{ fontSize: 12.5 }}>Speaker colors</div><div className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)" }}>tint each word by who&apos;s talking · 2+ speakers</div></div>
-              <span className="spacer" /><Switch on={colorSpeakers} onClick={() => setColorSpeakers((v) => !v)} />
+              <span className="spacer" /><Switch label="Speaker colors" on={colorSpeakers} onClick={() => setColorSpeakers((v) => !v)} />
             </div>
             <div className="row" style={{ marginBottom: 10 }}>
               <div><div style={{ fontSize: 12.5 }}>Keyword emphasis</div><div className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)" }}>scale up acronyms / shouted words</div></div>
-              <span className="spacer" /><Switch on={emphasis} onClick={() => setEmphasis((v) => !v)} />
+              <span className="spacer" /><Switch label="Keyword emphasis" on={emphasis} onClick={() => setEmphasis((v) => !v)} />
             </div>
             <div className="row">
               <div><div style={{ fontSize: 12.5 }}>Balance lines</div><div className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)" }}>no 1-word orphan lines</div></div>
-              <span className="spacer" /><Switch on={balanceLines} onClick={() => setBalanceLines((v) => !v)} />
+              <span className="spacer" /><Switch label="Balance lines" on={balanceLines} onClick={() => setBalanceLines((v) => !v)} />
             </div>
           </div>
         </div>

@@ -35,7 +35,7 @@ function LaneRow({ name, h, children }: { name: string; h: number; children: Rea
 interface SpeakerSeg { start: number; end: number; speaker: string | null }
 
 export function Timeline({
-  words, segments, lo, hi, cur, onSeek, onDeleteWord, energyBars, sceneCuts, filmstrip, onTrim,
+  words, segments, lo, hi, cur, onSeek, onDeleteWord, mutationPending, energyBars, sceneCuts, filmstrip, onTrim,
 }: {
   words: TLWord[];
   segments: SpeakerSeg[];                    // diarization turns (real speaker data lives here, not on words)
@@ -44,6 +44,7 @@ export function Timeline({
   cur: number;                              // playhead, clip-relative seconds
   onSeek: (rel: number) => void;            // seek the preview (clip-relative seconds)
   onDeleteWord: (idx: number) => void;
+  mutationPending?: boolean;
   energyBars: number[];
   sceneCuts: number[];                      // absolute source seconds
   filmstrip: string | null;                 // data:image/jpeg URI, or null
@@ -120,6 +121,7 @@ export function Timeline({
         <span className="spacer" />
         {trimmed && (
           <button className="btn primary sm" style={{ height: 22, marginRight: 4 }}
+            disabled={mutationPending}
             onClick={() => onTrim(lo + inRel, lo + outRel)}>Re-cut to trim ({Math.round(outRel - inRel)}s)</button>
         )}
         <button className="iconbtn" style={{ width: 22, height: 22 }} title="zoom out" onClick={() => setZoom((z) => Math.max(1, +(z - 0.5).toFixed(1)))}>−</button>
@@ -150,8 +152,8 @@ export function Timeline({
                     onClick={(e) => { e.stopPropagation(); onSeek((w.start as number) - lo); }}
                     style={{ position: "absolute", left: pct((w.start as number) - lo), top: 4, height: 18, maxWidth: 90, display: "inline-flex", alignItems: "center", gap: 2, padding: "0 5px", fontSize: 10.5, background: "#fff", border: "1px solid var(--line)", borderRadius: 5, whiteSpace: "nowrap", overflow: "hidden", cursor: "pointer" }}>
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{w.w}</span>
-                    <button title="delete word (ripple-cut on Re-cut)" onClick={(e) => { e.stopPropagation(); onDeleteWord(w.idx); }}
-                      style={{ border: 0, background: "transparent", color: "var(--text-faint)", cursor: "pointer", fontSize: 11, lineHeight: 1, padding: 0 }}>×</button>
+                    <button title="delete word (ripple-cut on Re-cut)" disabled={mutationPending} onClick={(e) => { e.stopPropagation(); onDeleteWord(w.idx); }}
+                      style={{ border: 0, background: "transparent", color: "var(--text-faint)", cursor: mutationPending ? "not-allowed" : "pointer", fontSize: 11, lineHeight: 1, padding: 0 }}>×</button>
                   </div>
                 ))}
           </LaneRow>

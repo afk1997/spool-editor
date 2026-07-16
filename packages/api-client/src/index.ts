@@ -246,13 +246,15 @@ export class SpoolApiClient {
       });
       if (!res.ok) {
         let code = `http_${res.status}`;
+        let message: string | undefined;
         try {
-          const body = (await res.json()) as { error?: string };
+          const body = (await res.json()) as { error?: string; message?: string };
           if (body.error) code = body.error;
+          if (typeof body.message === "string" && body.message.trim()) message = body.message;
         } catch {
           // non-JSON error body — keep the http_<status> code
         }
-        throw new SpoolApiError(res.status, code);
+        throw new SpoolApiError(res.status, code, message);
       }
       if (res.status === 204) return undefined as T;
       const text = await res.text();
@@ -352,6 +354,12 @@ export class SpoolApiClient {
   }
   startTranscribe(parentJobId: string): Promise<TranscribeJobView> {
     return this.post(`/jobs/${encodeURIComponent(parentJobId)}/transcribe`);
+  }
+  cancelTranscript(id: string): Promise<TranscribeJobView | void> {
+    return this.post(`/transcripts/${encodeURIComponent(id)}/cancel`);
+  }
+  dismissTranscript(id: string): Promise<void> {
+    return this.post(`/transcripts/${encodeURIComponent(id)}/dismiss`);
   }
   /** Full-text search across every completed transcript in the library — returns matches
    *  with a contextual snippet + the timing range, for deep-linking into the source. */

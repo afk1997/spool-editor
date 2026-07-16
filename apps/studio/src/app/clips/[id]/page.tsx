@@ -1,13 +1,16 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { useSpool, type SpoolClip } from "@/components/spool/context";
 import { useEngineQuery, useLive } from "@/lib/engine-context";
 import { useClipSeededState } from "@/lib/use-clip-seeded-state";
 import { captionPage, STYLE_CHUNK } from "@/lib/caption-page";
+import { describeActionError } from "@/lib/action-error";
 import { Timeline } from "@/components/spool/timeline";
 import { Btn, Chip, Empty, Icon, Seg, Switch } from "@spool/ui";
+
+const PREVIEW_SSE_GRACE_MS = 5_000;
 
 /* S6 Editor — connective hub, 1:1 port of the demo (06). Preview · transport · timeline ·
  * inspector (Format / Captions / Brand / Export). Render runs the real engine with the
@@ -28,7 +31,7 @@ export default function EditorScreen() {
     return (
       <div className="mainpad fadein">
         <button className="btn subtle sm" style={{ marginBottom: 14, paddingLeft: 0 }} onClick={() => ctx.nav("clips")}><Icon name="chevL" size={15} /> Clips</button>
-        <Empty icon="scissors" title="Clip not found" action={<Btn variant="primary" onClick={() => ctx.nav("clips")}>Back to clips</Btn>}>It may still be rendering, or was cleared from the working set.</Empty>
+        <Empty icon="scissors" title="Clip not found" action={<Btn variant="primary" onClick={() => ctx.nav("clips")}>Back to clips</Btn>}>This clip ID is not available in the current engine snapshot. Its import or render may still be incomplete.</Empty>
       </div>
     );
   }
@@ -42,26 +45,46 @@ function BrandInspector({ clipId, preset }: { clipId: string; preset: string }) 
   const kitsQ = useEngineQuery((c) => c.listBrandKits(), []);
   const kits = kitsQ.data?.brand_kits ?? [];
   const [sel, setSel] = useState("");
-  const apply = () => {
+  const [applying, setApplying] = useState(false);
+  const applyInFlight = useRef(false);
+  const applyOp = useRef(0);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      applyOp.current += 1;
+    };
+  }, []);
+  const apply = async () => {
     const k = kits.find((x) => x.id === sel);
-    if (!k) return;
-    ctx.pushToast({ icon: "palette", tone: "info", title: `Applying “${k.name}”`, body: "Caption + render queued — track it in the queue" });
-    void (async () => {
-      try {
-        // Caption first (this is where a no_transcript 409 surfaces), then render once the caption
-        // job finishes — the old chain swallowed both failures and toasted success regardless.
-        const cap = await ctx.client.caption(clipId, {
-          style: k.caption_preset || "opus", overrides: k.caption_overrides,
-          watermark: k.watermark || undefined, lower_third: k.lower_third || undefined,
-        });
-        ctx.nav("queue");
-        await ctx.awaitClipJob(cap.id);
-        await ctx.client.render(clipId, { preset });
-      } catch {
-        ctx.pushToast({ icon: "alert", tone: "warn", title: "Brand apply failed",
-          body: "Caption or render couldn't start — check the Render Queue." });
+    if (!k || applyInFlight.current) return;
+    const startedAtLocation = window.location.href;
+    const op = ++applyOp.current;
+    const isCurrent = () => mounted.current && applyOp.current === op && window.location.href === startedAtLocation;
+    applyInFlight.current = true;
+    setApplying(true);
+    try {
+      const cap = await ctx.client.caption(clipId, {
+        style: k.caption_preset || "opus", overrides: k.caption_overrides,
+        watermark: k.watermark || undefined, lower_third: k.lower_third || undefined,
+      });
+      if (!isCurrent()) return;
+      await ctx.awaitClipJob(cap.id);
+      if (!isCurrent()) return;
+      await ctx.client.render(clipId, { preset });
+      if (!isCurrent()) return;
+      ctx.pushToast({ icon: "palette", tone: "info", title: `Applied “${k.name}”`, body: "Caption finished and render was submitted." });
+      ctx.nav("queue");
+    } catch (error) {
+      if (isCurrent()) {
+        const failure = describeActionError(error);
+        ctx.pushToast({ icon: "alert", tone: "warn", title: "Brand apply failed", body: `${failure.code}: ${failure.message}` });
       }
-    })();
+    } finally {
+      if (applyOp.current === op) applyInFlight.current = false;
+      if (isCurrent()) setApplying(false);
+    }
   };
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -71,7 +94,7 @@ function BrandInspector({ clipId, preset }: { clipId: string; preset: string }) 
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {kits.map((k) => (
-            <button key={k.id} onClick={() => setSel(k.id)} className="card" style={{ padding: 10, display: "flex", alignItems: "center", gap: 8, cursor: "pointer", borderColor: sel === k.id ? "var(--accent)" : "var(--line)", background: sel === k.id ? "var(--accent-soft)" : "var(--bg-2)" }}>
+            <button type="button" key={k.id} aria-pressed={sel === k.id} disabled={applying} onClick={() => { if (!applyInFlight.current) setSel(k.id); }} className="card" style={{ padding: 10, display: "flex", alignItems: "center", gap: 8, cursor: applying ? "not-allowed" : "pointer", borderColor: sel === k.id ? "var(--accent)" : "var(--line)", background: sel === k.id ? "var(--accent-soft)" : "var(--bg-2)" }}>
               <div className="row" style={{ gap: 4 }}>{(k.palette ?? []).slice(0, 4).map((c, j) => <span key={j} style={{ width: 14, height: 14, borderRadius: 4, background: c, border: "1px solid var(--line)" }} />)}</div>
               <span style={{ fontSize: 12.5, fontWeight: 600 }}>{k.name}</span>
               <span className="spacer" />
@@ -80,7 +103,7 @@ function BrandInspector({ clipId, preset }: { clipId: string; preset: string }) 
           ))}
         </div>
       )}
-      <Btn variant="primary" icon="palette" onClick={apply} disabled={!sel}>Apply kit + render</Btn>
+      <Btn variant="primary" icon="palette" onClick={apply} disabled={!sel || applying}>{applying ? "Applying…" : "Apply kit + render"}</Btn>
       <Btn variant="ghost" icon="plus" onClick={() => ctx.nav("brand")}>Design kits →</Btn>
     </div>
   );
@@ -103,22 +126,92 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
 
   // F.3 — real-render preview: render a fast low-res REAL reframe for the chosen aspect/mode so the
   // editor shows what-you-get (not a CSS crop). Per-combo: cleared whenever aspect/mode changes.
-  const [pvJob, setPvJob] = useState<{ id: string; aspect: string; mode: string } | null>(null);
+  const [pvJob, setPvJob] = useState<{ id: string; aspect: string; mode: string; localPending: boolean } | null>(null);
+  const previewInFlight = useRef(false);
+  const previewGraceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const renderInFlight = useRef(false);
+  const cutInFlight = useRef(false);
+  const wordEditInFlight = useRef(false);
+  const previewOp = useRef(0);
+  const renderOp = useRef(0);
+  const cutOp = useRef(0);
+  const wordEditOp = useRef(0);
+  const mounted = useRef(false);
+  const [previewSubmitting, setPreviewSubmitting] = useState(false);
+  const [rendering, setRendering] = useState(false);
+  const [cutting, setCutting] = useState(false);
+  const [wordEditPending, setWordEditPending] = useState(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (previewGraceTimer.current) clearTimeout(previewGraceTimer.current);
+      previewOp.current += 1;
+      renderOp.current += 1;
+      cutOp.current += 1;
+      wordEditOp.current += 1;
+    };
+  }, []);
   // Relevance is DERIVED (no effect): a stored preview only applies while its combo matches the
   // current aspect/mode — change either and it's ignored (falls back to the live crop) until re-run.
   const pvMatch = !!pvJob && pvJob.aspect === aspect && pvJob.mode === reframe;
   const pvLive = pvMatch ? (snapshot?.clips ?? []).find((c) => c.id === pvJob!.id) : undefined;
   const pvReady = pvMatch && pvLive?.status === "done";
-  const pvRendering = pvMatch && !pvReady && pvLive?.status !== "error";
-  const requestPreview = () => {
-    ctx.client.reframe(id, { aspect, mode: reframe, preview: true })
-      .then((j) => setPvJob({ id: j.id, aspect, mode: reframe }))
-      .catch(() => ctx.pushToast({ icon: "alert", tone: "warn", title: "Preview failed", body: "couldn't render the reframe preview" }));
+  const pvRendering = pvMatch && (
+    pvLive?.status === "queued" || pvLive?.status === "running" || (!pvLive && !!pvJob?.localPending)
+  );
+  const requestPreview = async () => {
+    if (previewInFlight.current || pvRendering) return;
+    const startedAtLocation = window.location.href;
+    const op = ++previewOp.current;
+    const isCurrent = () => mounted.current && previewOp.current === op && window.location.href === startedAtLocation;
+    if (previewGraceTimer.current) {
+      clearTimeout(previewGraceTimer.current);
+      previewGraceTimer.current = null;
+    }
+    previewInFlight.current = true;
+    setPreviewSubmitting(true);
+    try {
+      const job = await ctx.client.reframe(id, { aspect, mode: reframe, preview: true });
+      if (isCurrent()) {
+        setPvJob({ id: job.id, aspect, mode: reframe, localPending: true });
+        previewGraceTimer.current = setTimeout(() => {
+          previewGraceTimer.current = null;
+          if (isCurrent())
+            setPvJob((current) => current?.id === job.id ? { ...current, localPending: false } : current);
+        }, PREVIEW_SSE_GRACE_MS);
+      }
+    } catch (error) {
+      if (isCurrent()) {
+        const failure = describeActionError(error);
+        ctx.pushToast({ icon: "alert", tone: "warn", title: "Preview failed", body: `${failure.code}: ${failure.message}` });
+      }
+    } finally {
+      if (previewOp.current === op) previewInFlight.current = false;
+      if (isCurrent()) setPreviewSubmitting(false);
+    }
   };
 
   // Render = burn the chosen caption style + export (reframe first if the format changed here).
-  const render = () => ctx.makeClipsFrom([{ id }], { aspect, mode: reframe, preset, style });
-  const capWords = (clip.title || "your caption here").split(" ").slice(0, 8);
+  const render = async () => {
+    if (renderInFlight.current) return;
+    const startedAtLocation = window.location.href;
+    const op = ++renderOp.current;
+    const isCurrent = () => mounted.current && renderOp.current === op && window.location.href === startedAtLocation;
+    renderInFlight.current = true;
+    setRendering(true);
+    try {
+      await ctx.makeClipsFrom([{ id }], { aspect, mode: reframe, preset, style });
+    } catch (error) {
+      if (isCurrent()) {
+        const failure = describeActionError(error);
+        ctx.pushToast({ icon: "alert", tone: "warn", title: "Render failed", body: `${failure.code}: ${failure.message}` });
+      }
+    } finally {
+      if (renderOp.current === op) renderInFlight.current = false;
+      if (isCurrent()) setRendering(false);
+    }
+  };
   const renders = (snapshot?.clips ?? []).filter((c) => c.clip_id === id && (c.kind === "export" || c.kind === "pipeline") && c.status === "done" && c.result.render_id);
   const [ver, setVer] = useState<number | null>(null);   // A/B: which render version is in the preview (null = latest)
   const verIdx = ver == null ? renders.length - 1 : Math.min(ver, renders.length - 1);
@@ -133,6 +226,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   const allWords = doc.data?.words ?? [];
   const inWin = (w: { start: number | null }) => w.start != null && w.start >= lo && w.start <= hi;
   const tlWords = allWords.filter((w) => !w.deleted && inWin(w));
+  const captionSample = tlWords.slice(0, 2).map((w) => w.w);
   const deletedInWin = allWords.filter((w) => w.deleted && inWin(w)).length;
   // Real timeline lanes for the clip window: Energy (loudness envelope) + Scenes (cut markers).
   // hiSafe falls back to the last word's end when the clip has no explicit out point.
@@ -140,10 +234,72 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   const energyQ = useEngineQuery((c) => (src ? c.sourceEnergy(clip.src, 80, { start: lo, end: hiSafe }) : Promise.resolve({ bars: [], buckets: 0 })), [clip.src, lo, hiSafe]);
   const scenesQ = useEngineQuery((c) => (src ? c.sourceScenes(clip.src, { start: lo, end: hiSafe }) : Promise.resolve({ cuts: [] })), [clip.src, lo, hiSafe]);
   const filmstripQ = useEngineQuery((c) => (src ? c.sourceFilmstrip(clip.src, { start: lo, end: hiSafe }, 14) : Promise.resolve({ strip: null, frames: 0 })), [clip.src, lo, hiSafe]);
-  const delWord = (idx: number) => { if (src?.transcriptId) ctx.client.editWord(src.transcriptId, idx, { op: "delete" }).then(() => doc.reload()).catch(() => {}); };
-  const recut = () => { if (!src) return; ctx.client.cut(src.id, { start: lo, end: hi }).then(() => { ctx.pushToast({ icon: "scissors", tone: "info", title: "Re-cutting clip", body: `${deletedInWin} deleted word${deletedInWin === 1 ? "" : "s"} rippled out — a new version is in the queue` }); ctx.nav("queue"); }).catch(() => {}); };
+  const delWord = async (idx: number) => {
+    if (!src?.transcriptId || wordEditInFlight.current || cutInFlight.current) return;
+    const startedAtLocation = window.location.href;
+    const op = ++wordEditOp.current;
+    const isCurrent = () => mounted.current && wordEditOp.current === op && window.location.href === startedAtLocation;
+    wordEditInFlight.current = true;
+    setWordEditPending(true);
+    try {
+      await ctx.client.editWord(src.transcriptId, idx, { op: "delete" });
+      if (!isCurrent()) return;
+      doc.reload();
+    } catch (error) {
+      if (isCurrent()) {
+        const failure = describeActionError(error);
+        ctx.pushToast({ icon: "alert", tone: "warn", title: "Word edit failed", body: `${failure.code}: ${failure.message}` });
+      }
+    } finally {
+      if (wordEditOp.current === op) wordEditInFlight.current = false;
+      if (mounted.current && wordEditOp.current === op) setWordEditPending(false);
+    }
+  };
+  const recut = async () => {
+    if (!src || cutInFlight.current || wordEditInFlight.current) return;
+    const startedAtLocation = window.location.href;
+    const op = ++cutOp.current;
+    const isCurrent = () => mounted.current && cutOp.current === op && window.location.href === startedAtLocation;
+    cutInFlight.current = true;
+    setCutting(true);
+    try {
+      await ctx.client.cut(src.id, { start: lo, end: hi });
+      if (!isCurrent()) return;
+      ctx.pushToast({ icon: "scissors", tone: "info", title: "Re-cutting clip", body: `${deletedInWin} deleted word${deletedInWin === 1 ? "" : "s"} rippled out — a new version is in the queue` });
+      ctx.nav("queue");
+    } catch (error) {
+      if (isCurrent()) {
+        const failure = describeActionError(error);
+        ctx.pushToast({ icon: "alert", tone: "warn", title: "Re-cut failed", body: `${failure.code}: ${failure.message}` });
+      }
+    } finally {
+      if (cutOp.current === op) cutInFlight.current = false;
+      if (isCurrent()) setCutting(false);
+    }
+  };
   // Trim → re-cut to a new [start, end] window from the timeline's trim handles.
-  const trimRecut = (s: number, e: number) => { if (!src) return; ctx.client.cut(src.id, { start: s, end: e }).then(() => { ctx.pushToast({ icon: "scissors", tone: "info", title: "Re-cutting clip", body: `Trimmed to ${Math.round(e - s)}s — a new version is in the queue` }); ctx.nav("queue"); }).catch(() => {}); };
+  const trimRecut = async (s: number, e: number) => {
+    if (!src || cutInFlight.current || wordEditInFlight.current) return;
+    const startedAtLocation = window.location.href;
+    const op = ++cutOp.current;
+    const isCurrent = () => mounted.current && cutOp.current === op && window.location.href === startedAtLocation;
+    cutInFlight.current = true;
+    setCutting(true);
+    try {
+      await ctx.client.cut(src.id, { start: s, end: e });
+      if (!isCurrent()) return;
+      ctx.pushToast({ icon: "scissors", tone: "info", title: "Re-cutting clip", body: `Trimmed to ${Math.round(e - s)}s — a new version is in the queue` });
+      ctx.nav("queue");
+    } catch (error) {
+      if (isCurrent()) {
+        const failure = describeActionError(error);
+        ctx.pushToast({ icon: "alert", tone: "warn", title: "Trim failed", body: `${failure.code}: ${failure.message}` });
+      }
+    } finally {
+      if (cutOp.current === op) cutInFlight.current = false;
+      if (isCurrent()) setCutting(false);
+    }
+  };
   // play() rejects (NotSupportedError) when the source can't load yet — e.g. a cut clip's
   // preview momentarily points at the not-yet-existent "reframed" artifact before onError
   // falls back to the raw cut. That's expected and recoverable, so swallow it instead of
@@ -186,8 +342,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
         <span style={{ fontWeight: 600 }}>{clip.title}</span>
         <span className="spacer" />
         <div className="row" style={{ gap: 6 }}>{others.map((o) => <button key={o.id} className="chip" style={{ cursor: "pointer" }} onClick={() => ctx.nav("editor", { id: o.id })}>{o.title.split(" ").slice(0, 3).join(" ")}…</button>)}</div>
-        <Btn variant="ghost" size="sm" icon="undo">Undo</Btn>
-        <Btn variant="primary" size="sm" icon="zap" onClick={render}>Render</Btn>
+        <Btn variant="primary" size="sm" icon="zap" onClick={render} disabled={rendering}>{rendering ? "Rendering…" : "Render"}</Btn>
       </div>
 
       <div style={{ flex: 1, display: "grid", gridTemplateColumns: "1fr 320px", minHeight: 0 }}>
@@ -218,10 +373,10 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
             </div>
           </div>
           <div className="row" style={{ gap: 14, padding: "10px 18px", borderTop: "1px solid var(--line)", flex: "none" }}>
-            <button className="iconbtn" onClick={togglePlay} style={{ background: "var(--accent)", color: "var(--accent-ink)" }}><Icon name={playing ? "pause" : "play"} size={16} /></button>
+            <button className="iconbtn" aria-label={playing ? "Pause preview" : "Play preview"} onClick={togglePlay} style={{ background: "var(--accent)", color: "var(--accent-ink)" }}><Icon name={playing ? "pause" : "play"} size={16} /></button>
             <span className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)" }}>{renderSrc ? "playing the rendered clip" : "live preview · captions overlaid · burned in on Render"}</span>
             <span className="spacer" />
-            <label className="row" style={{ gap: 7, fontSize: 12.5, cursor: "pointer" }}><Switch on={safe} onClick={() => setSafe(!safe)} /> Safe zones</label>
+            <label className="row" style={{ gap: 7, fontSize: 12.5, cursor: "pointer" }}><Switch label="Safe zones" on={safe} onClick={() => setSafe(!safe)} /> Safe zones</label>
           </div>
           <div style={{ flex: "none", borderTop: "1px solid var(--line)", background: "var(--bg-1)", padding: "12px 18px" }}>
             {(renders.length > 1 || deletedInWin > 0) && (
@@ -233,7 +388,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
                     {renders.map((r, i) => <button key={r.id} className={"chip" + (verIdx === i ? " solid" : "")} style={{ cursor: "pointer", height: 22, padding: "0 8px" }} onClick={() => setVer(i)}>v{i + 1}</button>)}
                   </div>
                 )}
-                {deletedInWin > 0 && <Btn variant="primary" size="sm" icon="scissors" onClick={recut}>Re-cut (drop {deletedInWin})</Btn>}
+                {deletedInWin > 0 && <Btn variant="primary" size="sm" icon="scissors" onClick={recut} disabled={cutting || wordEditPending}>{cutting ? "Re-cutting…" : `Re-cut (drop ${deletedInWin})`}</Btn>}
               </div>
             )}
             {tlWords.length > 0 ? (
@@ -245,6 +400,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
                 cur={cur}
                 onSeek={(rel) => { const v = videoRef.current; if (v && isFinite(rel)) v.currentTime = Math.max(0, rel); setCur(rel); }}
                 onDeleteWord={delWord}
+                mutationPending={wordEditPending || cutting}
                 energyBars={energyQ.data?.bars ?? []}
                 sceneCuts={scenesQ.data?.cuts ?? []}
                 filmstrip={filmstripQ.data?.strip ?? null}
@@ -257,8 +413,8 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
-          <div className="tabs" style={{ padding: "0 8px", flex: "none" }}>
-            {["Format", "Captions", "Brand", "Export"].map((t) => <div key={t} className={"tab" + (insp === t ? " on" : "")} style={{ padding: "11px 11px", fontSize: 12.5 }} onClick={() => setInsp(t)}>{t}</div>)}
+          <div className="tabs" role="tablist" aria-label="Clip inspector" style={{ padding: "0 8px", flex: "none" }}>
+            {["Format", "Captions", "Brand", "Export"].map((t) => <button type="button" role="tab" aria-selected={insp === t} key={t} className={"tab" + (insp === t ? " on" : "")} style={{ padding: "11px 11px", fontSize: 12.5, fontFamily: "inherit", background: "transparent", borderTop: 0, borderLeft: 0, borderRight: 0 }} onClick={() => setInsp(t)}>{t}</button>)}
           </div>
           <div style={{ flex: 1, overflow: "auto", padding: 16 }}>
             {insp === "Format" && (
@@ -267,7 +423,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
                 <div><span className="field-label">Reframe mode</span>
                   <div className="row" style={{ gap: 8 }}>
                     {([["pan", "flip", "Pan"], ["split", "layout", "Split"], ["center", "crop", "Center"]] as const).map(([v, ic, l]) => (
-                      <button key={v} onClick={() => setReframe(v)} className="card" style={{ flex: 1, padding: "12px 0", display: "flex", flexDirection: "column", alignItems: "center", gap: 7, cursor: "pointer", borderColor: reframe === v ? "var(--accent)" : "var(--line)", background: reframe === v ? "var(--accent-soft)" : "var(--bg-2)" }}>
+                      <button type="button" key={v} aria-pressed={reframe === v} onClick={() => setReframe(v)} className="card" style={{ flex: 1, padding: "12px 0", display: "flex", flexDirection: "column", alignItems: "center", gap: 7, cursor: "pointer", borderColor: reframe === v ? "var(--accent)" : "var(--line)", background: reframe === v ? "var(--accent-soft)" : "var(--bg-2)" }}>
                         <Icon name={ic} size={20} /><span style={{ fontSize: 12, fontWeight: 600 }}>{l}</span>
                       </button>
                     ))}
@@ -275,8 +431,8 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
                 </div>
                 {!showReframed && (
                   <div>
-                    <Btn variant="ghost" icon="scan" onClick={requestPreview} disabled={pvRendering} style={{ width: "100%" }}>
-                      {pvRendering ? "Rendering real preview…" : pvReady ? "Re-render preview" : "Preview real reframe"}
+                    <Btn variant="ghost" icon="scan" onClick={requestPreview} disabled={previewSubmitting || pvRendering} style={{ width: "100%" }}>
+                      {previewSubmitting || pvRendering ? "Rendering real preview…" : pvReady ? "Re-render preview" : "Preview real reframe"}
                     </Btn>
                     <div className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 6, lineHeight: 1.5 }}>
                       {pvReady ? "showing the real low-res reframe (what Render bakes)" : "renders the actual reframe for this aspect/mode (vs. the live crop)"}
@@ -288,8 +444,11 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
             )}
             {insp === "Captions" && (
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                <div><span className="field-label">Preset</span><div className="kbar">{["opus", "karaoke", "minimal"].map((p) => <span key={p} className={"chip" + (style === p ? " solid" : "")} style={{ cursor: "pointer", textTransform: "capitalize" }} onClick={() => setStyle(p)}>{p}</span>)}</div></div>
-                <div className="card" style={{ padding: 12, textAlign: "center", background: "#0a0b0d" }}><span style={{ fontFamily: "var(--font-caption)", fontSize: 18, color: "#fff", textTransform: style === "opus" ? "uppercase" : "none" }}>{capWords[0]} <span style={{ color: hl }}>{capWords[1] || ""}</span></span></div>
+                <div><span className="field-label">Preset</span><div className="kbar">{["opus", "karaoke", "minimal"].map((p) => <button type="button" aria-pressed={style === p} key={p} className={"chip" + (style === p ? " solid" : "")} style={{ cursor: "pointer", textTransform: "capitalize", fontFamily: "inherit" }} onClick={() => setStyle(p)}>{p}</button>)}</div></div>
+                <div className="card" style={{ padding: 12, textAlign: "center", background: "#0a0b0d" }}>
+                  {captionSample.length ? <span style={{ fontFamily: "var(--font-caption)", fontSize: 18, color: "#fff", textTransform: style === "opus" ? "uppercase" : "none" }}>{captionSample[0]} <span style={{ color: hl }}>{captionSample[1] || ""}</span></span>
+                    : <span className="mono" style={{ fontSize: 11, color: "var(--text-faint)" }}>No transcript words available for preview.</span>}
+                </div>
                 <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", lineHeight: 1.6 }}>Captions play live over the preview on the left. Render burns this style in; fine-tune size/colors/position in the Caption Studio.</div>
                 <Btn variant="ghost" icon="type" onClick={() => ctx.nav("caption", { id })}>Open Caption Studio →</Btn>
               </div>
@@ -298,18 +457,19 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
             {insp === "Export" && (
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                 <div><span className="field-label">Export preset</span><Seg value={preset} onChange={setPreset} neutral options={[{ value: "tiktok", label: "TikTok" }, { value: "reels", label: "Reels" }, { value: "shorts", label: "Shorts" }]} /></div>
-                <div className="card" style={{ padding: 13, fontSize: 12.5, color: "var(--text-dim)" }}><div className="row" style={{ marginBottom: 6 }}><span>Codec</span><span className="spacer" /><span className="mono">H.264 · VideoToolbox</span></div><div className="row" style={{ marginBottom: 6 }}><span>Resolution</span><span className="spacer" /><span className="mono">{aspect === "9:16" ? "1080×1920" : aspect === "1:1" ? "1080×1080" : aspect === "4:5" ? "1080×1350" : "1920×1080"}</span></div><div className="row"><span>Aspect</span><span className="spacer" /><span className="mono">{aspect}</span></div></div>
+                <div className="card" style={{ padding: 13, fontSize: 12.5, color: "var(--text-dim)" }}><div className="row" style={{ marginBottom: 6 }}><span>Preset</span><span className="spacer" /><span className="mono">{preset}</span></div><div className="row"><span>Requested aspect</span><span className="spacer" /><span className="mono">{aspect}</span></div></div>
                 <div>
                   <span className="field-label">Renders</span>
                   <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
                     {renders.length === 0 ? <div style={{ fontSize: 12.5, color: "var(--text-faint)", padding: "6px 2px" }}>No renders yet — hit Render to make one.</div>
                       : renders.map((r, i) => {
                         const path = (r.result.output_path as string) || "";
+                        const renderMeta = [r.result.preset, r.result.aspect].filter((value): value is string => typeof value === "string" && value.length > 0).join(" · ") || "render";
                         return (
                           <div key={r.id} className="card" style={{ padding: "9px 11px", display: "flex", flexDirection: "column", gap: 6, borderColor: i === renders.length - 1 ? "var(--accent)" : "var(--line)" }}>
                             <div className="row" style={{ gap: 10 }}>
                               <span className="mono" style={{ fontSize: 11.5, fontWeight: 600 }}>v{i + 1}</span>
-                              <span style={{ fontSize: 11.5, color: "var(--text-faint)" }}>{(r.result.preset as string) || "render"} · {(r.result.aspect as string) || aspect}</span>
+                              <span style={{ fontSize: 11.5, color: "var(--text-faint)" }}>{renderMeta}</span>
                               <span className="spacer" />
                               {i === renders.length - 1 && <Chip tone="acc">latest</Chip>}
                               <a className="btn subtle sm" style={{ height: 24, padding: "0 8px" }} href={ctx.client.renderFileUrl(id, r.result.render_id!)} download>Download</a>
@@ -317,7 +477,15 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
                             {path && (
                               <div className="row" style={{ gap: 6 }}>
                                 <span className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", direction: "rtl", textAlign: "left" }} title={path}>{path}</span>
-                                <button className="iconbtn" style={{ width: 22, height: 22, flex: "none" }} title="Copy file path" onClick={() => { navigator.clipboard?.writeText(path); ctx.pushToast({ icon: "copy", tone: "ok", title: "Path copied", body: "Paste in Finder → Go to Folder (⌘⇧G)" }); }}><Icon name="copy" size={12} /></button>
+                                <button className="iconbtn" style={{ width: 22, height: 22, flex: "none" }} title="Copy file path" onClick={async () => {
+                                  try {
+                                    await navigator.clipboard.writeText(path);
+                                    ctx.pushToast({ icon: "copy", tone: "ok", title: "Path copied", body: "Paste in Finder → Go to Folder (⌘⇧G)" });
+                                  } catch (error) {
+                                    const failure = describeActionError(error);
+                                    ctx.pushToast({ icon: "alert", tone: "warn", title: "Couldn't copy path", body: `${failure.code}: ${failure.message}` });
+                                  }
+                                }}><Icon name="copy" size={12} /></button>
                               </div>
                             )}
                           </div>
@@ -325,7 +493,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
                       })}
                   </div>
                 </div>
-                <Btn variant="primary" icon="zap" onClick={render}>Render &amp; export</Btn>
+                <Btn variant="primary" icon="zap" onClick={render} disabled={rendering}>{rendering ? "Rendering…" : "Render & export"}</Btn>
               </div>
             )}
           </div>

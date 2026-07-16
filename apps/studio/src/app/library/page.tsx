@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useSpool } from "@/components/spool/context";
+import { describeActionError } from "@/lib/action-error";
 import { MediaCard } from "@/components/spool/cards";
 import { Btn, Chip, Icon, Seg, SourceGlyph, fmtDur } from "@spool/ui";
 
@@ -13,11 +14,44 @@ export default function LibraryScreen() {
   const [q, setQ] = useState("");
   const [status, setStatus] = useState("all");
   const [sel, setSel] = useState<string[]>([]);
+  const [batching, setBatching] = useState(false);
+  const batchingRef = useRef(false);
   const list = ctx.sources.filter((s) => (status === "all" || s.status === status) && s.title.toLowerCase().includes(q.toLowerCase()));
   const toggle = (id: string) => setSel((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
 
-  const batchTranscribe = () => { sel.forEach((id) => ctx.client.startTranscribe(id).catch(() => {})); ctx.pushToast({ icon: "type", tone: "info", title: "Transcribe queued", body: `${sel.length} sources` }); setSel([]); };
-  const batchFind = () => { sel.forEach((id) => ctx.client.findMoments(id, { mode: "funny" }).catch(() => {})); ctx.pushToast({ icon: "scissors", tone: "info", title: "Finding moments", body: `${sel.length} sources` }); setSel([]); };
+  const runBatch = async (
+    label: string,
+    icon: string,
+    action: (id: string) => Promise<unknown>,
+  ) => {
+    const ids = [...sel];
+    if (!ids.length || batchingRef.current) return;
+    batchingRef.current = true;
+    setBatching(true);
+    try {
+      const results = await Promise.allSettled(ids.map(action));
+      const succeededIds = ids.filter((_, i) => results[i]?.status === "fulfilled");
+      const failedResults = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+      const firstFailure = failedResults[0] ? describeActionError(failedResults[0].reason) : null;
+      setSel((current) => current.filter((id) => !succeededIds.includes(id)));
+      ctx.pushToast({
+        icon: failedResults.length ? "alert" : icon,
+        tone: failedResults.length ? "warn" : "info",
+        title: label,
+        body: `${succeededIds.length} succeeded · ${failedResults.length} failed${firstFailure ? ` · ${firstFailure.code}: ${firstFailure.message}` : ""}`,
+      });
+    } finally {
+      batchingRef.current = false;
+      setBatching(false);
+    }
+  };
+
+  const batchTranscribe = async () => {
+    await runBatch("Transcribe requests settled", "type", (id) => ctx.client.startTranscribe(id));
+  };
+  const batchFind = async () => {
+    await runBatch("Find-clips requests settled", "scissors", (id) => ctx.client.findMoments(id, { mode: "funny" }));
+  };
 
   return (
     <div className="mainpad fadein">
@@ -37,11 +71,11 @@ export default function LibraryScreen() {
         {sel.length > 0 && (
           <div className="row" style={{ gap: 8 }}>
             <span className="chip acc">{sel.length} selected</span>
-            <Btn variant="ghost" size="sm" icon="type" onClick={batchTranscribe}>Transcribe</Btn>
-            <Btn variant="ghost" size="sm" icon="scissors" onClick={batchFind}>Find clips</Btn>
+            <Btn variant="ghost" size="sm" icon="type" onClick={batchTranscribe} disabled={batching}>Transcribe</Btn>
+            <Btn variant="ghost" size="sm" icon="scissors" onClick={batchFind} disabled={batching}>Find clips</Btn>
           </div>
         )}
-        <Seg value={view} onChange={setView} neutral options={[{ value: "grid", icon: "grid", label: "" }, { value: "table", icon: "list", label: "" }]} />
+        <Seg value={view} onChange={setView} neutral options={[{ value: "grid", icon: "grid", label: "", ariaLabel: "Grid view" }, { value: "table", icon: "list", label: "", ariaLabel: "Table view" }]} />
       </div>
 
       {list.length === 0 && <div style={{ color: "var(--text-faint)", fontSize: 13, padding: "30px 0" }}>No sources yet — import a video to begin.</div>}
@@ -52,7 +86,7 @@ export default function LibraryScreen() {
             // Native off-screen render-skip for a large library (zero layout change);
             // contain-intrinsic-size reserves the card's space so scroll height is stable.
             <div key={s.id} style={{ position: "relative", contentVisibility: "auto", containIntrinsicSize: "auto 230px" }}>
-              <div onClick={(e) => { e.stopPropagation(); toggle(s.id); }} className="checkbox" style={{ position: "absolute", top: 10, left: 10, zIndex: 5, background: sel.includes(s.id) ? "var(--accent)" : "rgba(0,0,0,0.5)", borderColor: sel.includes(s.id) ? "transparent" : "var(--line-str)", color: "var(--accent-ink)", cursor: "pointer" }}>{sel.includes(s.id) && <Icon name="check" size={12} />}</div>
+              <button type="button" aria-label={`Select ${s.title}`} aria-pressed={sel.includes(s.id)} onClick={(e) => { e.stopPropagation(); toggle(s.id); }} className="checkbox" style={{ position: "absolute", top: 10, left: 10, zIndex: 5, background: sel.includes(s.id) ? "var(--accent)" : "rgba(0,0,0,0.5)", borderColor: sel.includes(s.id) ? "transparent" : "var(--line-str)", color: "var(--accent-ink)", cursor: "pointer" }}>{sel.includes(s.id) && <Icon name="check" size={12} />}</button>
               <MediaCard s={s} onOpen={() => ctx.nav("project", { id: s.id })} />
             </div>
           ))}
@@ -66,10 +100,10 @@ export default function LibraryScreen() {
             <tbody>
               {list.map((s) => (
                 <tr key={s.id} style={{ cursor: "pointer", borderBottom: "1px solid var(--line-2)" }} onClick={() => ctx.nav("project", { id: s.id })}>
-                  <td style={{ padding: "10px 14px", fontWeight: 600, maxWidth: 340, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}><span className="row" style={{ gap: 9 }}><SourceGlyph type={s.src} />{s.title}</span></td>
+                  <td style={{ padding: "10px 14px", fontWeight: 600, maxWidth: 340, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}><span className="row" style={{ gap: 9 }}>{s.src !== "—" && <SourceGlyph type={s.src} />}{s.title}</span></td>
                   <td style={{ padding: "10px 14px" }}><Chip tone={s.status === "ready" ? "ok" : s.status === "transcribing" ? "info" : "warn"} dot>{s.status}</Chip></td>
                   <td style={{ padding: "10px 14px" }} className="mono">{s.clips}</td>
-                  <td style={{ padding: "10px 14px" }} className="mono">{fmtDur(s.dur)}</td>
+                  <td style={{ padding: "10px 14px" }} className="mono">{s.dur > 0 ? fmtDur(s.dur) : "—"}</td>
                 </tr>
               ))}
             </tbody>

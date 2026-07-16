@@ -5,9 +5,8 @@ import { useSpool } from "./context";
 import { useEngineQuery } from "@/lib/engine-context";
 import { Icon } from "@spool/ui";
 
-/* 1:1 ports of the demo's CommandPalette (agent.jsx) + ShortcutSheet + Toasts (app.jsx).
- * Wired to the live context: navigation is real, "run an action" / recipes drive the real
- * agent, and search falls through to "ask the agent". */
+/* Search and navigation only. Mutating actions and future routes stay out of the palette until
+ * they have a complete, failure-visible implementation. */
 
 interface PItem { group: string; title: string; icon: string; hint?: string; run: () => void }
 
@@ -26,15 +25,13 @@ function PaletteInner() {
   useEffect(() => { const id = setTimeout(() => inputRef.current?.focus(), 30); return () => clearTimeout(id); }, []);
 
   const items = useMemo<PItem[]>(() => {
-    const nav: [string, string, string][] = [["home", "Home", "home"], ["import", "Import / Paste URL", "import"], ["library", "Library", "film"], ["clips", "Clips", "scissors"], ["queue", "Render Queue", "layers"], ["brand", "Brand Kit", "palette"], ["publish", "Publish", "send"], ["analytics", "Analyze", "chart"], ["settings", "Settings", "settings"], ["onboarding", "Dependency Doctor", "scan"]];
+    const nav: [string, string, string][] = [["home", "Home", "home"], ["import", "Import / Paste URL", "import"], ["library", "Library", "film"], ["clips", "Clips", "scissors"], ["queue", "Render Queue", "layers"], ["brand", "Brand Kit", "palette"], ["settings", "Settings", "settings"], ["onboarding", "Dependency Doctor", "scan"]];
     const out: PItem[] = [];
     nav.forEach(([r, t, ic]) => out.push({ group: "Navigate", title: t, icon: ic, hint: "↵", run: () => ctx.nav(r) }));
-    ["Make clips", "Open render queue", "Apply Acme brand kit", "Re-transcribe source", "Export selected clips"].forEach((t) => out.push({ group: "Actions", title: t, icon: "bolt", run: () => ctx.askAgent(t) }));
-    ctx.recipes.forEach((t) => out.push({ group: "Recipes", title: t, icon: "sparkles", run: () => ctx.askAgent(t) }));
     ctx.sources.slice(0, 4).forEach((s) => out.push({ group: "Sources", title: s.title, icon: "folder", run: () => ctx.nav("project", { id: s.id }) }));
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ctx.sources, ctx.recipes]);
+  }, [ctx.sources]);
 
   // Library-wide transcript search (debounced) — the demo's global search, made real:
   // every completed transcript across the library, with deep-links into the source.
@@ -49,7 +46,6 @@ function PaletteInner() {
 
   const filtered = q ? items.filter((i) => i.title.toLowerCase().includes(q.toLowerCase())) : items;
   const shown = [...filtered, ...hitItems];
-  const asAgent = q.trim().length > 6 && shown.length === 0;
   const groups = shown.reduce<Record<string, PItem[]>>((a, i) => { (a[i.group] = a[i.group] || []).push(i); return a; }, {});
   const flat: PItem[] = [];
   Object.values(groups).forEach((g) => flat.push(...g));
@@ -58,12 +54,12 @@ function PaletteInner() {
     const h = (e: KeyboardEvent) => {
       if (e.key === "ArrowDown") { e.preventDefault(); setActive((a) => Math.min(flat.length - 1, a + 1)); }
       else if (e.key === "ArrowUp") { e.preventDefault(); setActive((a) => Math.max(0, a - 1)); }
-      else if (e.key === "Enter") { e.preventDefault(); if (asAgent) { ctx.askAgent(q); ctx.closePalette(); } else if (flat[active]) { flat[active].run(); ctx.closePalette(); } }
+      else if (e.key === "Enter") { e.preventDefault(); if (flat[active]) { flat[active].run(); ctx.closePalette(); } }
       else if (e.key === "Escape") { ctx.closePalette(); }
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [flat, active, asAgent, q]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [flat, active]); // eslint-disable-line react-hooks/exhaustive-deps
 
   let idx = -1;
   return (
@@ -71,15 +67,11 @@ function PaletteInner() {
       <div className="palette" onClick={(e) => e.stopPropagation()}>
         <div className="psearch">
           <Icon name="search" size={18} style={{ color: "var(--text-faint)" }} />
-          <input ref={inputRef} value={q} onChange={(e) => { setQ(e.target.value); setActive(0); }} placeholder="Search, run an action, or ask the agent…" />
+          <input ref={inputRef} value={q} onChange={(e) => { setQ(e.target.value); setActive(0); }} placeholder="Search pages, sources, and transcripts…" />
           <span className="kbd">esc</span>
         </div>
         <div className="plist">
-          {asAgent ? (
-            <div className="pitem active" onClick={() => { ctx.askAgent(q); ctx.closePalette(); }}>
-              <span className="pico"><Icon name="sparkles" size={16} /></span><span className="pttl">Ask the agent: “{q}”</span><span className="phint kbd">↵</span>
-            </div>
-          ) : Object.entries(groups).map(([g, gi]) => (
+          {Object.entries(groups).map(([g, gi]) => (
             <div key={g}>
               <div className="pgroup">{g}</div>
               {gi.map((it) => { idx++; const a = idx; return (
@@ -89,7 +81,7 @@ function PaletteInner() {
               ); })}
             </div>
           ))}
-          {shown.length === 0 && !asAgent && <div style={{ padding: "20px", textAlign: "center", color: "var(--text-faint)", fontSize: 13 }}>{search.loading ? "Searching transcripts…" : "Keep typing to ask the agent…"}</div>}
+          {shown.length === 0 && <div style={{ padding: "20px", textAlign: "center", color: "var(--text-faint)", fontSize: 13 }}>{search.loading ? "Searching transcripts…" : "No matching pages, sources, or transcripts."}</div>}
         </div>
       </div>
     </div>
@@ -101,9 +93,7 @@ export function ShortcutSheet() {
   if (!ctx.shortcutsOpen) return null;
   const K = (...keys: string[]) => <span className="keys">{keys.map((k, i) => <span key={i} className="kbd">{k}</span>)}</span>;
   const groups: [string, [string, string][]][] = [
-    ["Playback", [["Space", "Play / pause"], ["J / K / L", "Shuttle back / hold / forward"], ["← / →", "Step one frame"]]],
-    ["Editing", [["[  /  ]", "Set in / out point"], ["⌘ ⏎", "Render clip"], ["⌘ Z", "Undo"], ["⌘ ⇧ Z", "Redo"]]],
-    ["Navigation", [["⌘ K", "Command palette"], ["/", "Focus the agent"], ["?", "This sheet"], ["Esc", "Close / dismiss"]]],
+    ["Navigation", [["⌘ K", "Command palette"], ["?", "Keyboard shortcuts"], ["Esc", "Close this sheet"]]],
   ];
   return (
     <div className="overlay" onClick={ctx.closeShortcuts}>

@@ -44,6 +44,24 @@ describe("SpoolApiClient.produce", () => {
   });
 });
 
+describe("SpoolApiClient transcript lifecycle", () => {
+  it("POSTs transcript cancellation to the engine lifecycle endpoint", async () => {
+    const { client, calls } = clientWithSpy();
+    await client.cancelTranscript("transcript/with space");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("http://x/api/v1/transcripts/transcript%2Fwith%20space/cancel");
+    expect(calls[0]!.method).toBe("POST");
+  });
+
+  it("POSTs transcript dismissal to the engine lifecycle endpoint", async () => {
+    const { client, calls } = clientWithSpy();
+    await client.dismissTranscript("transcript/with space");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("http://x/api/v1/transcripts/transcript%2Fwith%20space/dismiss");
+    expect(calls[0]!.method).toBe("POST");
+  });
+});
+
 // ── SSE clean-close reconnect (HIGH finding 3.4) ─────────────────────────────
 // A clean EOF (engine restart, idle proxy timeout) must route through onError so
 // callers (EngineProvider) can reconnect with backoff — not silently freeze.
@@ -105,5 +123,21 @@ describe("request timeout/abort", () => {
     const p = client.agent("hi", {}, { signal: ctrl.signal });
     ctrl.abort();
     await expect(p).rejects.toMatchObject({ code: "aborted", status: 0 });
+  });
+});
+
+describe("structured response errors", () => {
+  it("preserves both the engine error code and message", async () => {
+    const fetchImpl = vi.fn(async () => new Response(
+      JSON.stringify({ error: "source_not_ready", message: "Finish transcription before finding moments." }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    ));
+    const client = new SpoolApiClient({ baseUrl: "http://x", fetch: fetchImpl as unknown as typeof fetch });
+
+    await expect(client.getJob("source-1")).rejects.toMatchObject({
+      status: 409,
+      code: "source_not_ready",
+      message: "Finish transcription before finding moments.",
+    });
   });
 });

@@ -1,9 +1,10 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { BrandKit } from "@spool/api-client";
 import { useSpool } from "@/components/spool/context";
 import { useEngineQuery } from "@/lib/engine-context";
+import { describeActionError } from "@/lib/action-error";
 import { Btn, Icon } from "@spool/ui";
 
 /* S9 Brand Kits — 1:1 port of the demo (07), fully wired (Phase 2). Kits persist via the
@@ -52,39 +53,101 @@ export default function BrandScreen() {
   const [synced, setSynced] = useState(false);
   const [applySrc, setApplySrc] = useState("");
   const [saving, setSaving] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const operationRef = useRef<"save" | "delete" | "apply" | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   // Auto-load the first kit into the editor once it arrives — set-state-during-render is the
   // supported React pattern for syncing to async data (no effect, runs once via the guard).
   if (!synced && sel === null && kits[0]) { setSel(kits[0].id); setF(toForm(kits[0])); setSynced(true); }
 
-  const selectKit = (k: BrandKit) => { setSel(k.id); setF(toForm(k)); };
+  const selectKit = (k: BrandKit) => { if (operationRef.current) return; setSel(k.id); setF(toForm(k)); };
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setF((s) => ({ ...s, [k]: v }));
   const togglePalette = (c: string) => set("palette", f.palette.map((x) => x.toLowerCase()).includes(c.toLowerCase()) ? f.palette.filter((x) => x.toLowerCase() !== c.toLowerCase()) : [...f.palette, c]);
 
-  const newKit = () => { setSel(null); setF({ ...EMPTY, name: "" }); setSynced(true); };
-  const save = () => {
+  const newKit = () => { if (operationRef.current) return; setSel(null); setF({ ...EMPTY, name: "" }); setSynced(true); };
+  const save = async () => {
+    if (operationRef.current) return;
+    operationRef.current = "save";
     setSaving(true);
-    const body = toKit(f);
-    const p = sel ? ctx.client.updateBrandKit(sel, body) : ctx.client.createBrandKit(body);
-    p.then((k) => { setSel(k.id); kitsQ.reload(); ctx.pushToast({ icon: "check", tone: "ok", title: "Brand kit saved", body: k.name }); })
-      .catch(() => ctx.pushToast({ icon: "alert", tone: "warn", title: "Couldn't save the kit" }))
-      .finally(() => setSaving(false));
+    try {
+      const body = toKit(f);
+      const kit = sel ? await ctx.client.updateBrandKit(sel, body) : await ctx.client.createBrandKit(body);
+      if (!mounted.current) return;
+      setSel(kit.id);
+      kitsQ.reload();
+      ctx.pushToast({ icon: "check", tone: "ok", title: "Brand kit saved", body: kit.name });
+    } catch (error) {
+      if (mounted.current) {
+        const failure = describeActionError(error);
+        ctx.pushToast({ icon: "alert", tone: "warn", title: "Couldn't save the kit", body: `${failure.code}: ${failure.message}` });
+      }
+    } finally {
+      if (operationRef.current === "save") operationRef.current = null;
+      if (mounted.current) setSaving(false);
+    }
   };
-  const del = () => {
-    if (!sel) return;
-    ctx.client.deleteBrandKit(sel).then(() => { setSel(null); setF({ ...EMPTY, name: "" }); kitsQ.reload(); ctx.pushToast({ icon: "trash", tone: "info", title: "Kit deleted" }); }).catch(() => {});
+  const del = async () => {
+    if (!sel || operationRef.current) return;
+    operationRef.current = "delete";
+    setSaving(true);
+    try {
+      await ctx.client.deleteBrandKit(sel);
+      if (!mounted.current) return;
+      setSel(null);
+      setF({ ...EMPTY, name: "" });
+      kitsQ.reload();
+      ctx.pushToast({ icon: "trash", tone: "info", title: "Kit deleted" });
+    } catch (error) {
+      if (mounted.current) {
+        const failure = describeActionError(error);
+        ctx.pushToast({ icon: "alert", tone: "warn", title: "Couldn't delete the kit", body: `${failure.code}: ${failure.message}` });
+      }
+    } finally {
+      if (operationRef.current === "delete") operationRef.current = null;
+      if (mounted.current) setSaving(false);
+    }
   };
 
   const targetClips = ctx.clips.filter((c) => c.src === applySrc);
-  const applyToProject = () => {
+  const applyToProject = async () => {
+    if (operationRef.current) return;
     if (!applySrc || !targetClips.length) { ctx.pushToast({ icon: "alert", tone: "warn", title: "Pick a project with clips" }); return; }
+    operationRef.current = "apply";
     const ov = { highlight: f.highlight, font: f.font };
-    for (const c of targetClips) {
-      ctx.client.caption(c.id, { style: f.preset, overrides: ov, watermark: f.watermark.trim() || undefined, lower_third: f.lowerThird.trim() || undefined })
-        .then(() => ctx.client.render(c.id, { preset: c.platform || "tiktok" }).catch(() => {})).catch(() => {});
+    const startedAtLocation = window.location.href;
+    setApplying(true);
+    try {
+      const results = await Promise.allSettled(targetClips.map(async (clip) => {
+        const captionJob = await ctx.client.caption(clip.id, {
+          style: f.preset,
+          overrides: ov,
+          watermark: f.watermark.trim() || undefined,
+          lower_third: f.lowerThird.trim() || undefined,
+        });
+        await ctx.awaitClipJob(captionJob.id);
+        await ctx.client.render(clip.id, clip.platform ? { preset: clip.platform } : {});
+        return clip.id;
+      }));
+      const succeeded = results.filter((result) => result.status === "fulfilled").length;
+      const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+      const firstFailure = failures[0] ? describeActionError(failures[0].reason) : null;
+      if (!mounted.current || window.location.href !== startedAtLocation) return;
+      ctx.pushToast({
+        icon: failures.length ? "alert" : "palette",
+        tone: failures.length ? "warn" : "info",
+        title: `Brand apply settled for ${targetClips.length} clip${targetClips.length === 1 ? "" : "s"}`,
+        body: `${succeeded} succeeded · ${failures.length} failed${firstFailure ? ` · ${firstFailure.code}: ${firstFailure.message}` : ""}`,
+      });
+      if (succeeded > 0 && mounted.current && window.location.href === startedAtLocation) ctx.nav("queue");
+    } finally {
+      if (operationRef.current === "apply") operationRef.current = null;
+      if (mounted.current) setApplying(false);
     }
-    ctx.pushToast({ icon: "palette", tone: "info", title: `Applying “${f.name || "kit"}” to ${targetClips.length} clip${targetClips.length > 1 ? "s" : ""}`, body: "Caption + render queued — track it in the Render Queue" });
-    ctx.nav("queue");
   };
 
   const fontCss = FONTS.find((x) => x.ass === f.font)?.css ?? f.font;
@@ -94,7 +157,7 @@ export default function BrandScreen() {
       <div className="row" style={{ marginBottom: 18 }}>
         <div><div className="eyebrow" style={{ marginBottom: 6 }}>Brand kits</div><h1 style={{ fontSize: 28 }}>A reusable look</h1></div>
         <span className="spacer" />
-        <Btn variant="ghost" icon="plus" onClick={newKit}>New kit</Btn>
+        <Btn variant="ghost" icon="plus" onClick={newKit} disabled={saving || applying}>New kit</Btn>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "240px 1fr 300px", gap: 20, alignItems: "start" }}>
@@ -102,10 +165,10 @@ export default function BrandScreen() {
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {kits.length === 0 && <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.6 }}>No kits yet — set a name, palette, caption look and watermark, then Save.</div>}
           {kits.map((k) => (
-            <div key={k.id} className="card" onClick={() => selectKit(k)} style={{ padding: 13, cursor: "pointer", borderColor: sel === k.id ? "var(--accent)" : "var(--line)" }}>
+            <button type="button" key={k.id} className="card" aria-pressed={sel === k.id} disabled={saving || applying} onClick={() => selectKit(k)} style={{ padding: 13, cursor: saving || applying ? "not-allowed" : "pointer", borderColor: sel === k.id ? "var(--accent)" : "var(--line)", opacity: (saving || applying) && sel !== k.id ? 0.65 : 1, width: "100%", textAlign: "left", color: "inherit", fontFamily: "inherit" }}>
               <div className="row" style={{ gap: 6, marginBottom: 10 }}>{(k.palette ?? []).slice(0, 5).map((c, j) => <span key={j} style={{ width: 20, height: 20, borderRadius: 6, background: c, border: "1px solid var(--line)" }} />)}</div>
               <div style={{ fontWeight: 600, fontSize: 13.5 }}>{k.name}</div>
-            </div>
+            </button>
           ))}
         </div>
 
@@ -115,8 +178,8 @@ export default function BrandScreen() {
             <input value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="Kit name"
               style={{ font: "inherit", fontSize: 17, fontWeight: 600, background: "transparent", border: 0, borderBottom: "1px solid var(--line)", color: "var(--text)", outline: "none", padding: "2px 0", flex: 1 }} />
             <span className="spacer" />
-            {sel && <button className="btn subtle sm" style={{ color: "var(--err, #e5484d)" }} onClick={del}><Icon name="trash" size={14} /></button>}
-            <Btn variant="primary" icon="check" onClick={save} disabled={saving}>{sel ? "Save" : "Create"}</Btn>
+            {sel && <button className="btn subtle sm" aria-label="Delete brand kit" title="Delete brand kit" disabled={saving || applying} style={{ color: "var(--err, #e5484d)" }} onClick={del}><Icon name="trash" size={14} /></button>}
+            <Btn variant="primary" icon="check" onClick={save} disabled={saving || applying}>{sel ? "Save" : "Create"}</Btn>
           </div>
 
           <div><div className="eyebrow" style={{ marginBottom: 8 }}>Color palette</div><Swatches colors={PALETTE_POOL} picked={f.palette} onPick={togglePalette} multi /></div>
@@ -154,7 +217,7 @@ export default function BrandScreen() {
               <option value="">Choose a project…</option>
               {ctx.sources.map((s) => <option key={s.id} value={s.id}>{s.title} ({ctx.clips.filter((c) => c.src === s.id).length})</option>)}
             </select>
-            <Btn variant="primary" icon="palette" onClick={applyToProject} disabled={!applySrc || targetClips.length === 0}>Apply to {targetClips.length} clip{targetClips.length === 1 ? "" : "s"}</Btn>
+            <Btn variant="primary" icon="palette" onClick={applyToProject} disabled={!applySrc || targetClips.length === 0 || applying || saving}>{applying ? "Applying…" : `Apply to ${targetClips.length} clip${targetClips.length === 1 ? "" : "s"}`}</Btn>
             <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", lineHeight: 1.6 }}>Re-captions every clip of the project with this kit&apos;s preset, highlight, font, watermark + lower-third, then renders.</div>
           </div>
         </div>

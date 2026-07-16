@@ -2,9 +2,10 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { SpoolApiClient } from "@spool/api-client";
+import { SpoolApiError, type SpoolApiClient } from "@spool/api-client";
 import type { ClipJobView, EventsSnapshot, RankFactors, TranscriptWord } from "@spool/types";
 import { useEngine, useEngineQuery, useLive } from "@/lib/engine-context";
+import { formatActionError } from "@/lib/action-error";
 
 /* The demo's `useSpool()` context, backed by the LIVE engine instead of mock data.
  * Maps the SSE snapshot into the demo's source/clip/job shapes so the ported demo
@@ -15,16 +16,17 @@ import { useEngine, useEngineQuery, useLive } from "@/lib/engine-context";
 
 export interface SpoolSource {
   id: string; title: string; src: string; dur: number; status: string;
-  prog?: number; clips: number; kind: string; channel: string; res: string; fps: number;
-  size: string; lang: string; added: string; scenes: number; transcriptId?: string; speakerCount: number;
+  prog?: number; clips: number; kind: string; channel: string; res: string; fps?: number;
+  size: string; lang: string; added: string; scenes?: number; transcriptId?: string; speakerCount?: number;
 }
 export interface SpoolClip {
-  id: string; title: string; src: string; dur: number; aspect: string; style: string;
-  platform: string; status: string; prog?: number; tags?: string[]; renderId?: string; score?: number;
+  id: string; title: string; src: string; dur: number; aspect?: string; style?: string;
+  platform?: string; status: string; prog?: number; tags?: string[]; renderId?: string; score?: number;
   start?: number; end?: number; // the cut window in source time, for slicing the transcript
 }
 export interface SpoolJob {
   id: string; type: string; label: string; src: string; status: string; prog: number; stage: string; eta: string; elapsed: string; err?: boolean;
+  errorCode?: string | null; errorMessage?: string | null;
   /** which engine surface owns this job — routes queue cancel/dismiss/retry actions */
   domain: "download" | "transcribe" | "clip";
 }
@@ -82,29 +84,28 @@ export interface AgentMessage {
   confirmFor?: { text: string; tool: string };
 }
 
-const RECIPES = ["3 funny shorts", "Insightful carousel", "Hot-take TikToks", "Best moment → 9:16"];
-
 const INITIAL_AGENT: AgentMessage[] = [
-  { role: "agent", text: "Hi — I'm your clip agent. I can drive the whole app: download a URL, transcribe, find moments, make clips, run recipes, manage watches & brand kits — and inspect anything (your render queue, sources, recipes…). Ask me what's going on or tell me what to make. You decide at each step." },
+  { role: "agent", text: "Hi — I'm your read-only clip assistant. I can inspect your sources, transcripts, clips, and render queue, then explain what is happening. Changes stay in your hands." },
 ];
 
-function originOf(url: string | null | undefined): string {
-  const u = (url || "").toLowerCase();
-  if (u.includes("youtu")) return "youtube";
-  if (u.includes("instagram")) return "instagram";
-  if (u.includes("tiktok")) return "tiktok";
-  if (u.includes("x.com") || u.includes("twitter")) return "x";
-  return "file";
+function originOf(url: string | null | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "file:") return "file";
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
+    const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
+    const isHost = (domain: string) => host === domain || host.endsWith(`.${domain}`);
+    if (isHost("youtube.com") || isHost("youtube-nocookie.com") || isHost("youtu.be")) return "youtube";
+    if (isHost("instagram.com")) return "instagram";
+    if (isHost("tiktok.com")) return "tiktok";
+    if (isHost("x.com") || isHost("twitter.com")) return "x";
+  } catch {
+    // An unparseable or non-URL source is unknown, not proof that it is a local file.
+  }
+  return undefined;
 }
 const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
-const ago = (sec: number) => {
-  if (!sec || sec < 0) return "just now";
-  const m = sec / 60, h = m / 60, d = h / 24;
-  if (d >= 1) return `${Math.round(d)}d ago`;
-  if (h >= 1) return `${Math.round(h)}h ago`;
-  if (m >= 1) return `${Math.round(m)}m ago`;
-  return "just now";
-};
 const human = (bytes: number) => {
   if (!bytes) return "—";
   const u = ["B", "KB", "MB", "GB"]; let i = 0, n = bytes;
@@ -119,20 +120,24 @@ export function mapSources(snap: EventsSnapshot | null): SpoolSource[] {
   return snap.jobs
     .filter((j) => j.status === "done" && j.filename)
     .map((j) => {
-      const tj = snap.transcripts
-        .filter((t) => t.parent_job_id === j.id)
-        .sort((a, b) => b.elapsed_seconds - a.elapsed_seconds)[0];
-      const status = tj?.status === "done" ? "ready" : tj && (tj.status === "running" || tj.status === "queued") ? "transcribing" : "no-candidates";
-      const speakers = tj?.speaker_count ?? 0;
+      // Snapshot order is manager insertion order; a re-transcribe appends a new attempt.
+      // elapsed_seconds is run duration, not recency, so sorting by it can resurrect an old try.
+      const attempts = snap.transcripts.filter((t) => t.parent_job_id === j.id);
+      const currentAttempt = attempts.at(-1);
+      const latestSuccessful = attempts.filter((attempt) => attempt.status === "done").at(-1);
+      const activeAttempt = currentAttempt && (currentAttempt.status === "running" || currentAttempt.status === "queued");
+      const status = activeAttempt ? "transcribing" : latestSuccessful ? "ready" : "downloaded";
+      const speakers = latestSuccessful?.speaker_count && latestSuccessful.speaker_count > 0 ? latestSuccessful.speaker_count : undefined;
+      const origin = originOf(j.url);
       return {
-        id: j.id, title: j.title || j.url, src: originOf(j.url),
-        dur: tj?.duration_seconds || 0, status, prog: tj?.progress_pct ?? 0,
+        id: j.id, title: j.title || j.url, src: origin ?? "—",
+        dur: latestSuccessful?.duration_seconds || 0, status, prog: activeAttempt ? currentAttempt.progress_pct : latestSuccessful?.progress_pct ?? currentAttempt?.progress_pct ?? 0,
         clips: clipCount(j.id),
-        kind: speakers > 1 ? `podcast · ${speakers} speakers` : "talking-head",
-        channel: originOf(j.url) === "file" ? "local file" : originOf(j.url),
-        res: "—", fps: 30, size: human(j.total_bytes || j.downloaded_bytes),
-        lang: tj?.language_detected || "—", added: ago(j.elapsed_seconds), scenes: 1,
-        transcriptId: tj?.status === "done" ? tj.id : undefined, speakerCount: speakers,
+        kind: speakers ? `${speakers} speaker${speakers === 1 ? "" : "s"}` : "—",
+        channel: origin === "file" ? "local file" : origin ?? "—",
+        res: "—", size: human(j.total_bytes || j.downloaded_bytes),
+        lang: latestSuccessful?.language_detected || "—", added: "—",
+        transcriptId: latestSuccessful?.id, speakerCount: speakers,
       };
     })
     .reverse();
@@ -161,19 +166,34 @@ export function mapClips(snap: EventsSnapshot | null): SpoolClip[] {
   for (const [cid, jobs] of byClip) {
     const cut = jobs.find((j) => j.kind === "cut") ?? jobs.find((j) => j.kind === "pipeline");
     const render = jobs.filter((j) => (j.kind === "export" || j.kind === "pipeline") && j.status === "done" && j.result.render_id).at(-1);
-    const active = jobs.find((j) => j.status === "running" || j.status === "queued");
-    const cap2 = jobs.filter((j) => j.kind === "caption" || j.kind === "pipeline").at(-1);
+    const active = jobs.filter((j) => j.status === "running" || j.status === "queued").at(-1);
+    const reframe = jobs.filter((j) => (j.kind === "reframe" || j.kind === "pipeline") && j.status === "done").at(-1);
+    const cap2 = jobs.filter((j) => (j.kind === "caption" || j.kind === "pipeline") && j.status === "done").at(-1);
+    const latest = jobs.at(-1);
     const win = cut?.result;
     const mode = (cut?.params?.mode as string) || (jobs.find((j) => j.kind === "moments")?.result.mode as string) || "";
-    const status = render ? "ready" : active ? "rendering" : "queued";
+    const status = render
+      ? "ready"
+      : active
+        ? active.status === "queued" ? "queued" : "rendering"
+        : latest?.status === "error" || latest?.status === "cancelled"
+          ? latest.status
+          : cut?.status === "done" ? "ready" : "—";
+    const aspect = (render?.result.aspect as string | undefined)
+      ?? (reframe?.result.aspect as string | undefined)
+      ?? (reframe?.params?.aspect as string | undefined);
+    const style = (cap2?.result.style as string | undefined)
+      ?? (cap2?.params?.style as string | undefined);
+    const renderPreset = (render?.result.preset as string | undefined)
+      ?? (render?.params?.preset as string | undefined);
     out.push({
       id: cid,
       title: clipTitle(jobs, cid),
       src: cut?.source_id || jobs[0]?.source_id || "",
       dur: win?.start != null && win?.end != null ? win.end - win.start : 0,
-      aspect: (render?.result.aspect as string) || (cut?.params?.aspect as string) || "9:16",
-      style: (cap2?.result.style as string) || (cap2?.params?.style as string) || "opus",
-      platform: PLAT_OF[(render?.result.preset as string) || ""] || "tiktok",
+      aspect,
+      style,
+      platform: renderPreset ? PLAT_OF[renderPreset] : undefined,
       status, prog: active?.progress_pct ?? 0, renderId: render?.result.render_id,
       tags: mode ? [cap(mode)] : [],
       start: win?.start, end: win?.end,
@@ -189,8 +209,10 @@ export function mapJobs(snap: EventsSnapshot | null): SpoolJob[] {
     if (j.dismissed) continue;
     if (j.status === "done")
       jobs.push({ id: j.id, type: "download", domain: "download", label: j.title || j.url, src: j.id, status: "done", prog: 100, stage: "complete", eta: "—", elapsed: j.human?.elapsed || "—" });
-    else if (j.status === "error" || j.status === "cancelled")
-      jobs.push({ id: j.id, type: "download", domain: "download", label: j.title || j.url, src: j.id, status: "failed", prog: j.progress_pct, stage: j.error_message || "error", eta: "—", elapsed: j.human?.elapsed || "—", err: true });
+    else if (j.status === "error")
+      jobs.push({ id: j.id, type: "download", domain: "download", label: j.title || j.url, src: j.id, status: "failed", prog: j.progress_pct, stage: j.error_message || "error", eta: "—", elapsed: j.human?.elapsed || "—", err: true, errorCode: j.error_category, errorMessage: j.error_message });
+    else if (j.status === "cancelled")
+      jobs.push({ id: j.id, type: "download", domain: "download", label: j.title || j.url, src: j.id, status: "cancelled", prog: j.progress_pct, stage: j.error_message || "cancelled", eta: "—", elapsed: j.human?.elapsed || "—", errorCode: j.error_category, errorMessage: j.error_message });
     else if (j.status === "paused")
       jobs.push({ id: j.id, type: "download", domain: "download", label: j.title || j.url, src: j.id, status: "paused", prog: j.progress_pct, stage: "paused", eta: "—", elapsed: j.human?.elapsed || "—" });
     else
@@ -200,14 +222,16 @@ export function mapJobs(snap: EventsSnapshot | null): SpoolJob[] {
     if (t.dismissed) continue;
     if (t.status === "running" || t.status === "queued")
       jobs.push({ id: t.id, type: "transcribe", domain: "transcribe", label: t.human?.summary || "transcribe", src: t.parent_job_id, status: t.status === "running" ? "running" : "queued", prog: t.progress_pct, stage: "whisper · on-device", eta: "—", elapsed: t.human?.elapsed || "—" });
+    else if (t.status === "error" || t.status === "cancelled")
+      jobs.push({ id: t.id, type: "transcribe", domain: "transcribe", label: t.human?.summary || "transcribe", src: t.parent_job_id, status: t.status === "error" ? "failed" : "cancelled", prog: t.progress_pct, stage: t.error_message || (t.status === "error" ? "transcription failed" : "cancelled"), eta: "—", elapsed: t.human?.elapsed || "—", err: t.status === "error", errorCode: t.error_category, errorMessage: t.error_message });
   }
   for (const c of snap.clips) {
     if (c.dismissed) continue;
     if (c.status === "done" && c.kind === "moments") continue;
-    const type = c.kind === "moments" ? "transcribe" : "render";
+    const type = c.kind === "moments" ? "analysis" : "render";
     const st = c.status === "running" ? "running" : c.status === "queued" ? "queued" : c.status === "done" ? "done" : c.status === "error" ? "failed" : c.status;
-    if (st === "done" || st === "failed" || st === "running" || st === "queued")
-      jobs.push({ id: c.id, type, domain: "clip", label: `${cap(c.kind)} · ${(c.clip_id || c.source_id || "").slice(0, 8)}`, src: c.source_id || "", status: st, prog: c.progress_pct, stage: c.stage || c.error_message || c.kind, eta: "—", elapsed: c.human?.elapsed || "—", err: c.status === "error" });
+    if (st === "done" || st === "failed" || st === "cancelled" || st === "running" || st === "queued")
+      jobs.push({ id: c.id, type, domain: "clip", label: `${cap(c.kind)} · ${(c.clip_id || c.source_id || "").slice(0, 8)}`, src: c.source_id || "", status: st, prog: c.progress_pct, stage: (c.status === "error" || c.status === "cancelled" ? c.error_message : null) || c.stage || c.kind, eta: "—", elapsed: c.human?.elapsed || "—", err: c.status === "error", errorCode: c.error_category, errorMessage: c.error_message });
   }
   return jobs;
 }
@@ -215,8 +239,8 @@ export function mapJobs(snap: EventsSnapshot | null): SpoolJob[] {
 export function mapDownloads(snap: EventsSnapshot | null): SpoolDownload[] {
   if (!snap) return [];
   return snap.jobs.filter((j) => !j.dismissed).map((j) => ({
-    id: j.id, title: j.title || j.url, src: originOf(j.url), prog: j.progress_pct,
-    status: j.status === "done" ? "done" : j.status === "error" ? "error" : j.status === "cancelled" ? "error" : "downloading",
+    id: j.id, title: j.title || j.url, src: originOf(j.url) ?? "—", prog: j.progress_pct,
+    status: j.status,
     size: j.human?.size || "", speed: j.human?.speed || "", eta: j.human?.eta || "—", err: j.error_message,
   })).reverse();
 }
@@ -265,14 +289,17 @@ const ROI_COLORS = ["var(--roi-l)", "var(--roi-r)", "var(--accent)", "var(--warn
 export function buildTranscript(words: TranscriptWord[] | undefined): { lines: TranscriptLine[]; speakers: Record<string, SpeakerInfo> } {
   if (!words?.length) return { lines: [], speakers: {} };
   const live = words.filter((w) => !w.deleted && w.w.trim());
-  const speakerKeys = [...new Set(live.map((w) => w.speaker || "A"))];
+  const speakerKeys = [...new Set(live.map((w) => w.speaker || "unknown"))];
   const speakers: Record<string, SpeakerInfo> = {};
-  speakerKeys.forEach((k, i) => (speakers[k] = { name: k.length <= 2 ? `Speaker ${k}` : k, color: ROI_COLORS[i % ROI_COLORS.length]! }));
+  speakerKeys.forEach((k, i) => (speakers[k] = {
+    name: k === "unknown" ? "Unknown speaker" : k.length <= 2 ? `Speaker ${k}` : k,
+    color: ROI_COLORS[i % ROI_COLORS.length]!,
+  }));
   const lines: TranscriptLine[] = [];
   let cur: TranscriptLine | null = null;
   let id = 0;
   for (const w of live) {
-    const sp = w.speaker || "A";
+    const sp = w.speaker || "unknown";
     const ti: number = w.start ?? cur?.t ?? 0;
     if (!cur || cur.sp !== sp || ti - (cur.tokens.at(-1)?.ti ?? ti) > 2.5) {
       cur = { id: id++, sp, t: ti, words: "", tokens: [] };
@@ -290,7 +317,6 @@ interface SpoolCtx {
   clips: SpoolClip[];
   jobs: SpoolJob[];
   downloads: SpoolDownload[];
-  recipes: string[];
   deps: SpoolDep[];
   snapshot: EventsSnapshot | null;
   nav: (screen: string, params?: { id?: string; tab?: string }) => void;
@@ -300,11 +326,11 @@ interface SpoolCtx {
   agentMessages: AgentMessage[]; working: boolean;
   askAgent: (text: string, sourceId?: string, confirmTool?: string) => void;
   answerElicit: (msg: AgentMessage, answer: unknown) => void;
-  makeClipsFrom: (sel: { source_id?: string; start?: number; end?: number; id?: string; title?: string }[], opts?: { aspect?: string; mode?: string; style?: string; preset?: string }) => void;
+  makeClipsFrom: (sel: { source_id?: string; start?: number; end?: number; id?: string; title?: string }[], opts?: { aspect?: string; mode?: string; style?: string; preset?: string }) => Promise<void>;
   /** Poll a clip job to a terminal state — pages sequence dependent jobs with it. */
   awaitClipJob: (id?: string) => Promise<void>;
   toasts: Toast[]; pushToast: (t: Omit<Toast, "id">) => void;
-  offline: boolean; toggleOffline: () => void;
+  offline: boolean; offlinePending: boolean; toggleOffline: () => void;
 }
 
 const Ctx = createContext<SpoolCtx | null>(null);
@@ -331,12 +357,20 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   // default is false (the Codex bridge IS egress) until the user opts in.
   const settingsQ = useEngineQuery((c) => c.getSettings());
   const offline = settingsQ.data?.offline ?? false;
+  const [offlinePending, setOfflinePending] = useState(false);
+  const offlineInFlight = useRef(false);
+  const providerMounted = useRef(false);
+  useEffect(() => {
+    providerMounted.current = true;
+    return () => { providerMounted.current = false; };
+  }, []);
   // useEngineQuery returns a fresh `reload` each render; hold the latest in a ref (written in
   // an effect, not in render) so toggleOffline stays referentially stable — only `offline`
   // should churn the context value, not reload's identity.
   const reloadSettingsRef = useRef(settingsQ.reload);
   useEffect(() => { reloadSettingsRef.current = settingsQ.reload; });
   const elicitSeq = useRef(0); // monotonic, collision-free ids for elicitation cards
+  const agentInFlight = useRef(false);
 
   const pushToast = useCallback((t: Omit<Toast, "id">) => {
     const id = Date.now() + Math.random();
@@ -345,10 +379,22 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const toggleOffline = useCallback(() => {
+    if (offlineInFlight.current) return;
+    offlineInFlight.current = true;
+    setOfflinePending(true);
     void client
       .updateSettings({ offline: !offline })
       .then(() => reloadSettingsRef.current())
-      .catch(() => pushToast({ icon: "alert", tone: "warn", title: "Couldn't update offline mode" }));
+      .catch((error: unknown) => pushToast({
+        icon: "alert",
+        tone: "warn",
+        title: "Couldn't update offline mode",
+        body: formatActionError(error),
+      }))
+      .finally(() => {
+        offlineInFlight.current = false;
+        if (providerMounted.current) setOfflinePending(false);
+      });
   }, [client, offline, pushToast]);
 
   const nav = useCallback((screen: string, params: { id?: string; tab?: string } = {}) => {
@@ -367,20 +413,18 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   const push = useCallback((m: AgentMessage) => setAgentMessages((a) => [...a, m]), []);
 
   const askAgent = useCallback((text: string, sourceId?: string, confirmTool?: string) => {
-    if (!text.trim()) return;
+    if (!text.trim() || agentInFlight.current) return;
+    agentInFlight.current = true;
     setAgentOpen(true);
     push({ role: "user", text });
     setWorking(true);
     client
       .agent(text, { sourceId, confirmTool })
       .then((r) => {
-        setWorking(false);
         // Real per-step tool trace from the ReAct loop (read tools that start no job are visible too).
         if (r.tools?.length)
           push({ role: "trace", tools: r.tools.map((t) => ({ name: t.name, arg: t.arg ?? "", ms: t.ms ?? 0 })) });
         push({ role: "agent", text: r.reply });
-        if (r.jobs?.length)
-          pushToast({ icon: "sparkles", tone: "info", title: `Agent started ${r.jobs.length} job${r.jobs.length > 1 ? "s" : ""}`, body: "Track them in the Render Queue" });
         if (r.action === "clarify" && r.question)
           push({ role: "elicit", id: "e" + ++elicitSeq.current, kind: (r.kind as AgentMessage["kind"]) ?? "enum", tag: "agent needs you", q: r.question, options: r.options ?? [], sourceId });
         if (r.action === "confirm" && r.pending)
@@ -392,11 +436,14 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
             sourceId, confirmFor: { text, tool: r.pending.tool },
           });
       })
-      .catch(() => {
+      .catch((error: unknown) => {
+        push({ role: "agent", text: formatActionError(error) });
+      })
+      .finally(() => {
+        agentInFlight.current = false;
         setWorking(false);
-        push({ role: "agent", text: "I couldn't reach the engine just now. Make sure it's running, then try again." });
       });
-  }, [client, push, pushToast]);
+  }, [client, push]);
 
   const answerElicit = useCallback((msg: AgentMessage, answer: unknown) => {
     setAgentMessages((a) => a.map((m) => (m === msg || (msg.id && m.id === msg.id) ? { ...m, answered: true, answer } : m)));
@@ -418,10 +465,13 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   const awaitClipJob = useCallback(async (id?: string): Promise<void> => {
     if (!id) return;
     for (let i = 0; i < 600; i++) {
-      const j = await client.getClipJob(id).catch(() => null);
-      if (!j || j.status === "done" || j.status === "error" || j.status === "cancelled") return;
+      const j = await client.getClipJob(id);
+      if (j.status === "done") return;
+      if (j.status === "error") throw new SpoolApiError(409, j.error_category || "clip_job_error", j.error_message || `Clip job ${id} failed.`);
+      if (j.status === "cancelled") throw new SpoolApiError(409, "cancelled", `Clip job ${id} was cancelled.`);
       await new Promise((r) => setTimeout(r, 1000));
     }
+    throw new SpoolApiError(0, "timeout", `Timed out waiting for clip job ${id}.`);
   }, [client]);
 
   /** Two paths, by what's passed:
@@ -430,52 +480,52 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
    *    each clip first (the user-requested flow).
    *  - An existing clip (the Editor's Render, id only) → caption (chosen style) + export, and go
    *    to the Render Queue to watch it. Reframe first if the Editor changed the format. */
-  const makeClipsFrom = useCallback((
+  const makeClipsFrom = useCallback(async (
     sel: { source_id?: string; start?: number; end?: number; id?: string; title?: string }[],
     opts: { aspect?: string; mode?: string; style?: string; preset?: string } = {},
-  ) => {
+  ): Promise<void> => {
+    const startedAtLocation = window.location.href;
     const aspect = opts.aspect ?? "9:16", mode = opts.mode ?? "pan", style = opts.style ?? "opus", preset = opts.preset ?? "tiktok";
     const fresh = sel.filter((c) => c.source_id && c.start != null && c.end != null);
     const existing = sel.filter((c) => c.id && !(c.source_id && c.start != null && c.end != null));
 
     if (fresh.length) {
-      // Fire all the cut+reframe pipelines, then count rejections — a failed START (e.g. a 409)
-      // used to vanish into `.catch(() => {})`; surface it so the user knows N of M didn't begin.
-      void Promise.allSettled(
+      const results = await Promise.allSettled(
         fresh.map((c) =>
           client.renderPipeline(c.source_id!, { start: c.start!, end: c.end!, aspect, mode, stop_after: "reframe" }),
         ),
-      ).then((results) => {
-        const failed = results.filter((r) => r.status === "rejected").length;
-        if (failed)
-          pushToast({ icon: "alert", tone: "warn", title: `${failed} of ${results.length} clips failed to start`,
-            body: "The rest are cutting — see the Clips tab." });
+      );
+      const failed = results.filter((result) => result.status === "rejected");
+      const succeeded = results.length - failed.length;
+      pushToast({
+        icon: failed.length ? "alert" : "scissors",
+        tone: failed.length ? "warn" : "ok",
+        title: `${succeeded} clip${succeeded === 1 ? "" : "s"} started · ${failed.length} failed`,
+        body: failed[0]
+          ? formatActionError(failed[0].reason, "A clip could not be started.")
+          : "Every clip was accepted by the render queue.",
       });
-      pushToast({ icon: "scissors", tone: "info", title: `Cutting ${fresh.length} clip${fresh.length > 1 ? "s" : ""}`,
-        body: "Auto-reframing to 9:16 — review each in the Clips tab, then render when you're happy." });
-      nav("project", { id: fresh[0]!.source_id!, tab: "Clips" });
+      if (succeeded > 0 && window.location.href === startedAtLocation)
+        nav("project", { id: fresh[0]!.source_id!, tab: "Clips" });
       return;
     }
     if (!existing.length) { pushToast({ icon: "alert", tone: "warn", title: "Nothing to render", body: "No clip or moment range to act on." }); return; }
-    for (const c of existing) {
-      // Burn the chosen caption style, then export — reframe first if the Editor changed the
-      // format. These are separate engine jobs that mutate the same files in sequence, so each
-      // MUST finish before the next starts (otherwise caption reads a half-written reframe →
-      // "moov atom not found"). Await each job's completion; the user watches it in the Queue.
-      void (async () => {
-        try {
-          if (opts.aspect || opts.mode) await awaitClipJob((await client.reframe(c.id!, { aspect, mode }))?.id);
-          await awaitClipJob((await client.caption(c.id!, { style }))?.id);
-          await client.render(c.id!, { preset });
-        } catch {
-          pushToast({ icon: "alert", tone: "warn", title: "Render chain failed",
-            body: "A step couldn't start or finish — check the Render Queue for the errored job." });
-        }
-      })();
-    }
-    pushToast({ icon: "film", tone: "info", title: `Rendering ${existing.length} clip${existing.length > 1 ? "s" : ""}`, body: "Burning captions + exporting — track it in the Render Queue" });
-    setAgentOpen(true);
-    nav("queue");
+    const results = await Promise.allSettled(existing.map(async (c) => {
+      if (opts.aspect || opts.mode) await awaitClipJob((await client.reframe(c.id!, { aspect, mode })).id);
+      await awaitClipJob((await client.caption(c.id!, { style })).id);
+      await client.render(c.id!, { preset });
+    }));
+    const failed = results.filter((result) => result.status === "rejected");
+    const succeeded = results.length - failed.length;
+    pushToast({
+      icon: failed.length ? "alert" : "film",
+      tone: failed.length ? "warn" : "ok",
+      title: `${succeeded} render${succeeded === 1 ? "" : "s"} started · ${failed.length} failed`,
+      body: failed[0]
+        ? formatActionError(failed[0].reason, "A render chain could not finish.")
+        : "Every render was accepted by the queue.",
+    });
+    if (succeeded > 0 && window.location.href === startedAtLocation) nav("queue");
   }, [client, nav, pushToast, awaitClipJob]);
 
   // Mappers walk the full snapshot; unmemoized they re-ran 4x on EVERY provider render —
@@ -498,17 +548,17 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<SpoolCtx>(
     () => ({
       client,
-      sources, clips, jobs, downloads, recipes: RECIPES, deps, snapshot,
+      sources, clips, jobs, downloads, deps, snapshot,
       nav, agentOpen, openAgent: () => setAgentOpen(true), toggleAgent: () => setAgentOpen((o) => !o), closeAgent: () => setAgentOpen(false),
       paletteOpen, openPalette: () => setPaletteOpen(true), closePalette: () => setPaletteOpen(false),
       shortcutsOpen, openShortcuts: () => setShortcutsOpen(true), closeShortcuts: () => setShortcutsOpen(false),
       agentMessages, working, askAgent, answerElicit, makeClipsFrom, awaitClipJob,
-      toasts, pushToast, offline, toggleOffline,
+      toasts, pushToast, offline, offlinePending, toggleOffline,
     }),
     [
       client, sources, clips, jobs, downloads, deps, snapshot, nav, agentOpen, paletteOpen,
       shortcutsOpen, agentMessages, working, askAgent, answerElicit, makeClipsFrom, awaitClipJob,
-      toasts, pushToast, offline, toggleOffline,
+      toasts, pushToast, offline, offlinePending, toggleOffline,
     ],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
