@@ -2095,6 +2095,10 @@ def test_pipeline_unknown_recipe_404(client, tmp_path):
 def test_produce_endpoint_submits_a_produce_job(client, tmp_path, monkeypatch):
     monkeypatch.setattr("clip.moments.find_moments", lambda *a, **k: [])
     app, c = client
+    assert c.patch("/api/v1/settings", json={
+        "reasoning_provider": "codex",
+        "reasoning_egress_consent": True,
+    }).status_code == 200
     _seed_done_transcript(app, tmp_path, words_data=_editable_words())   # source "abc"
     rid = c.post("/api/v1/recipes", json={"name": "R", "content_mode": "funny", "count": 3}).get_json()["id"]
     r = c.post("/api/v1/sources/abc/produce", json={"recipe_id": rid})
@@ -2132,6 +2136,10 @@ def test_produce_inline_recipe_whitelists_keys_into_recipe(client, tmp_path, mon
     # whitelisted (valid) keys reach produce_target and a junk key is dropped.
     monkeypatch.setattr("clip.moments.find_moments", lambda *a, **k: [])
     app, c = client
+    assert c.patch("/api/v1/settings", json={
+        "reasoning_provider": "codex",
+        "reasoning_egress_consent": True,
+    }).status_code == 200
     _seed_done_transcript(app, tmp_path, words_data=_editable_words())   # source "abc"
     captured = {}
     real = app.extensions["trove.clip_runner"].produce_target
