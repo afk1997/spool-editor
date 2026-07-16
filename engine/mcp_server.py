@@ -1,10 +1,10 @@
 """``trove-mcp`` — MCP (Model Context Protocol) server for Trove.
 
-Exposes the Trove HTTP API as a set of MCP tools so a coding agent
-(Claude Desktop, Cursor, Replit Agent, etc.) can drive Trove
-end-to-end: queue downloads, watch them complete, kick off
-transcription, fetch / export transcripts, search and replace
-inside transcripts, and manage whisper models.
+Exposes the Trove HTTP API as a set of MCP tools for coding agents
+(Claude Desktop, Cursor, Replit Agent, etc.). During Phase 0 all
+schemas remain advertised for compatibility, but the runtime allows
+only explicit read-only inspection tools. Manual UI, REST, and CLI
+mutations remain available.
 
 Transport: stdio (the default for desktop MCP clients).
 
@@ -42,12 +42,55 @@ from trove_client import TroveClient, TroveError
 # config) takes effect on the next tool call without rebuilding.
 _client = TroveClient()
 
+READ_ONLY_TOOLS: frozenset[str] = frozenset({
+    "get_clip_job",
+    "get_job",
+    "get_recipe",
+    "get_settings",
+    "get_transcript",
+    "get_transcript_chunk",
+    "get_transcript_status",
+    "get_watch",
+    "list_brand_kits",
+    "list_clip_jobs",
+    "list_jobs",
+    "list_models",
+    "list_recipes",
+    "list_transcripts",
+    "list_watches",
+    "model_install_progress",
+    "rank_candidates",
+    "search_transcripts",
+    "server_capabilities",
+    "source_energy",
+    "source_filmstrip",
+    "source_scenes",
+    "storage_info",
+})
 
-def _safe(call):
+MUTATION_DISABLED_ERROR = {
+    "error": "agent_mutation_disabled",
+    "message": "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
+}
+
+
+def _guard_tool(tool_name: str) -> dict | None:
+    """Return the Phase 0 disabled envelope before a non-read tool can do any work."""
+    if tool_name not in READ_ONLY_TOOLS:
+        return dict(MUTATION_DISABLED_ERROR)
+    return None
+
+
+def _safe(tool_name, call):
     """Wrap a TroveError into an MCP-friendly ``{error: str}`` dict so
     the agent always gets a machine-readable response, never a stack
-    trace. Any other exception bubbles up to the SDK, which already
-    serializes it as a tool error."""
+    trace. The named Phase 0 guard runs before ``call`` is evaluated,
+    so a disabled schema can never reach TroveClient. Any other
+    exception bubbles up to the SDK, which already serializes it as a
+    tool error."""
+    disabled = _guard_tool(tool_name)
+    if disabled:
+        return disabled
     try:
         return call()
     except TroveError as e:
@@ -100,7 +143,7 @@ def _build_server():
 
         Returns ``{jobs, total, returned, limit, offset}``.
         """
-        return _safe(lambda: _client.list_jobs(
+        return _safe("list_jobs", lambda: _client.list_jobs(
             status=status, limit=limit, offset=offset, order=order))
 
     @mcp.tool()
@@ -120,7 +163,7 @@ def _build_server():
           ``summary`` one-liner you can paste straight into a reply
           (e.g. ``"downloading · 42% · 12.4 MB / 29.7 MB · 5.2 MB/s · ETA 0:03"``).
         """
-        return _safe(lambda: _client.get_job(job_id))
+        return _safe("get_job", lambda: _client.get_job(job_id))
 
     @mcp.tool()
     def bulk_download(
@@ -139,7 +182,7 @@ def _build_server():
         is either ``{url, id, title}`` (success) or ``{url, error}`` (failure)
         — partial failures don't fail the whole call.
         """
-        return _safe(lambda: _client.bulk_download(
+        return _safe("bulk_download", lambda: _client.bulk_download(
             urls, fmt=format, auto_transcribe=auto_transcribe))
 
     @mcp.tool()
@@ -150,7 +193,7 @@ def _build_server():
         (``by_job``, sorted biggest first) and any orphan files left
         behind by crashes.
         """
-        return _safe(lambda: _client.storage_info())
+        return _safe("storage_info", lambda: _client.storage_info())
 
     @mcp.tool()
     def download_media(
@@ -168,29 +211,29 @@ def _build_server():
                 active model is installed.
             title: Optional override; defaults to the source title.
         """
-        return _safe(lambda: _client.submit_download(
+        return _safe("download_media", lambda: _client.submit_download(
             url, fmt=format, auto_transcribe=auto_transcribe,
             title=title or None))
 
     @mcp.tool()
     def pause_download(job_id: str) -> dict:
         """Pause an in-flight download. The .part file is preserved."""
-        return _safe(lambda: _client.pause_job(job_id))
+        return _safe("pause_download", lambda: _client.pause_job(job_id))
 
     @mcp.tool()
     def resume_download(job_id: str) -> dict:
         """Resume a paused download (re-uses the persisted format/url)."""
-        return _safe(lambda: _client.resume_job(job_id))
+        return _safe("resume_download", lambda: _client.resume_job(job_id))
 
     @mcp.tool()
     def cancel_download(job_id: str) -> dict:
         """Cancel a download. Removes any partial output."""
-        return _safe(lambda: _client.cancel_job(job_id))
+        return _safe("cancel_download", lambda: _client.cancel_job(job_id))
 
     @mcp.tool()
     def dismiss_download(job_id: str) -> dict:
         """Dismiss a terminal job (done/error/cancelled) and delete its file."""
-        r = _safe(lambda: _client.dismiss_job(job_id))
+        r = _safe("dismiss_download", lambda: _client.dismiss_job(job_id))
         return {"ok": True, "job_id": job_id} if r is None else r
 
     # ---- transcripts ------------------------------------------------
@@ -206,7 +249,7 @@ def _build_server():
 
         Same paging semantics as ``list_jobs``.
         """
-        return _safe(lambda: _client.list_transcripts(
+        return _safe("list_transcripts", lambda: _client.list_transcripts(
             status=status, limit=limit, offset=offset, order=order))
 
     @mcp.tool()
@@ -222,7 +265,7 @@ def _build_server():
         ``transcript_id``, ``parent_job_id``, ``title``, ``snippet``,
         ``start_seconds`` and ``end_seconds`` so the agent can deep-link.
         """
-        return _safe(lambda: _client.search_transcripts(
+        return _safe("search_transcripts", lambda: _client.search_transcripts(
             query, limit=limit, context=context))
 
     @mcp.tool()
@@ -237,7 +280,7 @@ def _build_server():
         ``summary`` one-liner (e.g. ``"running · 42% · of 9:12 audio
         · elapsed 1:08 · model=ggml-tiny.bin"``).
         """
-        return _safe(lambda: _client.get_transcript_status(transcript_id))
+        return _safe("get_transcript_status", lambda: _client.get_transcript_status(transcript_id))
 
     @mcp.tool()
     def transcribe(parent_job_id: str) -> dict:
@@ -248,12 +291,12 @@ def _build_server():
         Requires an active whisper model (use ``install_model`` /
         ``set_active_model`` first if needed).
         """
-        return _safe(lambda: _client.transcribe(parent_job_id))
+        return _safe("transcribe", lambda: _client.transcribe(parent_job_id))
 
     @mcp.tool()
     def cancel_transcribe(transcript_id: str) -> dict:
         """Cancel an in-flight transcribe job."""
-        return _safe(lambda: _client.cancel_transcribe(transcript_id))
+        return _safe("cancel_transcribe", lambda: _client.cancel_transcribe(transcript_id))
 
     @mcp.tool()
     def get_transcript_chunk(transcript_id: str, format: str = "txt",
@@ -287,7 +330,7 @@ def _build_server():
         kw = {"offset": offset}
         if limit:
             kw["limit"] = limit
-        return _safe(lambda: _client.get_transcript_chunk(
+        return _safe("get_transcript_chunk", lambda: _client.get_transcript_chunk(
             transcript_id, format, **kw))
 
     @mcp.tool()
@@ -306,7 +349,7 @@ def _build_server():
         """
         if format not in {"txt", "srt", "vtt", "json"}:
             return {"error": "format must be txt|srt|vtt|json"}
-        body = _safe(lambda: _client.export_transcript(transcript_id, format))
+        body = _safe("get_transcript", lambda: _client.export_transcript(transcript_id, format))
         if isinstance(body, dict) and body.get("error"):
             return body
         if format == "json":
@@ -325,14 +368,14 @@ def _build_server():
         token, and which transcript export formats are supported.
         Safe to call without authentication.
         """
-        return _safe(lambda: _client.capabilities())
+        return _safe("server_capabilities", lambda: _client.capabilities())
 
     # ---- models -----------------------------------------------------
 
     @mcp.tool()
     def list_models() -> dict:
         """List known whisper models with installed/active state."""
-        return _safe(lambda: _client.list_models())
+        return _safe("list_models", lambda: _client.list_models())
 
     @mcp.tool()
     def install_model(name: str) -> dict:
@@ -342,22 +385,22 @@ def _build_server():
         Names are e.g. ``"ggml-tiny.bin"``, ``"ggml-base.bin"``,
         ``"ggml-small.bin"``, ``"ggml-medium.bin"``.
         """
-        return _safe(lambda: _client.install_model(name))
+        return _safe("install_model", lambda: _client.install_model(name))
 
     @mcp.tool()
     def model_install_progress() -> dict:
         """Get the current model-install download progress."""
-        return _safe(lambda: _client.model_install_progress())
+        return _safe("model_install_progress", lambda: _client.model_install_progress())
 
     @mcp.tool()
     def set_active_model(name: str) -> dict:
         """Mark an installed model as the active one (used for new transcribes)."""
-        return _safe(lambda: _client.set_active_model(name))
+        return _safe("set_active_model", lambda: _client.set_active_model(name))
 
     @mcp.tool()
     def remove_model(name: str) -> dict:
         """Delete an installed model from disk."""
-        r = _safe(lambda: _client.remove_model(name))
+        r = _safe("remove_model", lambda: _client.remove_model(name))
         return {"ok": True, "name": name} if r is None else r
 
     # ---- clips (the render queue) -----------------------------------
@@ -381,7 +424,7 @@ def _build_server():
         clip-job; poll ``get_clip_job`` for ``result.candidates`` —
         ``[{start, end, title, rationale, signals}]``. Only transcript text egresses.
         """
-        return _safe(lambda: _client.find_moments(source_id, mode=mode, count=count))
+        return _safe("find_moments", lambda: _client.find_moments(source_id, mode=mode, count=count))
 
     @mcp.tool()
     def rank_candidates(source_id: str, candidates: list[dict],
@@ -393,13 +436,13 @@ def _build_server():
         length_fit`` (need not sum to 1). Returns ``{candidates, count, weights}`` re-scored and
         sorted best-first. The score is a transparent weighted sum of those named factors, so
         every candidate's ``factors`` + ``score`` explain the ordering (no opaque 0–99)."""
-        return _safe(lambda: _client.rank_candidates(source_id, candidates, weights=weights))
+        return _safe("rank_candidates", lambda: _client.rank_candidates(source_id, candidates, weights=weights))
 
     @mcp.tool()
     def cut_clip(source_id: str, start: float, end: float) -> dict:
         """Cut a clip ``[start, end]`` (seconds) from a source. The clip-job's
         ``result.clip_id`` drives the subsequent reframe/caption/render calls."""
-        return _safe(lambda: _client.cut_clip(source_id, start=start, end=end))
+        return _safe("cut_clip", lambda: _client.cut_clip(source_id, start=start, end=end))
 
     @mcp.tool()
     async def reframe_clip(clip_id: str, aspect: str | None = None,
@@ -410,6 +453,9 @@ def _build_server():
         user (aspect ∈ 9:16/16:9/1:1/4:5; mode ∈ pan/split/center) — the spec's
         human-judgment pause. Clients without elicitation support fall back to defaults.
         """
+        disabled = _guard_tool("reframe_clip")
+        if disabled:
+            return disabled
         if (aspect is None or mode is None) and ctx is not None:
             try:
                 res = await ctx.elicit(
@@ -421,20 +467,20 @@ def _build_server():
                     mode = mode or res.data.mode
             except Exception:
                 pass  # elicitation unsupported / failed → fall through to defaults
-        return _safe(lambda: _client.reframe_clip(
+        return _safe("reframe_clip", lambda: _client.reframe_clip(
             clip_id, aspect=aspect or "9:16", mode=mode or "pan"))
 
     @mcp.tool()
     def caption_clip(clip_id: str, style: str = "opus") -> dict:
         """Generate + burn styled captions (``style`` ∈ opus/karaoke/minimal), sliced to
         the clip window from the source transcript — no re-transcribe."""
-        return _safe(lambda: _client.caption_clip(clip_id, style=style))
+        return _safe("caption_clip", lambda: _client.caption_clip(clip_id, style=style))
 
     @mcp.tool()
     def render_clip(clip_id: str, preset: str = "tiktok", fast: bool = True) -> dict:
         """Export the clip to a platform preset (tiktok/reels/shorts/youtube/linkedin/x)
         at -14 LUFS. ``result.render_id`` identifies the produced .mp4."""
-        return _safe(lambda: _client.render_clip(clip_id, preset=preset, fast=fast))
+        return _safe("render_clip", lambda: _client.render_clip(clip_id, preset=preset, fast=fast))
 
     @mcp.tool()
     def render_pipeline(source_id: str, start: float, end: float, aspect: str = "9:16",
@@ -442,7 +488,7 @@ def _build_server():
         """One-shot cut→reframe→caption→export of a source window into a finished vertical
         clip. Returns a clip-job; poll ``get_clip_job`` for staged progress + ``result``
         (clip_id, render_id, output_path)."""
-        return _safe(lambda: _client.render_pipeline(
+        return _safe("render_pipeline", lambda: _client.render_pipeline(
             source_id, start=start, end=end, aspect=aspect, mode=mode,
             style=style, preset=preset))
 
@@ -450,23 +496,23 @@ def _build_server():
     def list_clip_jobs(kind: str = "", status: str = "", limit: int = 100) -> dict:
         """List clip/render jobs (the render queue). Filter by ``kind`` (moments/cut/
         reframe/caption/export/pipeline) and/or ``status`` (comma-separated)."""
-        return _safe(lambda: _client.list_clip_jobs(kind=kind, status=status, limit=limit))
+        return _safe("list_clip_jobs", lambda: _client.list_clip_jobs(kind=kind, status=status, limit=limit))
 
     @mcp.tool()
     def get_clip_job(job_id: str) -> dict:
         """Get one clip/render job — status, staged progress, and ``result`` (candidates
         for moments jobs; clip_id / render_id / output_path for the rest)."""
-        return _safe(lambda: _client.get_clip_job(job_id))
+        return _safe("get_clip_job", lambda: _client.get_clip_job(job_id))
 
     @mcp.tool()
     def cancel_clip_job(job_id: str) -> dict:
         """Cancel a queued/running clip job (kills the underlying ffmpeg)."""
-        return _safe(lambda: _client.cancel_clip_job(job_id))
+        return _safe("cancel_clip_job", lambda: _client.cancel_clip_job(job_id))
 
     @mcp.tool()
     def dismiss_clip_job(job_id: str) -> dict:
         """Drop a finished (done/error/cancelled) clip job from the queue."""
-        r = _safe(lambda: _client.dismiss_clip_job(job_id))
+        r = _safe("dismiss_clip_job", lambda: _client.dismiss_clip_job(job_id))
         return {"ok": True, "job_id": job_id} if r is None else r
 
     # ---- automation: produce / recipes / watches / brand kits (Phase 3) ----
@@ -484,18 +530,18 @@ def _build_server():
         # Strip the reserved (non-inline) keys so they can't collide with the positional
         # ``source_id`` / keyword ``recipe_id`` in the splat (TypeError: multiple values).
         recipe = {k: v for k, v in (recipe or {}).items() if k not in ("source_id", "recipe_id")}
-        return _safe(lambda: _client.produce(source_id, recipe_id=recipe_id or None, **recipe))
+        return _safe("produce_clips", lambda: _client.produce(source_id, recipe_id=recipe_id or None, **recipe))
 
     @mcp.tool()
     def list_recipes() -> dict:
         """List saved recipes (a recipe = the reusable pipeline decisions: content mode + count,
         ranking weights, render settings). Use a recipe's ``id`` with ``produce_clips``."""
-        return _safe(lambda: _client.list_recipes())
+        return _safe("list_recipes", lambda: _client.list_recipes())
 
     @mcp.tool()
     def get_recipe(recipe_id: str) -> dict:
         """Get one saved recipe by id."""
-        return _safe(lambda: _client.get_recipe(recipe_id))
+        return _safe("get_recipe", lambda: _client.get_recipe(recipe_id))
 
     @mcp.tool()
     def create_recipe(recipe: dict) -> dict:
@@ -503,73 +549,73 @@ def _build_server():
         q&a), count, aspect (9:16/16:9/1:1/4:5), reframe_mode (pan/split/center), caption_preset
         (opus/karaoke/minimal), platform (tiktok/reels/shorts/youtube/linkedin/x), fast (bool),
         brand_kit_id, weights (dict over hook/self_contained/arc/energy/length_fit)."""
-        return _safe(lambda: _client.create_recipe(recipe))
+        return _safe("create_recipe", lambda: _client.create_recipe(recipe))
 
     @mcp.tool()
     def update_recipe(recipe_id: str, changes: dict) -> dict:
         """Patch a saved recipe with the changed fields (same fields as create_recipe)."""
-        return _safe(lambda: _client.update_recipe(recipe_id, changes))
+        return _safe("update_recipe", lambda: _client.update_recipe(recipe_id, changes))
 
     @mcp.tool()
     def delete_recipe(recipe_id: str) -> dict:
         """Delete a saved recipe."""
-        r = _safe(lambda: _client.delete_recipe(recipe_id))
+        r = _safe("delete_recipe", lambda: _client.delete_recipe(recipe_id))
         return {"ok": True, "recipe_id": recipe_id} if r is None else r
 
     @mcp.tool()
     def list_watches() -> dict:
         """List folder/channel/playlist watches (new videos auto-produce ranked clips per a recipe
         into the review queue). Each shows its seen/pending/producing/produced reconcile state."""
-        return _safe(lambda: _client.list_watches())
+        return _safe("list_watches", lambda: _client.list_watches())
 
     @mcp.tool()
     def get_watch(watch_id: str) -> dict:
         """Get one watch by id."""
-        return _safe(lambda: _client.get_watch(watch_id))
+        return _safe("get_watch", lambda: _client.get_watch(watch_id))
 
     @mcp.tool()
     def create_watch(watch: dict) -> dict:
         """Create a watch. Fields: name, kind (folder/channel/playlist), target (a local folder path
         or a channel/playlist URL), recipe_id (the recipe to produce with), enabled (bool)."""
-        return _safe(lambda: _client.create_watch(watch))
+        return _safe("create_watch", lambda: _client.create_watch(watch))
 
     @mcp.tool()
     def update_watch(watch_id: str, changes: dict) -> dict:
         """Patch a watch (name/kind/target/recipe_id/enabled)."""
-        return _safe(lambda: _client.update_watch(watch_id, changes))
+        return _safe("update_watch", lambda: _client.update_watch(watch_id, changes))
 
     @mcp.tool()
     def delete_watch(watch_id: str) -> dict:
         """Delete a watch."""
-        r = _safe(lambda: _client.delete_watch(watch_id))
+        r = _safe("delete_watch", lambda: _client.delete_watch(watch_id))
         return {"ok": True, "watch_id": watch_id} if r is None else r
 
     @mcp.tool()
     def scan_watch(watch_id: str) -> dict:
         """Reconcile a watch now: detect new videos → ingest → produce per its recipe once
         transcribed. Returns this tick's ingested / producing / produced source ids."""
-        return _safe(lambda: _client.scan_watch(watch_id))
+        return _safe("scan_watch", lambda: _client.scan_watch(watch_id))
 
     @mcp.tool()
     def list_brand_kits() -> dict:
         """List brand kits (a reusable look: caption preset + overrides + watermark + lower-third)."""
-        return _safe(lambda: _client.list_brand_kits())
+        return _safe("list_brand_kits", lambda: _client.list_brand_kits())
 
     @mcp.tool()
     def create_brand_kit(kit: dict) -> dict:
         """Create a brand kit. Fields: name, palette (list of hex), caption_preset, caption_overrides
         (dict), watermark (str), lower_third (str), fonts. Reference its id from a recipe's brand_kit_id."""
-        return _safe(lambda: _client.create_brand_kit(kit))
+        return _safe("create_brand_kit", lambda: _client.create_brand_kit(kit))
 
     @mcp.tool()
     def update_brand_kit(kit_id: str, changes: dict) -> dict:
         """Patch a brand kit (same fields as create_brand_kit)."""
-        return _safe(lambda: _client.update_brand_kit(kit_id, changes))
+        return _safe("update_brand_kit", lambda: _client.update_brand_kit(kit_id, changes))
 
     @mcp.tool()
     def delete_brand_kit(kit_id: str) -> dict:
         """Delete a brand kit."""
-        r = _safe(lambda: _client.delete_brand_kit(kit_id))
+        r = _safe("delete_brand_kit", lambda: _client.delete_brand_kit(kit_id))
         return {"ok": True, "kit_id": kit_id} if r is None else r
 
     # ---- settings / transcript-edit / timeline signals (UI<->MCP<->CLI parity) ----
@@ -579,46 +625,46 @@ def _build_server():
     @mcp.tool()
     def get_settings() -> dict:
         """Read writable engine config (render defaults: fast/preset/aspect, offline egress switch, concurrency, MCP transport)."""
-        return _safe(lambda: _client.get_settings())
+        return _safe("get_settings", lambda: _client.get_settings())
 
     @mcp.tool()
     def update_settings(changes: dict) -> dict:
         """Patch writable engine config (the changed keys only)."""
-        return _safe(lambda: _client.update_settings(changes))
+        return _safe("update_settings", lambda: _client.update_settings(changes))
 
     @mcp.tool()
     def edit_word(transcript_id: str, word_index: int, op: str, text: str = "") -> dict:
         """Edit ONE transcript word in place — op = set_text|delete|insert_after|merge_next (``text``
         required for set_text/insert_after). Re-renders srt/vtt/txt + re-indexes. Fix a misheard word
         before captioning."""
-        return _safe(lambda: _client.edit_word(transcript_id, word_index, op, text=text or None))
+        return _safe("edit_word", lambda: _client.edit_word(transcript_id, word_index, op, text=text or None))
 
     @mcp.tool()
     def dismiss_transcribe(transcript_id: str) -> dict:
         """Drop a finished transcribe job from the list."""
-        r = _safe(lambda: _client.dismiss_transcribe(transcript_id))
+        r = _safe("dismiss_transcribe", lambda: _client.dismiss_transcribe(transcript_id))
         return {"ok": True, "transcript_id": transcript_id} if r is None else r
 
     @mcp.tool()
     def source_energy(source_id: str, buckets: int = 96, start: float | None = None,
                       end: float | None = None) -> dict:
         """Normalized 0..1 loudness envelope (the audio-energy waveform); optional start/end window it."""
-        return _safe(lambda: _client.source_energy(source_id, buckets=buckets, start=start, end=end))
+        return _safe("source_energy", lambda: _client.source_energy(source_id, buckets=buckets, start=start, end=end))
 
     @mcp.tool()
     def source_scenes(source_id: str, start: float, end: float) -> dict:
         """Scene-cut timestamps within [start, end] (the editor timeline's Scenes lane)."""
-        return _safe(lambda: _client.source_scenes(source_id, start=start, end=end))
+        return _safe("source_scenes", lambda: _client.source_scenes(source_id, start=start, end=end))
 
     @mcp.tool()
     def source_filmstrip(source_id: str, start: float, end: float, frames: int = 12) -> dict:
         """Thumbnail filmstrip data-URI across [start, end] (the editor timeline's Video lane)."""
-        return _safe(lambda: _client.source_filmstrip(source_id, start=start, end=end, frames=frames))
+        return _safe("source_filmstrip", lambda: _client.source_filmstrip(source_id, start=start, end=end, frames=frames))
 
     @mcp.tool()
     def download_render(clip_id: str, render_id: str, save_to: str) -> dict:
         """Save a finished render .mp4 to a local path (the produced clip bytes)."""
-        return _safe(lambda: _client.download_render(clip_id, render_id, stream_to=save_to))
+        return _safe("download_render", lambda: _client.download_render(clip_id, render_id, stream_to=save_to))
 
     # ---- resources --------------------------------------------------
     # Resources let the agent surface live application state to the user
@@ -627,24 +673,24 @@ def _build_server():
     @mcp.resource("trove://jobs")
     def jobs_resource() -> str:
         import json as _json
-        return _json.dumps(_safe(lambda: _client.list_jobs()), indent=2)
+        return _json.dumps(_safe("list_jobs", lambda: _client.list_jobs()), indent=2)
 
     @mcp.resource("trove://transcripts")
     def transcripts_resource() -> str:
         import json as _json
-        return _json.dumps(_safe(lambda: _client.list_transcripts()), indent=2)
+        return _json.dumps(_safe("list_transcripts", lambda: _client.list_transcripts()), indent=2)
 
     @mcp.resource("trove://transcript/{tid}")
     def transcript_resource(tid: str) -> str:
         import json as _json
-        body = _safe(lambda: _client.export_transcript(tid, "json"))
+        body = _safe("get_transcript", lambda: _client.export_transcript(tid, "json"))
         return _json.dumps(body, indent=2) if isinstance(body, dict) else str(body)
 
     @mcp.resource("trove://transcript/{tid}/text")
     def transcript_text_resource(tid: str) -> str:
         """Plain-text export of a transcript — handy for the agent to
         ingest as a single string without parsing the v2 JSON tree."""
-        body = _safe(lambda: _client.export_transcript(tid, "txt"))
+        body = _safe("get_transcript", lambda: _client.export_transcript(tid, "txt"))
         if isinstance(body, dict) and body.get("error"):
             return f"(error: {body['error']})"
         return body if isinstance(body, str) else str(body)
@@ -660,32 +706,32 @@ def _build_server():
     @mcp.resource("trove://storage")
     def storage_resource() -> str:
         import json as _json
-        return _json.dumps(_safe(lambda: _client.storage_info()), indent=2)
+        return _json.dumps(_safe("storage_info", lambda: _client.storage_info()), indent=2)
 
     @mcp.resource("spool://clips")
     def clips_resource() -> str:
         """The render queue — every clip/render job and its status (spec §4)."""
         import json as _json
-        return _json.dumps(_safe(lambda: _client.list_clip_jobs()), indent=2)
+        return _json.dumps(_safe("list_clip_jobs", lambda: _client.list_clip_jobs()), indent=2)
 
     @mcp.resource("spool://clips/{job_id}")
     def clip_resource(job_id: str) -> str:
         """One clip/render job, including its ``result`` — candidates for a moments job,
         or the produced render's id + output path."""
         import json as _json
-        return _json.dumps(_safe(lambda: _client.get_clip_job(job_id)), indent=2)
+        return _json.dumps(_safe("get_clip_job", lambda: _client.get_clip_job(job_id)), indent=2)
 
     @mcp.resource("spool://recipes")
     def recipes_resource() -> str:
         """All saved recipes — the reusable pipelines that drive produce + watch automation."""
         import json as _json
-        return _json.dumps(_safe(lambda: _client.list_recipes()), indent=2)
+        return _json.dumps(_safe("list_recipes", lambda: _client.list_recipes()), indent=2)
 
     @mcp.resource("spool://watches")
     def watches_resource() -> str:
         """All folder/channel/playlist watches + their reconcile state."""
         import json as _json
-        return _json.dumps(_safe(lambda: _client.list_watches()), indent=2)
+        return _json.dumps(_safe("list_watches", lambda: _client.list_watches()), indent=2)
 
     return mcp
 

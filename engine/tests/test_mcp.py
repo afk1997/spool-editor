@@ -25,6 +25,79 @@ from mcp.client.stdio import stdio_client  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+EXPECTED_TOOLS = {
+    "list_jobs", "get_job", "download_media", "bulk_download",
+    "pause_download", "resume_download", "cancel_download",
+    "dismiss_download",
+    "list_transcripts", "search_transcripts",
+    "get_transcript_status", "transcribe",
+    "cancel_transcribe", "get_transcript", "get_transcript_chunk",
+    "list_models", "install_model", "model_install_progress",
+    "set_active_model", "remove_model",
+    "storage_info",
+    "server_capabilities",
+    "find_moments", "rank_candidates", "cut_clip", "reframe_clip", "caption_clip",
+    "render_clip", "render_pipeline",
+    "list_clip_jobs", "get_clip_job", "cancel_clip_job", "dismiss_clip_job",
+    "produce_clips",
+    "list_recipes", "get_recipe", "create_recipe", "update_recipe", "delete_recipe",
+    "list_watches", "get_watch", "create_watch", "update_watch", "delete_watch", "scan_watch",
+    "list_brand_kits", "create_brand_kit", "update_brand_kit", "delete_brand_kit",
+    "get_settings", "update_settings", "edit_word", "dismiss_transcribe",
+    "source_energy", "source_scenes", "source_filmstrip", "download_render",
+}
+
+READ_ONLY_TOOLS = {
+    "get_clip_job", "get_job", "get_recipe", "get_settings", "get_transcript",
+    "get_transcript_chunk", "get_transcript_status", "get_watch", "list_brand_kits",
+    "list_clip_jobs", "list_jobs", "list_models", "list_recipes", "list_transcripts",
+    "list_watches", "model_install_progress", "rank_candidates", "search_transcripts",
+    "server_capabilities", "source_energy", "source_filmstrip", "source_scenes",
+    "storage_info",
+}
+
+MUTATING_TOOL_ARGS = {
+    "bulk_download": {"urls": ["https://example.com/video"]},
+    "cancel_clip_job": {"job_id": "job-1"},
+    "cancel_download": {"job_id": "job-1"},
+    "cancel_transcribe": {"transcript_id": "transcript-1"},
+    "caption_clip": {"clip_id": "clip-1"},
+    "create_brand_kit": {"kit": {}},
+    "create_recipe": {"recipe": {}},
+    "create_watch": {"watch": {}},
+    "cut_clip": {"source_id": "source-1", "start": 0.0, "end": 1.0},
+    "delete_brand_kit": {"kit_id": "kit-1"},
+    "delete_recipe": {"recipe_id": "recipe-1"},
+    "delete_watch": {"watch_id": "watch-1"},
+    "dismiss_clip_job": {"job_id": "job-1"},
+    "dismiss_download": {"job_id": "job-1"},
+    "dismiss_transcribe": {"transcript_id": "transcript-1"},
+    "download_media": {"url": "https://example.com/video"},
+    "download_render": {"clip_id": "clip-1", "render_id": "render-1", "save_to": "/tmp/render.mp4"},
+    "edit_word": {"transcript_id": "transcript-1", "word_index": 0, "op": "delete"},
+    "find_moments": {"source_id": "source-1"},
+    "install_model": {"name": "ggml-tiny.bin"},
+    "pause_download": {"job_id": "job-1"},
+    "produce_clips": {"source_id": "source-1"},
+    "reframe_clip": {"clip_id": "clip-1"},
+    "remove_model": {"name": "ggml-tiny.bin"},
+    "render_clip": {"clip_id": "clip-1"},
+    "render_pipeline": {"source_id": "source-1", "start": 0.0, "end": 1.0},
+    "resume_download": {"job_id": "job-1"},
+    "scan_watch": {"watch_id": "watch-1"},
+    "set_active_model": {"name": "ggml-tiny.bin"},
+    "transcribe": {"parent_job_id": "source-1"},
+    "update_brand_kit": {"kit_id": "kit-1", "changes": {}},
+    "update_recipe": {"recipe_id": "recipe-1", "changes": {}},
+    "update_settings": {"changes": {}},
+    "update_watch": {"watch_id": "watch-1", "changes": {}},
+}
+
+MUTATION_DISABLED = {
+    "error": "agent_mutation_disabled",
+    "message": "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
+}
+
 
 def _free_port() -> int:
     with socket.socket() as s:
@@ -148,31 +221,7 @@ def test_mcp_end_to_end(tmp_path):
     with _trove_server(tmp_path) as port:
         result = asyncio.run(_drive_mcp(port))
 
-    expected_tools = {
-        "list_jobs", "get_job", "download_media", "bulk_download",
-        "pause_download", "resume_download", "cancel_download",
-        "dismiss_download",
-        "list_transcripts", "search_transcripts",
-        "get_transcript_status", "transcribe",
-        "cancel_transcribe", "get_transcript", "get_transcript_chunk",
-        "list_models", "install_model", "model_install_progress",
-        "set_active_model", "remove_model",
-        "storage_info",
-        "server_capabilities",
-        # clip surface
-        "find_moments", "rank_candidates", "cut_clip", "reframe_clip", "caption_clip",
-        "render_clip", "render_pipeline",
-        "list_clip_jobs", "get_clip_job", "cancel_clip_job", "dismiss_clip_job",
-        # automation surface (Phase 3 — parity with the studio)
-        "produce_clips",
-        "list_recipes", "get_recipe", "create_recipe", "update_recipe", "delete_recipe",
-        "list_watches", "get_watch", "create_watch", "update_watch", "delete_watch", "scan_watch",
-        "list_brand_kits", "create_brand_kit", "update_brand_kit", "delete_brand_kit",
-        # settings / transcript-edit / timeline signals (UI<->MCP<->CLI parity)
-        "get_settings", "update_settings", "edit_word", "dismiss_transcribe",
-        "source_energy", "source_scenes", "source_filmstrip", "download_render",
-    }
-    assert set(result["tool_names"]) == expected_tools, result["tool_names"]
+    assert set(result["tool_names"]) == EXPECTED_TOOLS, result["tool_names"]
     assert "trove://transcript/{tid}" in result["templates"]
     assert "spool://clips/{job_id}" in result["templates"]
     # New plural/.txt alias must be advertised alongside the legacy URI
@@ -191,7 +240,7 @@ def test_mcp_end_to_end(tmp_path):
 
     # Error surface — every error must be a {error, status?} dict, never
     # a stack trace or HTML body.
-    for key in ("get_job_bad", "transcribe_bad", "export_bad", "install_bad"):
+    for key in ("get_job_bad", "export_bad"):
         v = result[key]
         assert isinstance(v, dict) and "error" in v, (key, v)
         assert "status" in v, (key, v)
@@ -209,24 +258,22 @@ def test_mcp_end_to_end(tmp_path):
     assert json.loads(result["jobs_resource"])["jobs"] is not None or \
            "jobs" in json.loads(result["jobs_resource"])
 
-    # Clip surface: read path returns the render queue, validation paths return
-    # structured errors (never a stack trace), mirroring the trove tools.
+    # Every mutating surface returns the exact Phase 0 envelope, never a backend result.
+    for key in (
+        "transcribe_bad", "install_bad", "moments_bad", "cut_bad",
+        "reframe_bad", "produce_bad",
+    ):
+        assert result[key] == MUTATION_DISABLED
+
+    # Clip read surfaces remain available.
     assert "clip_jobs" in result["list_clip_jobs"]
-    for key in ("get_clip_job_bad", "moments_bad", "cut_bad", "reframe_bad"):
-        v = result[key]
-        assert isinstance(v, dict) and "error" in v, (key, v)
-        assert "Traceback" not in str(v), (key, v)
-    assert result["moments_bad"]["error"] == "source_not_ready"
-    assert result["reframe_bad"]["error"] == "clip_not_found"
+    assert result["get_clip_job_bad"]["error"] == "not_found"
     assert "clip_jobs" in json.loads(result["clips_resource"])
 
-    # Automation surface: list reads return the stores; produce on a bad source errs cleanly;
-    # the recipes/watches resources surface live state — full parity with the studio.
+    # Automation read surfaces and resources remain available.
     assert "recipes" in result["list_recipes"]
     assert "watches" in result["list_watches"]
     assert "brand_kits" in result["list_brand_kits"]
-    assert isinstance(result["produce_bad"], dict) and "error" in result["produce_bad"]
-    assert "Traceback" not in str(result["produce_bad"])
     assert "recipes" in json.loads(result["recipes_resource"])
     assert "watches" in json.loads(result["watches_resource"])
 
@@ -257,14 +304,12 @@ async def _drive_elicit(port: int) -> tuple[int, dict]:
 
 
 @pytest.mark.timeout(60)
-def test_mcp_reframe_elicits_missing_aspect(tmp_path):
-    """When reframe_clip is called without an aspect, the server elicits the choice
-    (spec §4) and feeds it through — proven by the callback firing and the elicited
-    clip flowing to the (bogus here) backend call."""
+def test_mcp_reframe_is_disabled_before_elicitation(tmp_path):
+    """A disabled mutator must not prompt the user before the central guard rejects it."""
     with _trove_server(tmp_path) as port:
         fired, data = asyncio.run(_drive_elicit(port))
-    assert fired == 1, "server should have elicited the aspect/mode"
-    assert data.get("error") == "clip_not_found"  # elicited params reached the backend
+    assert fired == 0
+    assert data == MUTATION_DISABLED
 
 
 # ---- MCP transport resolution (S14: the Settings "MCP transport" control) ----
@@ -299,43 +344,25 @@ def test_resolve_transport_prefers_env_then_settings_then_stdio():
     assert _resolve_transport({}, lambda: {}) == "stdio"
 
 
-# ---- produce_clips kwargs-collision guard ----
+# ---- Phase 0 central read-only classification + zero-call mutation guard ----
 
-def test_produce_clips_strips_reserved_keys(monkeypatch):
-    """An inline ``recipe`` that happens to carry ``source_id`` / ``recipe_id`` must not
-    collide with the positional/keyword args of ``_client.produce`` (TypeError: multiple
-    values). The tool strips those reserved keys before the splat, so the call stays clean
-    (mirrors the ``produce_bad`` no-Traceback assertion)."""
+def test_every_mutating_mcp_tool_is_disabled_before_client_access(monkeypatch):
     import mcp_server
 
-    seen: dict = {}
+    assert set(mcp_server.READ_ONLY_TOOLS) == READ_ONLY_TOOLS
+    assert set(MUTATING_TOOL_ARGS) == EXPECTED_TOOLS - READ_ONLY_TOOLS
 
-    def fake_produce(source_id, *, recipe_id=None, **recipe):
-        seen["source_id"] = source_id
-        seen["recipe_id"] = recipe_id
-        seen["recipe"] = recipe
-        return {"id": "p1", "kind": "produce", "status": "queued"}
+    class ExplodingClient:
+        def __getattr__(self, name):
+            raise AssertionError(f"MCP mutator reached TroveClient.{name}")
 
-    monkeypatch.setattr(mcp_server._client, "produce", fake_produce)
+    monkeypatch.setattr(mcp_server, "_client", ExplodingClient())
     server = mcp_server._build_server()
 
-    async def _call(recipe):
-        res = await server.call_tool(
-            "produce_clips", {"source_id": "src1", "recipe": recipe})
-        # call_tool returns a list of content parts; parse the text payload.
-        parts = res[0] if isinstance(res, tuple) else res
-        return json.loads(parts[0].text)
+    async def _call_all():
+        for tool_name, args in MUTATING_TOOL_ARGS.items():
+            res = await server.call_tool(tool_name, args)
+            parts = res[0] if isinstance(res, tuple) else res
+            assert json.loads(parts[0].text) == MUTATION_DISABLED, tool_name
 
-    # A recipe colliding on the positional source_id — would raise TypeError pre-fix.
-    out = asyncio.run(_call({"source_id": "x", "count": 3}))
-    assert out == {"id": "p1", "kind": "produce", "status": "queued"}
-    assert "Traceback" not in str(out)
-    assert seen["source_id"] == "src1"  # the real positional, not the recipe's "x"
-    assert seen["recipe"] == {"count": 3}  # reserved key dropped
-
-    # A recipe colliding on the keyword recipe_id — same clean outcome.
-    out = asyncio.run(_call({"recipe_id": "r", "aspect": "1:1"}))
-    assert out == {"id": "p1", "kind": "produce", "status": "queued"}
-    assert "Traceback" not in str(out)
-    assert seen["recipe_id"] is None  # the explicit (empty) recipe_id, not the recipe's "r"
-    assert seen["recipe"] == {"aspect": "1:1"}
+    asyncio.run(_call_all())
