@@ -143,13 +143,13 @@ export default function ReframeScreen() {
     try {
       const job = await ctx.client.reframe(id, reframeParams());
       if (!mounted.current || window.location.href !== startedAtLocation) return;
+      await ctx.awaitClipJob(job.id);
+      if (!mounted.current || window.location.href !== startedAtLocation) return;
       if (proceed) {
-        await ctx.awaitClipJob(job.id);
-        if (!mounted.current || window.location.href !== startedAtLocation) return;
         ctx.pushToast({ icon: "refresh", tone: "ok", title: "Reframe complete", body: `${mode} · 9:16` });
         ctx.nav("caption", { id });
       } else {
-        ctx.pushToast({ icon: "scan", tone: "info", title: "Verification queued", body: "Any track returned by the engine will appear here." });
+        ctx.pushToast({ icon: "scan", tone: "ok", title: "Verification complete", body: "The latest engine track is ready to review." });
       }
     } catch (error) {
       if (mounted.current && window.location.href === startedAtLocation)

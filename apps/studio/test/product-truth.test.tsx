@@ -1161,6 +1161,36 @@ describe("product truth: visible mutations settle before success", () => {
     expect(nav).not.toHaveBeenCalled();
   });
 
+  it("Reframe Verify stays locked after admission until the job is terminal", async () => {
+    const terminal = deferred<void>();
+    const reframe = vi.fn().mockResolvedValue({ id: "reframe-1" });
+    const awaitClipJob = vi.fn().mockReturnValue(terminal.promise);
+    importHarness.params = { id: "clip-1" };
+    importHarness.ctx = baseCtx({
+      clips: [clipFixture()],
+      client: clientFixture({ reframe }),
+      awaitClipJob,
+    });
+    render(<ReframeScreen />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Verify ROI track" }));
+    await waitFor(() => expect(reframe).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(awaitClipJob).toHaveBeenCalledWith("reframe-1"));
+
+    const verify = screen.getByRole("button", { name: "Submitting…" });
+    const apply = screen.getByRole("button", { name: "Working…" });
+    expect(verify).toBeDisabled();
+    expect(apply).toBeDisabled();
+    fireEvent.click(verify);
+    fireEvent.click(apply);
+    expect(reframe).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      terminal.resolve();
+      await terminal.promise;
+    });
+  });
+
   it("Reframe never reports completion or navigates after the initiating view is left", async () => {
     const terminal = deferred<void>();
     const pushToast = vi.fn();
