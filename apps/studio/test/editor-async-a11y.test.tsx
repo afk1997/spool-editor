@@ -202,6 +202,111 @@ describe("editor async lifecycle guards", () => {
     expect(nav).not.toHaveBeenCalled();
   });
 
+  it("keeps Brand apply alive across inspector tabs and blocks normal Render", async () => {
+    const terminal = deferred<void>();
+    const awaitClipJob = vi.fn().mockReturnValue(terminal.promise);
+    const renderClip = vi.fn().mockResolvedValue({ id: "render-1" });
+    const makeClipsFrom = vi.fn().mockResolvedValue(undefined);
+    const pushToast = vi.fn();
+    const nav = vi.fn();
+    harness.queryData = { listBrandKits: { brand_kits: [brandKit] } };
+    harness.ctx = baseCtx({
+      client: clientFixture({ render: renderClip }),
+      awaitClipJob,
+      makeClipsFrom,
+      pushToast,
+      nav,
+    });
+
+    render(<EditorScreen />);
+    fireEvent.click(screen.getByRole("tab", { name: "Brand" }));
+    fireEvent.click(screen.getByRole("button", { name: "Studio kit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply kit + render" }));
+    await waitFor(() => expect(awaitClipJob).toHaveBeenCalledWith("caption-1"));
+
+    fireEvent.click(screen.getByRole("tab", { name: "Format" }));
+    const renderButton = screen.getByRole("button", { name: "Render" });
+    expect(renderButton).toBeDisabled();
+    fireEvent.click(renderButton);
+    expect(makeClipsFrom).not.toHaveBeenCalled();
+
+    await act(async () => {
+      terminal.resolve();
+      await terminal.promise;
+    });
+
+    await waitFor(() => expect(renderClip).toHaveBeenCalledWith("clip-1", { preset: "tiktok" }));
+    expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({ title: "Applied “Studio kit”" }));
+    expect(nav).toHaveBeenCalledWith("queue");
+  });
+
+  it("blocks Brand apply while normal Render is pending", async () => {
+    const renderResult = deferred<void>();
+    const makeClipsFrom = vi.fn().mockReturnValue(renderResult.promise);
+    const caption = vi.fn().mockResolvedValue({ id: "caption-1" });
+    harness.queryData = { listBrandKits: { brand_kits: [brandKit] } };
+    harness.ctx = baseCtx({
+      client: clientFixture({ caption }),
+      makeClipsFrom,
+    });
+
+    render(<EditorScreen />);
+    fireEvent.click(screen.getByRole("tab", { name: "Brand" }));
+    fireEvent.click(screen.getByRole("button", { name: "Studio kit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Render" }));
+
+    const apply = screen.getByRole("button", { name: "Apply kit + render" });
+    expect(apply).toBeDisabled();
+    fireEvent.click(apply);
+    expect(caption).not.toHaveBeenCalled();
+
+    await act(async () => {
+      renderResult.resolve();
+      await renderResult.promise;
+    });
+  });
+
+  it("blocks timeline transcript mutations while normal Render is pending", async () => {
+    const renderResult = deferred<void>();
+    const makeClipsFrom = vi.fn().mockReturnValue(renderResult.promise);
+    const editWord = vi.fn().mockResolvedValue(undefined);
+    const cut = vi.fn().mockResolvedValue({ id: "cut-1" });
+    harness.queryData = {
+      getTranscriptDoc: {
+        words: [
+          { idx: 0, w: "keep", start: 0, end: 1, deleted: false },
+          { idx: 1, w: "drop", start: 2, end: 3, deleted: true },
+        ],
+        segments: [],
+      },
+      sourceEnergy: { bars: [], buckets: 0 },
+      sourceScenes: { cuts: [] },
+      sourceFilmstrip: { strip: null, frames: 0 },
+    };
+    harness.ctx = baseCtx({
+      sources: [{ id: "source-1", transcriptId: "transcript-1" }],
+      client: clientFixture({ editWord, cut }),
+      makeClipsFrom,
+    });
+
+    render(<EditorScreen />);
+    fireEvent.click(screen.getByRole("button", { name: "Render" }));
+
+    const deleteWord = screen.getByTitle("delete word (ripple-cut on Re-cut)");
+    const recut = screen.getByRole("button", { name: "Re-cut (drop 1)" });
+    expect(deleteWord).toBeDisabled();
+    expect(recut).toBeDisabled();
+    fireEvent.click(deleteWord);
+    fireEvent.click(recut);
+    expect(editWord).not.toHaveBeenCalled();
+    expect(cut).not.toHaveBeenCalled();
+
+    await act(async () => {
+      renderResult.resolve();
+      await renderResult.promise;
+    });
+  });
+
   it("re-cut does not report, navigate, or update local state after the route changes", async () => {
     const cutResult = deferred<{ id: string }>();
     const cut = vi.fn().mockReturnValue(cutResult.promise);

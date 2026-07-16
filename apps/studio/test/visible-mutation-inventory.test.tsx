@@ -573,20 +573,26 @@ describe("visible mutation inventory: Editor", () => {
     const delayed = deferred<void>();
     const editWord = vi.fn().mockReturnValue(delayed.promise);
     const cut = vi.fn().mockResolvedValue({ id: "cut-1" });
+    const makeClipsFrom = vi.fn().mockResolvedValue(undefined);
     const { pushToast, nav, reload } = renderEditor({ editWord, cut });
+    Object.assign(harness.ctx!, { makeClipsFrom });
 
     const deleteWord = screen.getByTitle("delete word (ripple-cut on Re-cut)");
     const recut = screen.getByRole("button", { name: "Re-cut (drop 1)" });
+    const renderButton = screen.getByRole("button", { name: "Render" });
     act(() => {
       deleteWord.click();
       deleteWord.click();
       recut.click();
+      renderButton.click();
     });
     expect(editWord).toHaveBeenCalledTimes(1);
     expect(cut).not.toHaveBeenCalled();
+    expect(makeClipsFrom).not.toHaveBeenCalled();
     expect(editWord).toHaveBeenCalledWith("transcript-1", 0, { op: "delete" });
     expect(deleteWord).toBeDisabled();
     expect(recut).toBeDisabled();
+    expect(renderButton).toBeDisabled();
     expect(reload).not.toHaveBeenCalled();
     expect(pushToast).not.toHaveBeenCalled();
     expect(nav).not.toHaveBeenCalled();
@@ -611,17 +617,23 @@ describe("visible mutation inventory: Editor", () => {
     const delayed = deferred<void>();
     const cut = vi.fn().mockReturnValue(delayed.promise);
     const editWord = vi.fn().mockResolvedValue(undefined);
+    const makeClipsFrom = vi.fn().mockResolvedValue(undefined);
     const { pushToast, nav } = renderEditor({ cut, editWord });
+    Object.assign(harness.ctx!, { makeClipsFrom });
 
     const recut = screen.getByRole("button", { name: "Re-cut (drop 1)" });
     const deleteWord = screen.getByTitle("delete word (ripple-cut on Re-cut)");
+    const renderButton = screen.getByRole("button", { name: "Render" });
     act(() => {
       recut.click();
       deleteWord.click();
+      renderButton.click();
     });
     expect(cut).toHaveBeenCalledWith("source-1", { start: 0, end: 10 });
     expect(editWord).not.toHaveBeenCalled();
+    expect(makeClipsFrom).not.toHaveBeenCalled();
     expect(deleteWord).toBeDisabled();
+    expect(renderButton).toBeDisabled();
     expect(pushToast).not.toHaveBeenCalled();
     expect(nav).not.toHaveBeenCalled();
 

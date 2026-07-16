@@ -8,9 +8,11 @@ import { useClipSeededState } from "@/lib/use-clip-seeded-state";
 import { captionPage, STYLE_CHUNK } from "@/lib/caption-page";
 import { describeActionError } from "@/lib/action-error";
 import { Timeline } from "@/components/spool/timeline";
+import type { BrandKit } from "@spool/api-client";
 import { Btn, Chip, Empty, Icon, Seg, Switch } from "@spool/ui";
 
 const PREVIEW_SSE_GRACE_MS = 5_000;
+type EditorMutation = "render" | "brand" | "word" | "cut";
 
 /* S6 Editor — connective hub, 1:1 port of the demo (06). Preview · transport · timeline ·
  * inspector (Format / Captions / Brand / Export). Render runs the real engine with the
@@ -40,51 +42,16 @@ export default function EditorScreen() {
 
 /* Editor → Brand inspector: pick a persisted kit and apply it to this clip (caption with the
  * kit's preset/overrides/watermark/lower-third, then render) — reuses the S9 brand-kit store. */
-function BrandInspector({ clipId, preset }: { clipId: string; preset: string }) {
+function BrandInspector({ mutation, isMutationPending, onApply }: { mutation: EditorMutation | null; isMutationPending: () => boolean; onApply: (kit: BrandKit) => void }) {
   const ctx = useSpool();
   const kitsQ = useEngineQuery((c) => c.listBrandKits(), []);
   const kits = kitsQ.data?.brand_kits ?? [];
   const [sel, setSel] = useState("");
-  const [applying, setApplying] = useState(false);
-  const applyInFlight = useRef(false);
-  const applyOp = useRef(0);
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-      applyOp.current += 1;
-    };
-  }, []);
-  const apply = async () => {
+  const busy = mutation !== null;
+  const applying = mutation === "brand";
+  const apply = () => {
     const k = kits.find((x) => x.id === sel);
-    if (!k || applyInFlight.current) return;
-    const startedAtLocation = window.location.href;
-    const op = ++applyOp.current;
-    const isCurrent = () => mounted.current && applyOp.current === op && window.location.href === startedAtLocation;
-    applyInFlight.current = true;
-    setApplying(true);
-    try {
-      const cap = await ctx.client.caption(clipId, {
-        style: k.caption_preset || "opus", overrides: k.caption_overrides,
-        watermark: k.watermark || undefined, lower_third: k.lower_third || undefined,
-      });
-      if (!isCurrent()) return;
-      await ctx.awaitClipJob(cap.id);
-      if (!isCurrent()) return;
-      await ctx.client.render(clipId, { preset });
-      if (!isCurrent()) return;
-      ctx.pushToast({ icon: "palette", tone: "info", title: `Applied “${k.name}”`, body: "Caption finished and render was submitted." });
-      ctx.nav("queue");
-    } catch (error) {
-      if (isCurrent()) {
-        const failure = describeActionError(error);
-        ctx.pushToast({ icon: "alert", tone: "warn", title: "Brand apply failed", body: `${failure.code}: ${failure.message}` });
-      }
-    } finally {
-      if (applyOp.current === op) applyInFlight.current = false;
-      if (isCurrent()) setApplying(false);
-    }
+    if (k && !isMutationPending()) onApply(k);
   };
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -94,7 +61,7 @@ function BrandInspector({ clipId, preset }: { clipId: string; preset: string }) 
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {kits.map((k) => (
-            <button type="button" key={k.id} aria-pressed={sel === k.id} disabled={applying} onClick={() => { if (!applyInFlight.current) setSel(k.id); }} className="card" style={{ padding: 10, display: "flex", alignItems: "center", gap: 8, cursor: applying ? "not-allowed" : "pointer", borderColor: sel === k.id ? "var(--accent)" : "var(--line)", background: sel === k.id ? "var(--accent-soft)" : "var(--bg-2)" }}>
+            <button type="button" key={k.id} aria-pressed={sel === k.id} disabled={busy} onClick={() => { if (!isMutationPending()) setSel(k.id); }} className="card" style={{ padding: 10, display: "flex", alignItems: "center", gap: 8, cursor: busy ? "not-allowed" : "pointer", borderColor: sel === k.id ? "var(--accent)" : "var(--line)", background: sel === k.id ? "var(--accent-soft)" : "var(--bg-2)" }}>
               <div className="row" style={{ gap: 4 }}>{(k.palette ?? []).slice(0, 4).map((c, j) => <span key={j} style={{ width: 14, height: 14, borderRadius: 4, background: c, border: "1px solid var(--line)" }} />)}</div>
               <span style={{ fontSize: 12.5, fontWeight: 600 }}>{k.name}</span>
               <span className="spacer" />
@@ -103,7 +70,7 @@ function BrandInspector({ clipId, preset }: { clipId: string; preset: string }) 
           ))}
         </div>
       )}
-      <Btn variant="primary" icon="palette" onClick={apply} disabled={!sel || applying}>{applying ? "Applying…" : "Apply kit + render"}</Btn>
+      <Btn variant="primary" icon="palette" onClick={apply} disabled={!sel || busy}>{applying ? "Applying…" : "Apply kit + render"}</Btn>
       <Btn variant="ghost" icon="plus" onClick={() => ctx.nav("brand")}>Design kits →</Btn>
     </div>
   );
@@ -129,27 +96,19 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   const [pvJob, setPvJob] = useState<{ id: string; aspect: string; mode: string; localPending: boolean } | null>(null);
   const previewInFlight = useRef(false);
   const previewGraceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const renderInFlight = useRef(false);
-  const cutInFlight = useRef(false);
-  const wordEditInFlight = useRef(false);
+  const mutationInFlight = useRef<EditorMutation | null>(null);
   const previewOp = useRef(0);
-  const renderOp = useRef(0);
-  const cutOp = useRef(0);
-  const wordEditOp = useRef(0);
+  const mutationOp = useRef(0);
   const mounted = useRef(false);
   const [previewSubmitting, setPreviewSubmitting] = useState(false);
-  const [rendering, setRendering] = useState(false);
-  const [cutting, setCutting] = useState(false);
-  const [wordEditPending, setWordEditPending] = useState(false);
+  const [mutation, setMutation] = useState<EditorMutation | null>(null);
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
       if (previewGraceTimer.current) clearTimeout(previewGraceTimer.current);
       previewOp.current += 1;
-      renderOp.current += 1;
-      cutOp.current += 1;
-      wordEditOp.current += 1;
+      mutationOp.current += 1;
     };
   }, []);
   // Relevance is DERIVED (no effect): a stored preview only applies while its combo matches the
@@ -194,12 +153,12 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
 
   // Render = burn the chosen caption style + export (reframe first if the format changed here).
   const render = async () => {
-    if (renderInFlight.current) return;
+    if (mutationInFlight.current) return;
     const startedAtLocation = window.location.href;
-    const op = ++renderOp.current;
-    const isCurrent = () => mounted.current && renderOp.current === op && window.location.href === startedAtLocation;
-    renderInFlight.current = true;
-    setRendering(true);
+    const op = ++mutationOp.current;
+    const isCurrent = () => mounted.current && mutationOp.current === op && window.location.href === startedAtLocation;
+    mutationInFlight.current = "render";
+    setMutation("render");
     try {
       await ctx.makeClipsFrom([{ id }], { aspect, mode: reframe, preset, style });
     } catch (error) {
@@ -208,8 +167,39 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
         ctx.pushToast({ icon: "alert", tone: "warn", title: "Render failed", body: `${failure.code}: ${failure.message}` });
       }
     } finally {
-      if (renderOp.current === op) renderInFlight.current = false;
-      if (isCurrent()) setRendering(false);
+      if (mutationOp.current === op) mutationInFlight.current = null;
+      if (isCurrent()) setMutation(null);
+    }
+  };
+  const applyBrand = async (kit: BrandKit) => {
+    if (mutationInFlight.current) return;
+    const startedAtLocation = window.location.href;
+    const op = ++mutationOp.current;
+    const isCurrent = () => mounted.current && mutationOp.current === op && window.location.href === startedAtLocation;
+    mutationInFlight.current = "brand";
+    setMutation("brand");
+    try {
+      const cap = await ctx.client.caption(id, {
+        style: kit.caption_preset || "opus",
+        overrides: kit.caption_overrides,
+        watermark: kit.watermark || undefined,
+        lower_third: kit.lower_third || undefined,
+      });
+      if (!isCurrent()) return;
+      await ctx.awaitClipJob(cap.id);
+      if (!isCurrent()) return;
+      await ctx.client.render(id, { preset });
+      if (!isCurrent()) return;
+      ctx.pushToast({ icon: "palette", tone: "info", title: `Applied “${kit.name}”`, body: "Caption finished and render was submitted." });
+      ctx.nav("queue");
+    } catch (error) {
+      if (isCurrent()) {
+        const failure = describeActionError(error);
+        ctx.pushToast({ icon: "alert", tone: "warn", title: "Brand apply failed", body: `${failure.code}: ${failure.message}` });
+      }
+    } finally {
+      if (mutationOp.current === op) mutationInFlight.current = null;
+      if (isCurrent()) setMutation(null);
     }
   };
   const renders = (snapshot?.clips ?? []).filter((c) => c.clip_id === id && (c.kind === "export" || c.kind === "pipeline") && c.status === "done" && c.result.render_id);
@@ -235,12 +225,12 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
   const scenesQ = useEngineQuery((c) => (src ? c.sourceScenes(clip.src, { start: lo, end: hiSafe }) : Promise.resolve({ cuts: [] })), [clip.src, lo, hiSafe]);
   const filmstripQ = useEngineQuery((c) => (src ? c.sourceFilmstrip(clip.src, { start: lo, end: hiSafe }, 14) : Promise.resolve({ strip: null, frames: 0 })), [clip.src, lo, hiSafe]);
   const delWord = async (idx: number) => {
-    if (!src?.transcriptId || wordEditInFlight.current || cutInFlight.current) return;
+    if (!src?.transcriptId || mutationInFlight.current) return;
     const startedAtLocation = window.location.href;
-    const op = ++wordEditOp.current;
-    const isCurrent = () => mounted.current && wordEditOp.current === op && window.location.href === startedAtLocation;
-    wordEditInFlight.current = true;
-    setWordEditPending(true);
+    const op = ++mutationOp.current;
+    const isCurrent = () => mounted.current && mutationOp.current === op && window.location.href === startedAtLocation;
+    mutationInFlight.current = "word";
+    setMutation("word");
     try {
       await ctx.client.editWord(src.transcriptId, idx, { op: "delete" });
       if (!isCurrent()) return;
@@ -251,17 +241,17 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
         ctx.pushToast({ icon: "alert", tone: "warn", title: "Word edit failed", body: `${failure.code}: ${failure.message}` });
       }
     } finally {
-      if (wordEditOp.current === op) wordEditInFlight.current = false;
-      if (mounted.current && wordEditOp.current === op) setWordEditPending(false);
+      if (mutationOp.current === op) mutationInFlight.current = null;
+      if (isCurrent()) setMutation(null);
     }
   };
   const recut = async () => {
-    if (!src || cutInFlight.current || wordEditInFlight.current) return;
+    if (!src || mutationInFlight.current) return;
     const startedAtLocation = window.location.href;
-    const op = ++cutOp.current;
-    const isCurrent = () => mounted.current && cutOp.current === op && window.location.href === startedAtLocation;
-    cutInFlight.current = true;
-    setCutting(true);
+    const op = ++mutationOp.current;
+    const isCurrent = () => mounted.current && mutationOp.current === op && window.location.href === startedAtLocation;
+    mutationInFlight.current = "cut";
+    setMutation("cut");
     try {
       await ctx.client.cut(src.id, { start: lo, end: hi });
       if (!isCurrent()) return;
@@ -273,18 +263,18 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
         ctx.pushToast({ icon: "alert", tone: "warn", title: "Re-cut failed", body: `${failure.code}: ${failure.message}` });
       }
     } finally {
-      if (cutOp.current === op) cutInFlight.current = false;
-      if (isCurrent()) setCutting(false);
+      if (mutationOp.current === op) mutationInFlight.current = null;
+      if (isCurrent()) setMutation(null);
     }
   };
   // Trim → re-cut to a new [start, end] window from the timeline's trim handles.
   const trimRecut = async (s: number, e: number) => {
-    if (!src || cutInFlight.current || wordEditInFlight.current) return;
+    if (!src || mutationInFlight.current) return;
     const startedAtLocation = window.location.href;
-    const op = ++cutOp.current;
-    const isCurrent = () => mounted.current && cutOp.current === op && window.location.href === startedAtLocation;
-    cutInFlight.current = true;
-    setCutting(true);
+    const op = ++mutationOp.current;
+    const isCurrent = () => mounted.current && mutationOp.current === op && window.location.href === startedAtLocation;
+    mutationInFlight.current = "cut";
+    setMutation("cut");
     try {
       await ctx.client.cut(src.id, { start: s, end: e });
       if (!isCurrent()) return;
@@ -296,8 +286,8 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
         ctx.pushToast({ icon: "alert", tone: "warn", title: "Trim failed", body: `${failure.code}: ${failure.message}` });
       }
     } finally {
-      if (cutOp.current === op) cutInFlight.current = false;
-      if (isCurrent()) setCutting(false);
+      if (mutationOp.current === op) mutationInFlight.current = null;
+      if (isCurrent()) setMutation(null);
     }
   };
   // play() rejects (NotSupportedError) when the source can't load yet — e.g. a cut clip's
@@ -342,7 +332,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
         <span style={{ fontWeight: 600 }}>{clip.title}</span>
         <span className="spacer" />
         <div className="row" style={{ gap: 6 }}>{others.map((o) => <button key={o.id} className="chip" style={{ cursor: "pointer" }} onClick={() => ctx.nav("editor", { id: o.id })}>{o.title.split(" ").slice(0, 3).join(" ")}…</button>)}</div>
-        <Btn variant="primary" size="sm" icon="zap" onClick={render} disabled={rendering}>{rendering ? "Rendering…" : "Render"}</Btn>
+        <Btn variant="primary" size="sm" icon="zap" onClick={render} disabled={mutation !== null}>{mutation === "render" ? "Rendering…" : "Render"}</Btn>
       </div>
 
       <div style={{ flex: 1, display: "grid", gridTemplateColumns: "1fr 320px", minHeight: 0 }}>
@@ -388,7 +378,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
                     {renders.map((r, i) => <button key={r.id} className={"chip" + (verIdx === i ? " solid" : "")} style={{ cursor: "pointer", height: 22, padding: "0 8px" }} onClick={() => setVer(i)}>v{i + 1}</button>)}
                   </div>
                 )}
-                {deletedInWin > 0 && <Btn variant="primary" size="sm" icon="scissors" onClick={recut} disabled={cutting || wordEditPending}>{cutting ? "Re-cutting…" : `Re-cut (drop ${deletedInWin})`}</Btn>}
+                {deletedInWin > 0 && <Btn variant="primary" size="sm" icon="scissors" onClick={recut} disabled={mutation !== null}>{mutation === "cut" ? "Re-cutting…" : `Re-cut (drop ${deletedInWin})`}</Btn>}
               </div>
             )}
             {tlWords.length > 0 ? (
@@ -400,7 +390,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
                 cur={cur}
                 onSeek={(rel) => { const v = videoRef.current; if (v && isFinite(rel)) v.currentTime = Math.max(0, rel); setCur(rel); }}
                 onDeleteWord={delWord}
-                mutationPending={wordEditPending || cutting}
+                mutationPending={mutation !== null}
                 energyBars={energyQ.data?.bars ?? []}
                 sceneCuts={scenesQ.data?.cuts ?? []}
                 filmstrip={filmstripQ.data?.strip ?? null}
@@ -453,7 +443,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
                 <Btn variant="ghost" icon="type" onClick={() => ctx.nav("caption", { id })}>Open Caption Studio →</Btn>
               </div>
             )}
-            {insp === "Brand" && <BrandInspector clipId={id} preset={preset} />}
+            {insp === "Brand" && <BrandInspector mutation={mutation} isMutationPending={() => mutationInFlight.current !== null} onApply={applyBrand} />}
             {insp === "Export" && (
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                 <div><span className="field-label">Export preset</span><Seg value={preset} onChange={setPreset} neutral options={[{ value: "tiktok", label: "TikTok" }, { value: "reels", label: "Reels" }, { value: "shorts", label: "Shorts" }]} /></div>
@@ -493,7 +483,7 @@ function EditorBody({ clip }: { clip: SpoolClip }) {
                       })}
                   </div>
                 </div>
-                <Btn variant="primary" icon="zap" onClick={render} disabled={rendering}>{rendering ? "Rendering…" : "Render & export"}</Btn>
+                <Btn variant="primary" icon="zap" onClick={render} disabled={mutation !== null}>{mutation === "render" ? "Rendering…" : "Render & export"}</Btn>
               </div>
             )}
           </div>
