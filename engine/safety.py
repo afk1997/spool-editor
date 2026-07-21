@@ -311,7 +311,7 @@ def _apply_cors(resp, origin):
     resp.headers["Access-Control-Allow-Origin"] = origin
     resp.headers["Vary"] = "Origin"
     resp.headers["Access-Control-Allow-Credentials"] = "true"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
     resp.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, Idempotency-Key"
     resp.headers["Access-Control-Expose-Headers"] = (
         "X-Idempotent-Replay, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Window, Retry-After"
@@ -330,9 +330,16 @@ def attach_cors(app):
 
     @app.before_request
     def _cors_preflight():
-        if request.method == "OPTIONS" and request.path.startswith("/api/"):
+        if request.path.startswith("/api/"):
+            origin_header = request.headers.get("Origin")
             origin = _cors_origin()
-            if origin:
+            if (
+                request.method in {"POST", "PUT", "PATCH", "DELETE"}
+                and origin_header is not None
+                and origin is None
+            ):
+                return jsonify({"error": "origin_forbidden"}), 403
+            if request.method == "OPTIONS" and origin:
                 resp = app.make_default_options_response()
                 _apply_cors(resp, origin)
                 return resp

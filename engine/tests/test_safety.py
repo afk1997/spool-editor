@@ -78,18 +78,12 @@ def test_is_safe_url_normalizes_mapped_dns_answers(monkeypatch, address, expecte
     ) is expected
 
 
-import os
-from typing import Optional
-from flask import Flask
-from safety import token_required
+from flask import Flask, request
+from safety import RateLimiter, token_required
 
 
-def _make_app(token: Optional[str]):
+def _make_app():
     app = Flask(__name__)
-    if token is not None:
-        os.environ["TROVE_TOKEN"] = token
-    else:
-        os.environ.pop("TROVE_TOKEN", None)
 
     @app.get("/secret")
     @token_required
@@ -99,27 +93,31 @@ def _make_app(token: Optional[str]):
     return app
 
 
-def test_token_required_off_by_default():
-    app = _make_app(None)
+def test_token_required_off_by_default(monkeypatch):
+    monkeypatch.delenv("TROVE_TOKEN", raising=False)
+    app = _make_app()
     client = app.test_client()
     assert client.get("/secret").status_code == 200
 
 
-def test_token_required_rejects_missing_header():
-    app = _make_app("hunter2")
+def test_token_required_rejects_missing_header(monkeypatch):
+    monkeypatch.setenv("TROVE_TOKEN", "hunter2")
+    app = _make_app()
     client = app.test_client()
     assert client.get("/secret").status_code == 401
 
 
-def test_token_required_rejects_wrong_token():
-    app = _make_app("hunter2")
+def test_token_required_rejects_wrong_token(monkeypatch):
+    monkeypatch.setenv("TROVE_TOKEN", "hunter2")
+    app = _make_app()
     client = app.test_client()
     r = client.get("/secret", headers={"Authorization": "Bearer wrong"})
     assert r.status_code == 401
 
 
-def test_token_required_accepts_correct_token():
-    app = _make_app("hunter2")
+def test_token_required_accepts_correct_token(monkeypatch):
+    monkeypatch.setenv("TROVE_TOKEN", "hunter2")
+    app = _make_app()
     client = app.test_client()
     r = client.get("/secret", headers={"Authorization": "Bearer hunter2"})
     assert r.status_code == 200
@@ -139,6 +137,26 @@ def _cors_app():
         return "ok"
 
     return app
+
+
+def _origin_guard_app():
+    app = Flask(__name__)
+    attach_cors(app)
+    limiter = RateLimiter(rate=10, per_seconds=60)
+    counter = {"calls": 0}
+
+    @app.before_request
+    def _later_rate_limit():
+        if request.path.startswith("/api/"):
+            limiter.allow(request.remote_addr or "unknown")
+
+    @app.route("/api/v1/mutation", methods=["POST", "PUT", "PATCH", "DELETE"])
+    @token_required
+    def mutation():
+        counter["calls"] += 1
+        return {"ok": True}
+
+    return app, limiter, counter
 
 
 def test_cors_echoes_localhost_origin():
@@ -176,12 +194,69 @@ def test_cors_preflight_allows_patch_and_delete():
     c = _cors_app().test_client()
     r = c.open("/api/v1/ping", method="OPTIONS", headers={"Origin": "http://localhost:3000"})
     methods = r.headers.get("Access-Control-Allow-Methods", "")
+    assert "PUT" in methods
     assert "PATCH" in methods
     assert "DELETE" in methods
 
 
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+@pytest.mark.parametrize("origin", ["https://evil.example.com", "null", ""])
+def test_cors_rejects_invalid_mutation_origin_before_rate_limit_and_view(
+    monkeypatch, method, origin,
+):
+    monkeypatch.setenv("TROVE_TOKEN", "correct-token")
+    app, limiter, counter = _origin_guard_app()
+
+    response = app.test_client().open(
+        "/api/v1/mutation",
+        method=method,
+        headers={
+            "Authorization": "Bearer correct-token",
+            "Origin": origin,
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {"error": "origin_forbidden"}
+    assert counter["calls"] == 0
+    assert limiter._hits == {}
+
+
+def test_cors_rejects_hostile_mutation_origin_before_auth(monkeypatch):
+    monkeypatch.setenv("TROVE_TOKEN", "correct-token")
+    app, limiter, counter = _origin_guard_app()
+
+    response = app.test_client().post(
+        "/api/v1/mutation",
+        headers={
+            "Authorization": "Bearer wrong-token",
+            "Origin": "https://evil.example.com",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {"error": "origin_forbidden"}
+    assert counter["calls"] == 0
+    assert limiter._hits == {}
+
+
+@pytest.mark.parametrize("origin", ["http://localhost:3000", None])
+def test_cors_allows_local_or_missing_origin_mutation(monkeypatch, origin):
+    monkeypatch.setenv("TROVE_TOKEN", "correct-token")
+    app, limiter, counter = _origin_guard_app()
+    headers = {"Authorization": "Bearer correct-token"}
+    if origin is not None:
+        headers["Origin"] = origin
+
+    response = app.test_client().post("/api/v1/mutation", headers=headers)
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
+    assert counter["calls"] == 1
+    assert len(limiter._hits) == 1
+
+
 import time
-from safety import RateLimiter
 
 
 def test_rate_limiter_allows_under_cap():
