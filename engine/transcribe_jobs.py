@@ -28,6 +28,7 @@ from attempt_staging import (
     cleanup_attempt,
     commit_outcome,
 )
+from job_capacity import QueueFullError, pending_capacity
 
 
 class TranscribeStatus(str, enum.Enum):
@@ -41,6 +42,25 @@ class TranscribeStatus(str, enum.Enum):
 _TERMINAL_STATUSES = {
     TranscribeStatus.DONE, TranscribeStatus.ERROR, TranscribeStatus.CANCELLED,
 }
+
+
+class _AdmissionLease:
+    """Idempotent ownership of one admitted executor wrapper."""
+
+    __slots__ = ("_manager", "_released")
+
+    def __init__(self, manager: "TranscribeJobManager"):
+        self._manager = manager
+        self._released = False
+
+    def release(self) -> bool:
+        manager = self._manager
+        with manager._lock:
+            if self._released:
+                return False
+            self._released = True
+            manager._pending_count -= 1
+            return True
 
 
 def _utc_now_rfc3339() -> str:
@@ -90,6 +110,7 @@ class TranscribeJobManager:
     def __init__(self, *, max_workers: int = 1, ttl_seconds: int = 3600,
                  store_path: object = None):
         self.max_workers = max_workers
+        self.pending_capacity = pending_capacity(max_workers)
         self.ttl_seconds = ttl_seconds
         self._jobs: dict[str, TranscribeJob] = {}
         # _persist() takes the persistence mutex before this state lock.
@@ -98,6 +119,8 @@ class TranscribeJobManager:
         self._persist_lock = threading.Lock()
         self._persist_dirty = False
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._pending_count = 0
+        self._accepting = True
         self._store_path = Path(store_path) if store_path else None
         self._attempt_base = (
             self._store_path.parent
@@ -106,6 +129,19 @@ class TranscribeJobManager:
         )
         if self._store_path is not None:
             self._load_from_store()
+
+    @property
+    def pending_count(self) -> int:
+        with self._lock:
+            return self._pending_count
+
+    def _reserve_locked(self) -> _AdmissionLease:
+        if not self._accepting:
+            raise RuntimeError("transcribe manager is shut down")
+        if self._pending_count >= self.pending_capacity:
+            raise QueueFullError("transcription queue full")
+        self._pending_count += 1
+        return _AdmissionLease(self)
 
     # ----- persistence ---------------------------------------------------
 
@@ -270,6 +306,7 @@ class TranscribeJobManager:
         attempt: int,
         model_path: str,
         target: Callable[[TranscribeJob], object],
+        reservation: _AdmissionLease,
     ) -> None:
         try:
             started = self._mutate_current(
@@ -313,13 +350,23 @@ class TranscribeJobManager:
             if accepted:
                 self._persist()
         finally:
-            with self._lock:
-                current = self._jobs.get(job.id)
-                if current is job:
-                    if current._staging_root:
-                        cleanup_attempt(current._staging_root)
-                    current.process_handle = None
-                    current._worker_active = False
+            try:
+                with self._lock:
+                    current = self._jobs.get(job.id)
+                    if current is job:
+                        if current._staging_root:
+                            try:
+                                cleanup_attempt(current._staging_root)
+                            except Exception:
+                                logging.getLogger(__name__).warning(
+                                    "transcribe attempt cleanup failed for %s",
+                                    current.id,
+                                    exc_info=True,
+                                )
+                        current.process_handle = None
+                        current._worker_active = False
+            finally:
+                reservation.release()
 
     # ----- lifecycle -----------------------------------------------------
 
@@ -328,19 +375,43 @@ class TranscribeJobManager:
         jid = uuid.uuid4().hex[:10]
         model_name = Path(model_path).name if model_path else ""
         job = TranscribeJob(id=jid, parent_job_id=parent_job_id, model_used=model_name)
-        with self._lock:
-            attempt, _root = self._prepare_attempt_locked(job)
-            self._jobs[jid] = job
-        self._persist()
+        reservation = None
         try:
-            self._executor.submit(self._run_attempt, job, attempt, model_path, target)
-        except Exception:
             with self._lock:
-                self._jobs.pop(jid, None)
-                job._worker_active = False
-                cleanup_attempt(job._staging_root)
+                reservation = self._reserve_locked()
+                try:
+                    attempt, _root = self._prepare_attempt_locked(job)
+                    self._jobs[jid] = job
+                    self._executor.submit(
+                        self._run_attempt,
+                        job,
+                        attempt,
+                        model_path,
+                        target,
+                        reservation,
+                    )
+                except Exception:
+                    self._jobs.pop(jid, None)
+                    job._worker_active = False
+                    if job._staging_root:
+                        try:
+                            cleanup_attempt(job._staging_root)
+                        except Exception:
+                            logging.getLogger(__name__).warning(
+                                "failed to clean rejected transcribe %s",
+                                jid,
+                                exc_info=True,
+                            )
+                    reservation.release()
+                    raise
+        except (QueueFullError, RuntimeError):
+            if reservation is not None:
+                self._persist()
+            raise
+        except Exception:
             self._persist()
             raise
+        self._persist()
         return jid
 
     def cancel(self, jid: str) -> bool:
@@ -455,4 +526,10 @@ class TranscribeJobManager:
         ).start()
 
     def shutdown(self, wait: bool = False) -> None:
+        with self._lock:
+            self._accepting = False
         self._executor.shutdown(wait=wait)
+        if wait:
+            with self._lock:
+                if self._pending_count != 0:
+                    raise RuntimeError("transcribe manager shutdown left pending work")
