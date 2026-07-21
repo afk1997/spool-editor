@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from contextlib import contextmanager
 from threading import RLock, get_ident
 from typing import Iterator
@@ -40,15 +41,31 @@ class _EgressLease:
                 raise RuntimeError("only the active lease owner can retain a process")
             self._references += 1
 
-    def release(self) -> None:
-        """Release one owner; policy capacity returns only after the last owner."""
-        with self._policy._lock:
+    def _release(self, *, deadline: float | None) -> bool:
+        if deadline is None:
+            self._policy._lock.acquire()
+        elif not self._policy._lock.acquire(
+            timeout=max(0.0, deadline - time.monotonic())
+        ):
+            return False
+        try:
             if not self._active:
-                return
+                return True
             self._references -= 1
             if self._references == 0:
                 self._active = False
                 self._policy._active_leases -= 1
+            return True
+        finally:
+            self._policy._lock.release()
+
+    def release(self) -> None:
+        """Release one owner; policy capacity returns only after the last owner."""
+        self._release(deadline=None)
+
+    def release_until(self, *, deadline: float) -> bool:
+        """Release one owner without waiting beyond an engine shutdown deadline."""
+        return self._release(deadline=deadline)
 
     @contextmanager
     def launch_admission(self) -> Iterator[None]:

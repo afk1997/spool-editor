@@ -29,7 +29,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from threading import RLock
+from threading import Event, RLock
 from typing import Callable, Mapping, Protocol, runtime_checkable
 from weakref import WeakKeyDictionary
 
@@ -203,6 +203,17 @@ class _OwnedReasoningProcess:
         with self._tree_lock:
             return self._tree_exited
 
+    def tree_exited_until(self, *, deadline: float) -> bool:
+        """Read exit proof without waiting beyond a shutdown owner's deadline."""
+        if not self._tree_lock.acquire(
+            timeout=max(0.0, deadline - time.monotonic())
+        ):
+            return False
+        try:
+            return self._tree_exited
+        finally:
+            self._tree_lock.release()
+
     def wait_for_group_exit(
         self,
         *,
@@ -300,6 +311,41 @@ class _OwnedReasoningProcess:
         )
 
 
+class _RetainedEgressLease:
+    """Idempotent owner for exactly one process-retained lease reference."""
+
+    def __init__(self, lease):
+        self._lease = lease
+        self._lock = RLock()
+        self._released = False
+
+    def release(self) -> bool:
+        with self._lock:
+            if self._released:
+                return True
+            self._lease.release()
+            self._released = True
+            return True
+
+    def release_until(self, *, deadline: float) -> bool:
+        if not self._lock.acquire(
+            timeout=max(0.0, deadline - time.monotonic())
+        ):
+            return False
+        try:
+            if self._released:
+                return True
+            release_until = getattr(self._lease, "release_until", None)
+            if not callable(release_until):
+                return False
+            if not release_until(deadline=deadline):
+                return False
+            self._released = True
+            return True
+        finally:
+            self._lock.release()
+
+
 class ReasoningProcessRegistry:
     """Own every Codex process tree admitted for one engine policy."""
 
@@ -308,7 +354,7 @@ class ReasoningProcessRegistry:
         self._active: set[_OwnedReasoningProcess] = set()
         self._leases: dict[_OwnedReasoningProcess, object] = {}
         self._fallback: list[tuple[_OwnedReasoningProcess, object | None]] = []
-        self._closing = False
+        self._closing = Event()
 
     @property
     def active_count(self) -> int:
@@ -317,8 +363,7 @@ class ReasoningProcessRegistry:
 
     @property
     def closing(self) -> bool:
-        with self._lock:
-            return self._closing
+        return self._closing.is_set()
 
     def spawn(
         self,
@@ -327,16 +372,20 @@ class ReasoningProcessRegistry:
         lease=None,
     ) -> _OwnedReasoningProcess:
         """Linearize process creation/registration against shutdown."""
+        if self._closing.is_set():
+            raise ProviderUnavailableError("remote reasoning is shutting down")
         retained = lease is not None
+        retained_lease = None
         ownership_transferred = False
         if lease is not None:
             # Callers normally already own the policy lock through launch_admission.
             # Retain before taking the registry lock to preserve policy -> registry
             # ordering even for direct registry users.
             lease.retain_for_process()
+            retained_lease = _RetainedEgressLease(lease)
         try:
             with self._lock:
-                if self._closing:
+                if self._closing.is_set():
                     raise ProviderUnavailableError("remote reasoning is shutting down")
                 process = None
                 registered = False
@@ -344,10 +393,14 @@ class ReasoningProcessRegistry:
                     # Keep creation + registration under one registry boundary so
                     # shutdown can never miss a process created concurrently.
                     process = factory()
+                    if self._closing.is_set():
+                        raise ProviderUnavailableError(
+                            "remote reasoning is shutting down"
+                        )
                     self._active.add(process)
                     registered = True
-                    if lease is not None:
-                        self._leases[process] = lease
+                    if retained_lease is not None:
+                        self._leases[process] = retained_lease
                     ownership_transferred = retained
                     return process
                 except BaseException:
@@ -362,13 +415,13 @@ class ReasoningProcessRegistry:
                             # process must continue blocking Offline even if registration
                             # itself failed. The identity-based fallback also keeps it
                             # available to every later shutdown retry.
-                            self._fallback.append((process, lease))
+                            self._fallback.append((process, retained_lease))
                             ownership_transferred = retained
                             raise ReasoningDrainError(
                                 "could not drain Codex process after registration failed"
                             ) from cleanup_error
                         if not process.tree_exited:
-                            self._fallback.append((process, lease))
+                            self._fallback.append((process, retained_lease))
                             ownership_transferred = retained
                             raise ReasoningDrainError(
                                 "Codex process exit remained unconfirmed after registration failed"
@@ -379,29 +432,85 @@ class ReasoningProcessRegistry:
             # Closing/factory/registration failures return the speculative retain;
             # fallback ownership keeps it until a later confirmed drain.
             if retained and not ownership_transferred:
-                lease.release()
+                retained_lease.release()
             raise
 
-    def release(self, process: _OwnedReasoningProcess) -> None:
-        with self._lock:
+    def release(
+        self,
+        process: _OwnedReasoningProcess,
+        *,
+        deadline: float | None = None,
+    ) -> bool:
+        def acquire_registry() -> bool:
+            if deadline is None:
+                self._lock.acquire()
+                return True
+            return self._lock.acquire(
+                timeout=max(0.0, deadline - time.monotonic())
+            )
+
+        if not acquire_registry():
+            return False
+        try:
+            tracked = False
+            lease = None
             try:
-                self._active.discard(process)
-                lease = self._leases.pop(process, None)
+                tracked = process in self._active or process in self._leases
+                lease = self._leases.get(process)
             except TypeError:
-                lease = None
-            for index, (candidate, fallback_lease) in enumerate(self._fallback):
+                pass
+            for candidate, fallback_lease in self._fallback:
                 if candidate is process:
-                    self._fallback.pop(index)
+                    tracked = True
                     lease = fallback_lease
                     break
-        # Never acquire the policy lock while holding the registry lock: spawn
-        # consistently takes policy then registry, so the reverse order can deadlock.
-        if lease is not None:
+            if not tracked:
+                return True
+            if lease is None:
+                try:
+                    self._active.discard(process)
+                    self._leases.pop(process, None)
+                except TypeError:
+                    pass
+                self._fallback = [
+                    entry for entry in self._fallback if entry[0] is not process
+                ]
+                return True
+        finally:
+            self._lock.release()
+
+        # The retained owner is idempotent. If policy or registry contention
+        # exhausts this attempt's deadline, the process entry remains available
+        # for a later retry without decrementing the same reference twice.
+        if deadline is None:
             lease.release()
+        elif not lease.release_until(deadline=deadline):
+            return False
+
+        if not acquire_registry():
+            return False
+        try:
+            try:
+                if self._leases.get(process) is lease:
+                    self._active.discard(process)
+                    self._leases.pop(process, None)
+            except TypeError:
+                pass
+            self._fallback = [
+                entry
+                for entry in self._fallback
+                if not (entry[0] is process and entry[1] is lease)
+            ]
+            return True
+        finally:
+            self._lock.release()
 
     def shutdown(self, *, timeout: float = 5.0) -> None:
         """Reject new launches, kill all registered trees, and reap their parents."""
         deadline = time.monotonic() + max(0.0, timeout)
+        # Latch intent before any contended ownership lock. Even an attempt that
+        # exhausts its budget must reject every fresh launch until a later retry.
+        self._closing.set()
         if not self._lock.acquire(
             timeout=max(0.0, deadline - time.monotonic())
         ):
@@ -409,7 +518,6 @@ class ReasoningProcessRegistry:
                 "could not acquire the reasoning registry before the shutdown deadline"
             )
         try:
-            self._closing = True
             active = tuple(self._active) + tuple(
                 process for process, _lease in self._fallback
             )
@@ -436,9 +544,22 @@ class ReasoningProcessRegistry:
             else:
                 # A failed wait must not make a live tree disappear from ownership.
                 # A later shutdown call can retry every entry that remains tracked.
-                if process.tree_exited:
-                    self.release(process)
-        remaining = self.active_count
+                if isinstance(process, _OwnedReasoningProcess):
+                    tree_exited = process.tree_exited_until(deadline=deadline)
+                else:
+                    tree_exited = process.tree_exited
+                if tree_exited:
+                    self.release(process, deadline=deadline)
+        if not self._lock.acquire(
+            timeout=max(0.0, deadline - time.monotonic())
+        ):
+            raise ReasoningDrainError(
+                "could not inspect the reasoning registry before the shutdown deadline"
+            )
+        try:
+            remaining = len(self._active) + len(self._fallback)
+        finally:
+            self._lock.release()
         if remaining:
             raise ReasoningDrainError(
                 f"could not confirm exit for {remaining} Codex process tree(s)"

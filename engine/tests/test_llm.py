@@ -1152,6 +1152,176 @@ def test_registry_deadline_bounds_contended_tree_lock(monkeypatch):
     assert registry.active_count == 1
 
 
+def test_registry_deadline_bounds_contended_tree_exit_read():
+    inspect_exit = threading.Event()
+    exit_lock_held = threading.Event()
+
+    class Parent:
+        pid = 4242
+
+        def kill(self):
+            pass
+
+    class ContendedExitProcess(llm._OwnedReasoningProcess):
+        def terminate_and_wait_until(self, *, deadline):
+            self._tree_exited = True
+            inspect_exit.set()
+            assert exit_lock_held.wait(1)
+
+    process = ContendedExitProcess(Parent(), owns_group=False)
+    registry = llm.ReasoningProcessRegistry()
+    registry.spawn(lambda: process)
+
+    def contend_exit_read():
+        assert inspect_exit.wait(1)
+        with process._tree_lock:
+            exit_lock_held.set()
+            time.sleep(0.25)
+
+    contender = threading.Thread(target=contend_exit_read)
+    contender.start()
+    started = time.monotonic()
+    with pytest.raises(llm.ReasoningDrainError):
+        registry.shutdown(timeout=0)
+    elapsed = time.monotonic() - started
+    contender.join(1)
+
+    assert elapsed < 0.1
+    assert registry.active_count == 1
+
+
+def test_registry_deadline_bounds_contended_final_inspection():
+    registry = llm.ReasoningProcessRegistry()
+    hold_registry = threading.Event()
+    registry_held = threading.Event()
+
+    class StuckProcess:
+        tree_exited = False
+
+        def kill(self):
+            pass
+
+        def terminate_and_wait(self, *, timeout):
+            hold_registry.set()
+            assert registry_held.wait(1)
+            raise RuntimeError("tree still live")
+
+    registry.spawn(StuckProcess)
+
+    def contend_final_inspection():
+        assert hold_registry.wait(1)
+        with registry._lock:
+            registry_held.set()
+            time.sleep(0.25)
+
+    contender = threading.Thread(target=contend_final_inspection)
+    contender.start()
+    started = time.monotonic()
+    with pytest.raises(llm.ReasoningDrainError):
+        registry.shutdown(timeout=0)
+    elapsed = time.monotonic() - started
+    contender.join(1)
+
+    assert elapsed < 0.1
+    assert registry.active_count == 1
+
+
+def test_registry_deadline_bounds_contended_policy_lease_release():
+    policy = NetworkPolicy()
+    registry = llm.ReasoningProcessRegistry()
+    policy_held = threading.Event()
+
+    class Process:
+        tree_exited = False
+
+        def kill(self):
+            pass
+
+        def terminate_and_wait(self, *, timeout):
+            self.tree_exited = True
+
+    process = Process()
+
+    def contend_policy_release():
+        with policy._lock:
+            policy_held.set()
+            time.sleep(0.25)
+
+    with policy.egress("codex_reasoning") as lease:
+        registry.spawn(lambda: process, lease=lease)
+        contender = threading.Thread(target=contend_policy_release)
+        contender.start()
+        assert policy_held.wait(1)
+
+        started = time.monotonic()
+        with pytest.raises(llm.ReasoningDrainError):
+            registry.shutdown(timeout=0)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.1
+        assert registry.active_count == 1
+        assert policy.active_leases == 1
+        contender.join(1)
+
+        registry.shutdown(timeout=0.1)
+        assert registry.active_count == 0
+        assert policy.active_leases == 1
+
+    assert policy.active_leases == 0
+
+
+def test_registry_retry_does_not_double_release_after_final_lock_contention():
+    policy = NetworkPolicy()
+    registry = llm.ReasoningProcessRegistry()
+    contend_registry = threading.Event()
+    registry_held = threading.Event()
+
+    class Process:
+        tree_exited = False
+
+        def kill(self):
+            pass
+
+        def terminate_and_wait(self, *, timeout):
+            self.tree_exited = True
+
+    process = Process()
+
+    def hold_final_registry_lock():
+        assert contend_registry.wait(1)
+        with registry._lock:
+            registry_held.set()
+            time.sleep(0.25)
+
+    with policy.egress("codex_reasoning") as lease:
+        registry.spawn(lambda: process, lease=lease)
+        real_release_until = lease.release_until
+
+        def release_then_contend(*, deadline):
+            released = real_release_until(deadline=deadline)
+            contend_registry.set()
+            assert registry_held.wait(1)
+            return released
+
+        lease.release_until = release_then_contend
+        contender = threading.Thread(target=hold_final_registry_lock)
+        contender.start()
+
+        with pytest.raises(llm.ReasoningDrainError):
+            registry.shutdown(timeout=0)
+        assert registry.active_count == 1
+        assert policy.active_leases == 1
+        contender.join(1)
+
+        registry.shutdown(timeout=0.1)
+        assert registry.active_count == 0
+        # The context's original reference must still be live. A second process
+        # release would incorrectly return policy capacity here.
+        assert policy.active_leases == 1
+
+    assert policy.active_leases == 0
+
+
 @pytest.mark.parametrize(
     "first_error",
     [
@@ -1375,6 +1545,116 @@ def test_spawn_never_holds_registry_lock_while_retaining_policy_lease():
 
     assert outcome == [process]
     registry.release(process)
+
+
+def test_contended_shutdown_latches_closing_before_registry_lock():
+    registry = llm.ReasoningProcessRegistry()
+    factory_entered = threading.Event()
+    release_factory = threading.Event()
+    outcome = []
+
+    class Process:
+        tree_exited = False
+
+        def terminate_and_wait(self, *, timeout):
+            self.tree_exited = True
+
+    process = Process()
+
+    def blocked_factory():
+        factory_entered.set()
+        assert release_factory.wait(1)
+        return process
+
+    worker = threading.Thread(
+        target=lambda: outcome.append(_capture_registry_spawn(registry, blocked_factory))
+    )
+    worker.start()
+    try:
+        assert factory_entered.wait(1)
+        with pytest.raises(llm.ReasoningDrainError):
+            registry.shutdown(timeout=0)
+        assert registry.closing is True
+    finally:
+        release_factory.set()
+        worker.join(1)
+
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], llm.ProviderUnavailableError)
+    assert process.tree_exited is True
+    assert registry.active_count == 0
+
+    class LeaseThatMustNotRetain:
+        def retain_for_process(self):
+            raise AssertionError("closing must be checked before lease retention")
+
+    with pytest.raises(llm.ProviderUnavailableError, match="shutting down"):
+        registry.spawn(lambda: Process(), lease=LeaseThatMustNotRetain())
+
+
+def test_latched_shutdown_retains_inflight_factory_lease_until_confirmed_drain():
+    policy = NetworkPolicy()
+    registry = llm.ReasoningProcessRegistry()
+    factory_entered = threading.Event()
+    release_factory = threading.Event()
+    outcome = []
+
+    class InitiallyStuckProcess:
+        __hash__ = None
+        tree_exited = False
+
+        def __init__(self):
+            self.attempts = 0
+
+        def kill(self):
+            pass
+
+        def terminate_and_wait(self, *, timeout):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("tree still live")
+            self.tree_exited = True
+
+    process = InitiallyStuckProcess()
+
+    def blocked_factory():
+        factory_entered.set()
+        assert release_factory.wait(1)
+        return process
+
+    def spawn_with_lease():
+        with policy.egress("codex_reasoning") as lease:
+            try:
+                outcome.append(registry.spawn(blocked_factory, lease=lease))
+            except BaseException as exc:
+                outcome.append(exc)
+
+    worker = threading.Thread(target=spawn_with_lease)
+    worker.start()
+    try:
+        assert factory_entered.wait(1)
+        with pytest.raises(llm.ReasoningDrainError):
+            registry.shutdown(timeout=0)
+    finally:
+        release_factory.set()
+        worker.join(1)
+
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], llm.ReasoningDrainError)
+    assert registry.active_count == 1
+    assert policy.active_leases == 1
+
+    registry.shutdown(timeout=0)
+    assert process.attempts == 2
+    assert registry.active_count == 0
+    assert policy.active_leases == 0
+
+
+def _capture_registry_spawn(registry, factory):
+    try:
+        return registry.spawn(factory)
+    except BaseException as exc:
+        return exc
 
 
 @pytest.mark.parametrize("failure", ["closing", "factory"])
