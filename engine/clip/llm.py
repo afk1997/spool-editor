@@ -29,7 +29,9 @@ import shutil
 import subprocess
 import tempfile
 import time
+from threading import RLock
 from typing import Callable, Mapping, Protocol, runtime_checkable
+from weakref import WeakKeyDictionary
 
 from network_policy import NetworkPolicy, NetworkPolicyError
 
@@ -144,77 +146,166 @@ class _OwnedReasoningProcess:
         self._process = process
         self._pgid = process.pid if owns_group and hasattr(process, "pid") else None
         self._tree_exited = False
+        self._tree_lock = RLock()
 
     def __getattr__(self, name):
         return getattr(self._process, name)
 
     def kill(self) -> None:
-        if self._tree_exited:
-            return
-        if self._pgid is not None:
-            try:
-                os.killpg(self._pgid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        with self._tree_lock:
+            if self._tree_exited:
                 return
+            if self._pgid is not None:
+                try:
+                    os.killpg(self._pgid, getattr(signal, "SIGKILL", signal.SIGTERM))
+                    return
+                except ProcessLookupError:
+                    # A shim may accept ``start_new_session`` but ignore it. A missing
+                    # process group therefore does not prove the direct parent exited.
+                    self._pgid = None
+                except (AttributeError, OSError):
+                    pass
+            try:
+                self._process.kill()
             except ProcessLookupError:
-                # A shim may accept ``start_new_session`` but ignore it. A missing
-                # process group therefore does not prove the direct parent exited.
-                self._pgid = None
-            except (AttributeError, OSError):
-                pass
-        try:
-            self._process.kill()
-        except ProcessLookupError:
-            self._tree_exited = True
+                self._tree_exited = True
+
+    @property
+    def tree_exited(self) -> bool:
+        with self._tree_lock:
+            return self._tree_exited
 
     def wait_for_group_exit(self, *, timeout: float = 0.25) -> None:
         """Keep the lease until the group is gone; kill a detached lingering child."""
-        if self._pgid is None:
-            self._tree_exited = True
-            return
-
-        def group_is_gone() -> bool:
-            try:
-                os.killpg(self._pgid, 0)
-            except ProcessLookupError:
-                self._pgid = None
+        with self._tree_lock:
+            if self._pgid is None:
                 self._tree_exited = True
-                return True
-            except AttributeError:
-                self._pgid = None
-                self._tree_exited = True
-                return True
-            except OSError:
-                # EPERM and other probe errors do not prove the group is gone.
-                return False
-            return False
+                return
 
-        def wait_phase(seconds: float) -> bool:
-            deadline = time.monotonic() + seconds
-            while not group_is_gone():
-                if time.monotonic() >= deadline:
+            def group_is_gone() -> bool:
+                try:
+                    os.killpg(self._pgid, 0)
+                except ProcessLookupError:
+                    self._pgid = None
+                    self._tree_exited = True
+                    return True
+                except AttributeError:
+                    self._pgid = None
+                    self._tree_exited = True
+                    return True
+                except OSError:
+                    # EPERM and other probe errors do not prove the group is gone.
                     return False
-                time.sleep(0.01)
-            return True
+                return False
 
-        if wait_phase(timeout):
-            return
-        try:
-            os.killpg(self._pgid, getattr(signal, "SIGKILL", signal.SIGTERM))
-        except ProcessLookupError:
-            self._pgid = None
-            self._tree_exited = True
-            return
-        except (AttributeError, OSError):
+            def wait_phase(seconds: float) -> bool:
+                deadline = time.monotonic() + seconds
+                while not group_is_gone():
+                    if time.monotonic() >= deadline:
+                        return False
+                    time.sleep(0.01)
+                return True
+
             try:
-                self._process.kill()
-            except (ProcessLookupError, OSError):
-                pass
-        forced_timeout = max(2.0, timeout)
-        if wait_phase(forced_timeout):
-            return
-        raise RuntimeError(
-            f"Codex process group did not exit after SIGKILL within {forced_timeout:g}s"
-        )
+                if wait_phase(timeout):
+                    return
+                try:
+                    os.killpg(self._pgid, getattr(signal, "SIGKILL", signal.SIGTERM))
+                except ProcessLookupError:
+                    self._pgid = None
+                    self._tree_exited = True
+                    return
+                except (AttributeError, OSError):
+                    try:
+                        self._process.kill()
+                    except (ProcessLookupError, OSError):
+                        pass
+                forced_timeout = max(2.0, timeout)
+                if wait_phase(forced_timeout):
+                    return
+                raise RuntimeError(
+                    "Codex process group did not exit after SIGKILL within "
+                    f"{forced_timeout:g}s"
+                )
+            finally:
+                if self._pgid is None:
+                    self._tree_exited = True
+
+    def terminate_and_wait(self, *, timeout: float) -> None:
+        """Stop a live tree during engine shutdown and reap its direct parent."""
+        self.kill()
+        try:
+            self._process.wait(timeout=max(0.0, timeout))
+        except subprocess.TimeoutExpired:
+            self.kill()
+            self._process.wait()
+        self.wait_for_group_exit(timeout=min(0.25, max(0.0, timeout)))
+
+
+class ReasoningProcessRegistry:
+    """Own every Codex process tree admitted for one engine policy."""
+
+    def __init__(self):
+        self._lock = RLock()
+        self._active: set[_OwnedReasoningProcess] = set()
+        self._closing = False
+
+    @property
+    def active_count(self) -> int:
+        with self._lock:
+            return len(self._active)
+
+    @property
+    def closing(self) -> bool:
+        with self._lock:
+            return self._closing
+
+    def spawn(self, factory: Callable[[], _OwnedReasoningProcess]) -> _OwnedReasoningProcess:
+        """Linearize process creation/registration against shutdown."""
+        with self._lock:
+            if self._closing:
+                raise ProviderUnavailableError("remote reasoning is shutting down")
+            process = factory()
+            self._active.add(process)
+            return process
+
+    def release(self, process: _OwnedReasoningProcess) -> None:
+        with self._lock:
+            self._active.discard(process)
+
+    def shutdown(self, *, timeout: float = 5.0) -> None:
+        """Reject new launches, kill all registered trees, and reap their parents."""
+        with self._lock:
+            self._closing = True
+            active = tuple(self._active)
+        for process in active:
+            process.kill()
+        deadline = time.monotonic() + max(0.0, timeout)
+        for process in active:
+            try:
+                process.terminate_and_wait(
+                    timeout=max(0.0, deadline - time.monotonic())
+                )
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                _log.warning("could not drain Codex process during shutdown: %s", exc)
+            finally:
+                self.release(process)
+
+
+_reasoning_registries_lock = RLock()
+_reasoning_registries: WeakKeyDictionary[NetworkPolicy, ReasoningProcessRegistry] = (
+    WeakKeyDictionary()
+)
+
+
+def reasoning_process_registry(policy: NetworkPolicy) -> ReasoningProcessRegistry:
+    """Return the one process registry shared by every provider on ``policy``."""
+    with _reasoning_registries_lock:
+        registry = _reasoning_registries.get(policy)
+        if registry is None:
+            registry = ReasoningProcessRegistry()
+            _reasoning_registries[policy] = registry
+        return registry
 
 
 def _spawn_reasoning_process(argv: list[str], **kwargs) -> _OwnedReasoningProcess:
@@ -270,6 +361,7 @@ class CodexProvider:
     def __init__(self, *, network_policy: NetworkPolicy,
                  privacy_state: PrivacyState | None = None,
                  env: Mapping[str, object] | None = None,
+                 process_registry: ReasoningProcessRegistry | None = None,
                  bin: str | None = None, model: str | None = None,
                  timeout: int | None = None, cwd: str | None = None,
                  reasoning: str | None = None):
@@ -277,6 +369,7 @@ class CodexProvider:
         self._privacy_state_source = privacy_state
         self._privacy_env_source = env
         self.privacy_state = _privacy_getter(privacy_state, env)
+        self.process_registry = process_registry or reasoning_process_registry(network_policy)
         self.bin = bin or CODEX_BIN
         self.model = model if model is not None else CODEX_MODEL
         self.timeout = timeout if timeout is not None else CODEX_TIMEOUT
@@ -333,21 +426,27 @@ class CodexProvider:
                     _require_remote_reasoning(
                         self.privacy_state(), provider_name=self.name
                     )
-                    proc = _spawn_reasoning_process(
-                        argv,
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        cwd=scratch,
+                    proc = self.process_registry.spawn(
+                        lambda: _spawn_reasoning_process(
+                            argv,
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            cwd=scratch,
+                        )
                     )
             except FileNotFoundError as e:  # race: vanished between which() and spawn
                 raise ProviderUnavailableError(
                     f"the Codex CLI ({self.bin!r}) could not be run: {e}"
                 ) from e
-            stdout, stderr = _communicate_reasoning_process(
-                proc, input_text=full, timeout=self.timeout
-            )
+            try:
+                stdout, stderr = _communicate_reasoning_process(
+                    proc, input_text=full, timeout=self.timeout
+                )
+            finally:
+                if proc.tree_exited:
+                    self.process_registry.release(proc)
             if proc.returncode != 0:
                 raise RuntimeError(
                     f"codex exec failed (rc={proc.returncode}): {stderr.strip()[-500:]}"

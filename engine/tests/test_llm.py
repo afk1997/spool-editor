@@ -887,3 +887,81 @@ def test_codex_timeout_kills_real_descendant_before_releasing_lease(
                 os.kill(child_pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group ownership")
+def test_reasoning_registry_shutdown_kills_live_group_and_rejects_new_launches(
+    tmp_path, monkeypatch,
+):
+    policy = NetworkPolicy()
+    registry = llm.ReasoningProcessRegistry()
+    bridge_pid_file = tmp_path / "bridge.pid"
+    bridge = tmp_path / "codex-bridge"
+    bridge.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys, time\n"
+        "with open(os.environ['SPOOL_TEST_BRIDGE_PID'], 'w') as f:\n"
+        "    f.write(str(os.getpid())); f.flush(); os.fsync(f.fileno())\n"
+        "sys.stdin.read()\n"
+        "time.sleep(60)\n"
+    )
+    bridge.chmod(0o755)
+    monkeypatch.setenv("SPOOL_TEST_BRIDGE_PID", str(bridge_pid_file))
+    provider = llm.CodexProvider(
+        network_policy=policy,
+        privacy_state=lambda: _privacy(),
+        process_registry=registry,
+        bin=str(bridge),
+        timeout=60,
+    )
+    outcome = []
+    worker = threading.Thread(
+        target=lambda: _capture_completion(outcome, provider),
+    )
+    bridge_pid = None
+    try:
+        worker.start()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not bridge_pid_file.exists():
+            time.sleep(0.01)
+        assert bridge_pid_file.exists(), "Codex bridge never launched"
+        bridge_pid = int(bridge_pid_file.read_text())
+        assert registry.active_count == 1
+        assert policy.active_leases == 1
+
+        registry.shutdown(timeout=3)
+        worker.join(5)
+
+        assert not worker.is_alive()
+        assert len(outcome) == 1 and isinstance(outcome[0], RuntimeError)
+        assert registry.active_count == 0
+        assert registry.closing is True
+        assert policy.active_leases == 0
+        with pytest.raises(ProcessLookupError):
+            os.kill(bridge_pid, 0)
+
+        spawns = []
+        monkeypatch.setattr(
+            llm.subprocess,
+            "Popen",
+            lambda *args, **kwargs: spawns.append((args, kwargs)) or _FakeProc(),
+        )
+        with pytest.raises(llm.ProviderUnavailableError, match="shutting down"):
+            provider.complete("another transcript")
+        assert spawns == []
+    finally:
+        if worker.is_alive():
+            registry.shutdown(timeout=3)
+            worker.join(5)
+        if bridge_pid is not None:
+            try:
+                os.killpg(bridge_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def _capture_completion(outcome, provider):
+    try:
+        outcome.append(provider.complete("transcript"))
+    except BaseException as exc:
+        outcome.append(exc)
