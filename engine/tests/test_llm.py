@@ -281,6 +281,122 @@ def test_arbitrary_egress_provider_never_enters_an_opaque_completion():
     assert policy.active_leases == 0
 
 
+def test_supplied_codex_rejects_a_different_call_level_policy_before_discovery(
+    monkeypatch,
+):
+    owned_policy = NetworkPolicy()
+    shared_policy = NetworkPolicy()
+    state = _privacy()
+    discoveries = []
+    provider = llm.CodexProvider(
+        network_policy=owned_policy,
+        privacy_state=lambda: dict(state),
+    )
+    monkeypatch.setattr(
+        llm.shutil, "which", lambda binary: discoveries.append(binary) or binary
+    )
+    monkeypatch.setattr(
+        llm.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a mismatched policy must stop before process launch")
+        ),
+    )
+
+    with pytest.raises(llm.ProviderUnavailableError, match="shared network policy"):
+        llm.complete(
+            "transcript",
+            provider=provider,
+            network_policy=shared_policy,
+        )
+
+    assert discoveries == []
+    assert owned_policy.active_leases == 0
+    assert shared_policy.active_leases == 0
+
+
+def test_supplied_codex_rejects_a_different_call_level_privacy_source(
+    monkeypatch,
+):
+    policy = NetworkPolicy()
+    provider_state = lambda: _privacy()
+    call_state = lambda: _privacy()
+    discoveries = []
+    provider = llm.CodexProvider(
+        network_policy=policy,
+        privacy_state=provider_state,
+    )
+    monkeypatch.setattr(
+        llm.shutil, "which", lambda binary: discoveries.append(binary) or binary
+    )
+    monkeypatch.setattr(
+        llm.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a mismatched privacy source must stop before process launch")
+        ),
+    )
+
+    with pytest.raises(llm.ProviderUnavailableError, match="shared privacy state"):
+        llm.complete(
+            "transcript",
+            provider=provider,
+            network_policy=policy,
+            privacy_state=call_state,
+        )
+
+    assert discoveries == []
+    assert policy.active_leases == 0
+
+
+def test_call_level_offline_policy_precedes_a_supplied_codex_policy(monkeypatch):
+    owned_policy = NetworkPolicy()
+    shared_policy = NetworkPolicy(offline=True)
+    spawns = []
+    provider = llm.CodexProvider(
+        network_policy=owned_policy,
+        privacy_state=lambda: _privacy(),
+    )
+    monkeypatch.setattr(llm.shutil, "which", lambda _binary: "/usr/bin/codex")
+    monkeypatch.setattr(
+        llm.subprocess,
+        "Popen",
+        lambda *args, **kwargs: spawns.append((args, kwargs)) or _FakeProc(),
+    )
+
+    with pytest.raises(llm.OfflineError) as denied:
+        llm.complete(
+            "transcript",
+            provider=provider,
+            network_policy=shared_policy,
+        )
+
+    assert denied.value.error_category == "offline_network_disabled"
+    assert spawns == []
+    assert owned_policy.active_leases == 0
+    assert shared_policy.active_leases == 0
+
+
+def test_offline_policy_precedes_opaque_provider_unavailability():
+    calls = []
+    provider = llm.CallableProvider(
+        lambda prompt, system=None: calls.append(prompt) or "unsafe",
+        name="opaque",
+        egress=True,
+    )
+
+    with pytest.raises(llm.OfflineError) as denied:
+        llm.complete(
+            "transcript",
+            provider=provider,
+            network_policy=NetworkPolicy(offline=True),
+            privacy_state=lambda: _privacy(),
+        )
+
+    assert denied.value.error_category == "offline_network_disabled"
+    assert calls == []
+
+
 def test_codex_rechecks_live_consent_inside_lease_before_cli_discovery(monkeypatch):
     policy = NetworkPolicy()
     reads = []

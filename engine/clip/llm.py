@@ -274,6 +274,8 @@ class CodexProvider:
                  timeout: int | None = None, cwd: str | None = None,
                  reasoning: str | None = None):
         self.network_policy = network_policy
+        self._privacy_state_source = privacy_state
+        self._privacy_env_source = env
         self.privacy_state = _privacy_getter(privacy_state, env)
         self.bin = bin or CODEX_BIN
         self.model = model if model is not None else CODEX_MODEL
@@ -466,10 +468,38 @@ def complete(
     # Codex owns the direct boundary itself so even callers that invoke the provider
     # instance directly cannot bypass the live checks or the shared lease.
     if isinstance(p, CodexProvider):
+        if network_policy is not None and network_policy is not p.network_policy:
+            if network_policy.offline:
+                raise OfflineError(
+                    "LLM provider 'codex' needs network egress, but offline mode is on."
+                )
+            raise ProviderUnavailableError(
+                "the supplied Codex provider is not bound to the shared network policy"
+            )
+        if privacy_state is not None and privacy_state is not p._privacy_state_source:
+            _require_remote_reasoning(
+                _privacy_getter(privacy_state, env)(), provider_name=p.name
+            )
+            raise ProviderUnavailableError(
+                "the supplied Codex provider is not bound to the shared privacy state"
+            )
+        if (
+            privacy_state is None
+            and env is not None
+            and env is not p._privacy_env_source
+        ):
+            _require_remote_reasoning(_env_privacy_state(env), provider_name=p.name)
+            raise ProviderUnavailableError(
+                "the supplied Codex provider is not bound to the shared privacy state"
+            )
         return p.complete(prompt, system=system)
 
     if network_policy is None:
         raise ValueError("network_policy is required for an egress provider")
+    if network_policy.offline:
+        raise OfflineError(
+            f"LLM provider {p.name!r} needs network egress, but offline mode is on."
+        )
     state = _privacy_getter(privacy_state, env)
     _require_remote_reasoning(state(), provider_name=p.name)
     raise ProviderUnavailableError(
