@@ -854,11 +854,16 @@ def create_app() -> Flask:
                 lk = _watch_locks[watch_id] = threading.Lock()
             return lk
 
-    def _reconcile_one(watch: dict) -> dict:
+    def _reconcile_one(watch: dict, *, refresh_listing: bool = False) -> dict:
         # Re-read the latest persisted state UNDER the lock so a concurrent tick on the same watch
         # can't clobber our get→reconcile→set_state with a stale snapshot.
         with _watch_lock(watch["id"]):
             fresh = watch_store.get(watch["id"]) or watch
+            if refresh_listing and _remote_watch(fresh):
+                # Manual refresh must invalidate after waiting for an in-flight poll.
+                # Otherwise that poll can repopulate the cache between invalidation and
+                # lock acquisition, making "Scan now" consume the just-warmed entry.
+                watcher.invalidate_listing(fresh.get("target"))
             r = watcher.reconcile_watch(fresh, list_items=_watch_items, ingest=_watch_ingest,
                                         transcript_done=_watch_transcript_done, produce=_watch_produce,
                                         produce_status=_watch_produce_status)
@@ -876,9 +881,7 @@ def create_app() -> Flask:
             # An Offline rejection therefore cannot erase a warm cache or advance retry
             # state, and an accepted scan prevents Offline from becoming visible mid-tick.
             with network_policy.egress("watch_scan"):
-                # Manual scan = explicit "look again now": bypass the listing TTL.
-                watcher.invalidate_listing(w.get("target"))
-                return _reconcile_one(w)
+                return _reconcile_one(w, refresh_listing=True)
         return _reconcile_one(w)
 
     def _reconcile_all() -> None:

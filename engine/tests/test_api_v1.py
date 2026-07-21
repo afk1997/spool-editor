@@ -8,6 +8,7 @@ existing endpoint tests use.
 from __future__ import annotations
 import os
 import copy
+import inspect
 import threading
 import time
 from pathlib import Path
@@ -2697,6 +2698,49 @@ def test_watch_validation(client):
     assert c.delete("/api/v1/watches/nope").status_code == 404
 
 
+def test_watch_create_and_update_reject_non_object_json(client, tmp_path):
+    app, c = client
+    created = c.post("/api/v1/watches", json={
+        "name": "local", "kind": "folder", "target": str(tmp_path),
+    }).get_json()
+    store = app.extensions["trove.watches"]
+    before = store.list()
+
+    create_response = c.post("/api/v1/watches", json=[{"kind": "folder"}])
+    update_response = c.patch(
+        f"/api/v1/watches/{created['id']}", json=[{"name": "changed"}],
+    )
+
+    assert create_response.status_code == 400
+    assert create_response.get_json() == {"error": "bad_watch"}
+    assert update_response.status_code == 400
+    assert update_response.get_json() == {"error": "bad_watch"}
+    assert store.list() == before
+
+
+@pytest.mark.parametrize(
+    ("kind", "target"),
+    [
+        ("folder", "/tmp/local-watch"),
+        ("playlist", "https://93.184.216.34/list"),
+    ],
+)
+def test_watch_update_returns_404_if_record_is_deleted_after_preread(
+    client, monkeypatch, kind, target,
+):
+    app, c = client
+    store = app.extensions["trove.watches"]
+    created = c.post("/api/v1/watches", json={
+        "name": "race", "kind": kind, "target": target,
+    }).get_json()
+    monkeypatch.setattr(store, "update", lambda *_a, **_kw: None)
+
+    response = c.patch(f"/api/v1/watches/{created['id']}", json={"name": "too late"})
+
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "not_found"}
+
+
 def test_watch_scan_ingests_new_folder_videos(client, tmp_path, monkeypatch):
     monkeypatch.setattr("clip.moments.find_moments", lambda *a, **k: [])
     app, c = client
@@ -2781,6 +2825,82 @@ def test_offline_background_reconcile_skips_remote_and_continues_local(client, t
     assert local["id"] in set_state_ids
     assert store.get(remote["id"]) == remote_before
     assert warning_calls == []
+
+
+def test_manual_remote_scan_invalidates_cache_after_waiting_for_same_watch_poll(
+    client, monkeypatch,
+):
+    app, c = client
+    target = "https://93.184.216.34/list"
+    watch = c.post("/api/v1/watches", json={
+        "name": "Remote", "kind": "playlist", "target": target,
+    }).get_json()
+    cache_key = (target, 30)
+    watcher.clear_listing_cache()
+    poll_in_listing = threading.Event()
+    allow_poll_finish = threading.Event()
+    waiter_at_lock = threading.Event()
+    cache_present_at_listing = []
+    errors = []
+
+    reconcile_all = app.extensions["trove.watch_reconcile_all"]
+    reconcile_one = inspect.getclosurevars(reconcile_all).nonlocals["_reconcile_one"]
+    watch_lock = inspect.getclosurevars(reconcile_one).nonlocals["_watch_lock"]
+    watch_locks = inspect.getclosurevars(watch_lock).nonlocals["_watch_locks"]
+    real_lock = threading.Lock()
+
+    class _ObservedLock:
+        def __enter__(self):
+            if real_lock.locked():
+                waiter_at_lock.set()
+            real_lock.acquire()
+            return self
+
+        def __exit__(self, *_exc):
+            real_lock.release()
+
+    watch_locks[watch["id"]] = _ObservedLock()
+
+    def fake_listing(_target, **_kwargs):
+        cache_present_at_listing.append(cache_key in watcher._listing_cache)
+        if len(cache_present_at_listing) == 1:
+            poll_in_listing.set()
+            assert allow_poll_finish.wait(timeout=3)
+            watcher._listing_cache[cache_key] = {
+                "items": ["https://youtu.be/poll"], "expires": float("inf"), "fails": 0,
+            }
+        return []
+
+    monkeypatch.setattr(watcher, "list_playlist_items", fake_listing)
+
+    def run(callable_):
+        try:
+            callable_()
+        except BaseException as error:
+            errors.append(error)
+
+    poll = threading.Thread(target=lambda: run(reconcile_all))
+    manual = threading.Thread(
+        target=lambda: run(lambda: app.extensions["trove.watch_reconcile"](watch["id"])),
+    )
+
+    try:
+        poll.start()
+        assert poll_in_listing.wait(timeout=3)
+        manual.start()
+        assert waiter_at_lock.wait(timeout=3)
+        allow_poll_finish.set()
+        poll.join(timeout=3)
+        manual.join(timeout=3)
+
+        assert not poll.is_alive() and not manual.is_alive()
+        assert errors == []
+        assert cache_present_at_listing == [False, False]
+    finally:
+        allow_poll_finish.set()
+        poll.join(timeout=3)
+        manual.join(timeout=3)
+        watcher.clear_listing_cache()
 
 
 def test_watch_scan_unknown_404(client):

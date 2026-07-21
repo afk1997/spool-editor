@@ -9,6 +9,7 @@ calls this on an interval per enabled watch. NOTHING is auto-published (Phase 4)
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import time
 
@@ -52,6 +53,100 @@ _LISTING_BACKOFF_MAX = 3600.0   # consecutive empty/failed listings back off up 
 _listing_cache: dict[tuple[str, int], dict] = {}
 
 
+def _spawn_listing_process(argv: list[str]):
+    """Start a listing parent in its own POSIX session; tolerate lightweight fakes."""
+    kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True}
+    owns_group = os.name == "posix"
+    if not owns_group:
+        process = subprocess.Popen(argv, **kwargs)
+    else:
+        try:
+            process = subprocess.Popen(argv, start_new_session=True, **kwargs)
+        except TypeError:
+            # Small test fakes and unusual process shims may not accept the POSIX kwarg.
+            process = subprocess.Popen(argv, **kwargs)
+            owns_group = False
+    pgid = process.pid if owns_group and hasattr(process, "pid") else None
+    return process, pgid
+
+
+def _listing_group_gone(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    except AttributeError:
+        return True
+    except OSError:
+        # A probe error does not prove absence; retain ownership and fail closed.
+        return False
+    return False
+
+
+def _wait_listing_group_gone(pgid: int, *, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while not _listing_group_gone(pgid):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def _reap_listing_parent(process) -> None:
+    try:
+        process.wait(timeout=2)
+    except AttributeError:
+        return
+    except TypeError:
+        process.wait()
+    except subprocess.TimeoutExpired:
+        process.wait()
+
+
+def _signal_listing_tree(process, pgid: int | None) -> None:
+    if pgid is not None:
+        try:
+            os.killpg(pgid, getattr(signal, "SIGKILL", signal.SIGTERM))
+            return
+        except ProcessLookupError:
+            return
+        except (AttributeError, OSError):
+            pass
+    try:
+        process.kill()
+    except (AttributeError, ProcessLookupError, OSError):
+        pass
+
+
+def _quiesce_listing_tree(process, pgid: int | None, *, force: bool) -> None:
+    """Reap the parent and confirm no owned descendant can outlive its lease."""
+    if force:
+        _signal_listing_tree(process, pgid)
+        _reap_listing_parent(process)
+    if pgid is None:
+        return
+    if _wait_listing_group_gone(pgid, timeout=0.05):
+        return
+    # A normally-exited parent can still leave ffmpeg/external-downloader children.
+    _signal_listing_tree(process, pgid)
+    if _wait_listing_group_gone(pgid, timeout=5.0):
+        return
+    raise RuntimeError("watch listing process group did not exit after SIGKILL")
+
+
+def _run_listing_process(argv: list[str], *, timeout: float):
+    process, pgid = _spawn_listing_process(argv)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except BaseException:
+        _quiesce_listing_tree(process, pgid, force=True)
+        raise
+    _quiesce_listing_tree(process, pgid, force=False)
+    return subprocess.CompletedProcess(
+        argv, process.returncode, stdout=stdout, stderr=stderr,
+    )
+
+
 def clear_listing_cache() -> None:
     """Drop every cached listing (tests + full resets)."""
     _listing_cache.clear()
@@ -67,7 +162,7 @@ def invalidate_listing(target: str | None) -> None:
 
 def list_playlist_items(url: str, *, network_policy: NetworkPolicy,
                         limit: int = 30, ytdlp: str = "yt-dlp",
-                        now: float | None = None) -> list[str]:
+                        now: float | None = None, timeout: float = 90) -> list[str]:
     """Canonical video URLs on a channel/playlist via a yt-dlp FLAT listing (metadata only, no
     download), newest-first and capped. We print ``url`` (the per-entry webpage URL), NOT the bare
     ``id`` — the reconciler hands each item straight to ``enqueue_download(url=…)`` and a bare id is
@@ -96,10 +191,10 @@ def list_playlist_items(url: str, *, network_policy: NetworkPolicy,
         if hit is not None and t < hit["expires"]:
             return list(hit["items"])
         try:
-            out = subprocess.run(
+            out = _run_listing_process(
                 [ytdlp, "--flat-playlist", "--print", "url",
                  "--playlist-end", str(int(limit)), "--", target],
-                capture_output=True, text=True, timeout=90,
+                timeout=timeout,
             ).stdout
             items = [ln.strip() for ln in out.splitlines() if ln.strip()]
         except NetworkPolicyError:

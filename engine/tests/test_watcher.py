@@ -4,6 +4,9 @@ produce once transcribed — is tested without real downloads, jobs, or yt-dlp."
 from __future__ import annotations
 
 import os
+import signal
+import subprocess
+import sys
 import time
 import types
 
@@ -30,7 +33,7 @@ def test_list_playlist_items_returns_canonical_urls_not_bare_ids(monkeypatch):
                 "url": "https://site/watch?v=aaa\nhttps://site/watch?v=bbb\n"}
         return _Result(data.get(field, ""))
 
-    monkeypatch.setattr(watcher.subprocess, "run", fake_run)
+    monkeypatch.setattr(watcher, "_run_listing_process", fake_run)
     items = list_playlist_items("https://site/playlist", limit=10,
                                 network_policy=NetworkPolicy())
 
@@ -228,7 +231,7 @@ def test_list_playlist_items_uses_separator_and_rejects_option_shaped(monkeypatc
     def fake_run(argv, **kw):
         calls.append(argv)
         return types.SimpleNamespace(stdout="https://youtu.be/x\n", returncode=0)
-    monkeypatch.setattr(watcher.subprocess, "run", fake_run)
+    monkeypatch.setattr(watcher, "_run_listing_process", fake_run)
 
     policy = NetworkPolicy()
     items = watcher.list_playlist_items("https://example.com/playlist", network_policy=policy)
@@ -269,7 +272,7 @@ def test_playlist_listing_is_cached_within_ttl(monkeypatch):
     def fake_run(argv, **kw):
         calls.append(argv)
         return types.SimpleNamespace(stdout="https://youtu.be/a\n", returncode=0)
-    monkeypatch.setattr(watcher.subprocess, "run", fake_run)
+    monkeypatch.setattr(watcher, "_run_listing_process", fake_run)
     url = "https://93.184.216.34/list"
     policy = NetworkPolicy()
     assert watcher.list_playlist_items(url, now=1000.0, network_policy=policy) == ["https://youtu.be/a"]
@@ -285,7 +288,7 @@ def test_failed_listing_backs_off_exponentially(monkeypatch):
     def fake_run(argv, **kw):
         calls.append(argv)
         return types.SimpleNamespace(stdout="", returncode=0)   # dead URL: empty listing
-    monkeypatch.setattr(watcher.subprocess, "run", fake_run)
+    monkeypatch.setattr(watcher, "_run_listing_process", fake_run)
     url = "https://93.184.216.34/dead"
     t0 = 1000.0
     policy = NetworkPolicy()
@@ -306,7 +309,7 @@ def test_invalidate_listing_forces_a_fresh_fetch(monkeypatch):
     def fake_run(argv, **kw):
         calls.append(argv)
         return types.SimpleNamespace(stdout="https://youtu.be/a\n", returncode=0)
-    monkeypatch.setattr(watcher.subprocess, "run", fake_run)
+    monkeypatch.setattr(watcher, "_run_listing_process", fake_run)
     url = "https://93.184.216.34/list"
     policy = NetworkPolicy()
     watcher.list_playlist_items(url, now=1000.0, network_policy=policy)
@@ -337,7 +340,7 @@ def test_playlist_listing_holds_lease_before_cache_and_through_cache_update(monk
         assert blocked.value.code == "network_work_active"
         return types.SimpleNamespace(stdout="https://youtu.be/a\n", returncode=0)
 
-    monkeypatch.setattr(watcher.subprocess, "run", fake_run)
+    monkeypatch.setattr(watcher, "_run_listing_process", fake_run)
 
     assert watcher.list_playlist_items(
         "https://93.184.216.34/list", network_policy=policy,
@@ -364,7 +367,7 @@ def test_offline_playlist_listing_rejects_before_warm_cache_or_subprocess(monkey
     subprocess_calls = []
     monkeypatch.setattr(watcher, "_listing_cache", cache)
     monkeypatch.setattr(
-        watcher.subprocess, "run", lambda *a, **kw: subprocess_calls.append((a, kw)),
+        watcher, "_run_listing_process", lambda *a, **kw: subprocess_calls.append((a, kw)),
     )
 
     with pytest.raises(NetworkPolicyError) as denied:
@@ -381,7 +384,7 @@ def test_offline_playlist_listing_rejects_before_warm_cache_or_subprocess(monkey
 def test_playlist_listing_reraises_policy_denial_and_releases_outer_lease(monkeypatch):
     policy = NetworkPolicy()
     denial = NetworkPolicyError("offline_network_disabled", purpose="nested_test")
-    monkeypatch.setattr(watcher.subprocess, "run", lambda *_a, **_kw: (_ for _ in ()).throw(denial))
+    monkeypatch.setattr(watcher, "_run_listing_process", lambda *_a, **_kw: (_ for _ in ()).throw(denial))
 
     with pytest.raises(NetworkPolicyError) as raised:
         watcher.list_playlist_items(
@@ -408,10 +411,115 @@ def test_failed_playlist_listing_releases_lease_and_updates_backoff_inside_it(mo
         assert policy.active_leases == 1
         raise OSError("yt-dlp unavailable")
 
-    monkeypatch.setattr(watcher.subprocess, "run", fail)
+    monkeypatch.setattr(watcher, "_run_listing_process", fail)
 
     assert watcher.list_playlist_items(
         "https://93.184.216.34/dead", network_policy=policy,
     ) == []
     assert updates == [1]
     assert policy.active_leases == 0
+
+
+def test_listing_process_spawn_falls_back_for_popen_fakes_without_session_kwarg(monkeypatch):
+    calls = []
+
+    class _FakeProcess:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "https://youtu.be/a\n", ""
+
+    def fake_popen(argv, **kwargs):
+        calls.append(dict(kwargs))
+        if "start_new_session" in kwargs:
+            raise TypeError("fake does not support start_new_session")
+        return _FakeProcess()
+
+    monkeypatch.setattr(watcher.subprocess, "Popen", fake_popen)
+
+    result = watcher._run_listing_process(["fake-yt-dlp"], timeout=1)
+
+    assert result.stdout == "https://youtu.be/a\n"
+    assert calls[0]["start_new_session"] is True
+    assert "start_new_session" not in calls[1]
+
+
+def _listing_process_tree_helper(tmp_path):
+    helper = tmp_path / "listing_tree.py"
+    helper.write_text(
+        f"#!{sys.executable}\n"
+        "import os, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)\n"
+        "with open(os.environ['WATCH_TREE_PID_FILE'], 'w') as handle:\n"
+        "    handle.write(f'{os.getpid()} {child.pid}')\n"
+        "    handle.flush()\n"
+        "    os.fsync(handle.fileno())\n"
+        "time.sleep(60)\n"
+    )
+    helper.chmod(0o755)
+    return helper
+
+
+def _listing_pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    status = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
+    )
+    state = status.stdout.strip()
+    return status.returncode == 0 and bool(state) and not state.startswith("Z")
+
+
+def _wait_for_listing_pids_gone(pids, timeout=3):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not any(_listing_pid_alive(pid) for pid in pids):
+            return True
+        time.sleep(0.02)
+    return not any(_listing_pid_alive(pid) for pid in pids)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group regression")
+def test_playlist_timeout_terminates_real_process_tree_before_lease_release(
+    monkeypatch, tmp_path,
+):
+    helper = _listing_process_tree_helper(tmp_path)
+    pid_file = tmp_path / "listing-tree.pids"
+    monkeypatch.setenv("WATCH_TREE_PID_FILE", str(pid_file))
+    policy = NetworkPolicy()
+    real_killpg = os.killpg
+    group_signals = []
+    pids = []
+
+    def observe_group_signal(pgid, sig):
+        if sig != 0:
+            assert policy.active_leases == 1
+            group_signals.append((pgid, sig))
+        return real_killpg(pgid, sig)
+
+    monkeypatch.setattr(watcher.os, "killpg", observe_group_signal)
+
+    try:
+        assert watcher.list_playlist_items(
+            "https://93.184.216.34/list",
+            ytdlp=str(helper),
+            timeout=1,
+            network_policy=policy,
+        ) == []
+        pids = [int(value) for value in pid_file.read_text().split()]
+
+        assert group_signals
+        assert policy.active_leases == 0
+        assert _wait_for_listing_pids_gone(pids)
+    finally:
+        if not pids and pid_file.exists():
+            pids = [int(value) for value in pid_file.read_text().split()]
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        _wait_for_listing_pids_gone(pids)

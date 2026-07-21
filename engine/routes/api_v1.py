@@ -2220,7 +2220,10 @@ def list_watches():
 @api_v1_bp.post("/watches")
 @token_required
 def create_watch():
-    data = request.get_json(silent=True) or {}
+    raw = request.get_json(silent=True)
+    data = {} if raw is None else raw
+    if not isinstance(data, dict):
+        return jsonify({"error": "bad_watch"}), 400
     if data.get("kind") in ("channel", "playlist"):
         # Keep admission live through URL validation and persistence so enabling
         # Offline cannot race a remote watch into the store after a stale precheck.
@@ -2247,23 +2250,30 @@ def get_watch(watch_id):
 @api_v1_bp.patch("/watches/<watch_id>")
 @token_required
 def update_watch(watch_id):
-    data = request.get_json(silent=True) or {}
+    raw = request.get_json(silent=True)
+    data = {} if raw is None else raw
+    if not isinstance(data, dict):
+        return jsonify({"error": "bad_watch"}), 400
     current = _ws().get(watch_id)
     if current is None:
         return jsonify({"error": "not_found"}), 404
     effective_kind = data.get("kind", current.get("kind"))
+
+    def _apply_update():
+        err = _validate_watch(data, require_name=False, current=current)
+        if err:
+            return err
+        updated = _ws().update(watch_id, data)
+        if updated is None:
+            return jsonify({"error": "not_found"}), 404
+        return jsonify(updated)
+
     if current.get("kind") in ("channel", "playlist") or effective_kind in ("channel", "playlist"):
         # Every mutation of an existing/effective remote watch is a protected
         # operation, including metadata-only changes and remote-to-local repoints.
         with _network_policy().egress("watch_update"):
-            err = _validate_watch(data, require_name=False, current=current)
-            if err:
-                return err
-            return jsonify(_ws().update(watch_id, data))
-    err = _validate_watch(data, require_name=False, current=current)
-    if err:
-        return err
-    return jsonify(_ws().update(watch_id, data))
+            return _apply_update()
+    return _apply_update()
 
 
 @api_v1_bp.delete("/watches/<watch_id>")
