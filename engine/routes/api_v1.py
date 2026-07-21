@@ -2265,15 +2265,12 @@ def patch_settings():
     if err:
         return err
     try:
-        out = _settings().update(clean)
+        out = current_app.extensions["trove.commit_settings"](clean)
     except OSError as exc:
         return jsonify({
             "error": "settings_persist_failed",
             "message": str(exc) or "Could not persist settings.",
         }), 500
-    apply_cb = current_app.extensions.get("trove.apply_settings")
-    if apply_cb:
-        apply_cb(out)
     return jsonify(out)
 
 

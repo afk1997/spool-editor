@@ -67,6 +67,16 @@ def test_failed_atomic_transition_rolls_back_policy_state():
         assert policy.active_leases == 1
 
 
+@pytest.mark.parametrize("initial_offline", [False, True])
+def test_transition_none_holds_the_lock_without_changing_offline_state(initial_offline):
+    policy = NetworkPolicy(offline=initial_offline)
+
+    with policy.transition(None):
+        assert policy.offline is initial_offline
+
+    assert policy.offline is initial_offline
+
+
 def test_enabling_transition_rejects_reentrant_egress_before_commit():
     policy = NetworkPolicy()
 

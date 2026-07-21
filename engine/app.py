@@ -22,6 +22,7 @@ import watcher
 import settings as settings_store_mod
 import transcript_index as transcript_index_mod
 import clip_runner
+from network_policy import NetworkPolicy, NetworkPolicyError
 import time as _time
 from util import link_or_copy, sanitize_filename
 
@@ -60,6 +61,10 @@ def create_app() -> Flask:
     @app.errorhandler(AttemptUnwindingError)
     def _attempt_unwinding(_error):
         return jsonify({"error": "attempt_unwinding"}), 409
+
+    @app.errorhandler(NetworkPolicyError)
+    def _network_policy_error(error):
+        return jsonify({"error": error.code}), 409
 
     rate_limiter = RateLimiter(rate=RATE_LIMIT_PER_MIN, per_seconds=60)
     # Prefer the module-level DOWNLOAD_DIR so existing tests can use
@@ -100,6 +105,9 @@ def create_app() -> Flask:
     if seed:
         settings_store.update(seed)
 
+    network_policy = NetworkPolicy(offline=settings_store.get()["offline"])
+    app.extensions["trove.network_policy"] = network_policy
+
     def _apply_settings(values: dict) -> None:
         if values.get("offline"):
             os.environ["SPOOL_OFFLINE"] = "1"
@@ -114,6 +122,15 @@ def create_app() -> Flask:
 
     _apply_settings(settings_store.get())
     app.extensions["trove.apply_settings"] = _apply_settings
+
+    def _commit_settings(changes: dict) -> dict:
+        requested_offline = changes["offline"] if "offline" in changes else None
+        with network_policy.transition(requested_offline):
+            values = settings_store.update(changes)
+            _apply_settings(values)
+            return values
+
+    app.extensions["trove.commit_settings"] = _commit_settings
 
     # FTS5 (trigram) transcript index — an additive accelerator for /transcripts/search (spec
     # §7.2). The in-memory word-scan stays the source of truth; this only narrows which

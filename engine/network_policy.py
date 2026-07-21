@@ -60,11 +60,14 @@ class NetworkPolicy:
                 self._active_leases -= 1
 
     @contextmanager
-    def transition(self, offline: bool) -> Iterator[None]:
-        """Hold the policy lock through a caller-owned atomic settings transition."""
+    def transition(self, offline: bool | None) -> Iterator[None]:
+        """Hold the policy lock through a caller-owned atomic settings transition.
+
+        ``None`` preserves the current Offline state while still serializing the caller.
+        """
         self._lock.acquire()
         try:
-            next_offline = bool(offline)
+            next_offline = self._offline if offline is None else bool(offline)
             if next_offline and self._active_leases:
                 raise NetworkPolicyError("network_work_active")
             previous = self._offline

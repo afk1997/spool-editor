@@ -1752,6 +1752,9 @@ def test_failed_settings_persistence_does_not_change_runtime_state(client, monke
         "reasoning_egress_consent": True,
     }).get_json()
     store = app.extensions["trove.settings"]
+    policy = app.extensions["trove.network_policy"]
+    settings_path = Path(store.path)
+    before_file = settings_path.read_bytes()
 
     def fail_save(_overrides):
         raise OSError("disk full")
@@ -1764,6 +1767,10 @@ def test_failed_settings_persistence_does_not_change_runtime_state(client, monke
 
     assert failed.status_code == 500
     assert store.get() == enabled
+    assert policy.offline is False
+    assert Path(store.path).read_bytes() == before_file
+    from settings import SettingsStore
+    assert SettingsStore(store.path).get() == enabled
     assert os.environ["SPOOL_LLM_PROVIDER"] == "codex"
     assert os.environ["SPOOL_LLM_EGRESS_CONSENT"] == "1"
     assert "SPOOL_OFFLINE" not in os.environ
@@ -1788,17 +1795,21 @@ def test_offline_setting_drives_spool_offline_env(client, monkeypatch):
     """The studio's Offline toggle must ENFORCE — patching ``offline`` flips the one switch
     clip.llm.is_offline() reads (``SPOOL_OFFLINE``), so egress providers refuse in-process."""
     monkeypatch.delenv("SPOOL_OFFLINE", raising=False)
-    _, c = client
+    app, c = client
+    policy = app.extensions["trove.network_policy"]
     r = c.get("/api/v1/settings")
     assert r.get_json()["offline"] is False
+    assert policy.offline is False
 
     r = c.patch("/api/v1/settings", json={"offline": True})
     assert r.status_code == 200 and r.get_json()["offline"] is True
     assert os.environ.get("SPOOL_OFFLINE") == "1"     # llm.is_offline() now blocks egress
+    assert policy.offline is True
 
     r = c.patch("/api/v1/settings", json={"offline": False})
     assert r.get_json()["offline"] is False
     assert os.environ.get("SPOOL_OFFLINE") is None
+    assert policy.offline is False
 
     # bool only — don't silently coerce ("yes-please" is truthy, a privacy footgun)
     r = c.patch("/api/v1/settings", json={"offline": "yes-please"})
@@ -1817,6 +1828,89 @@ def test_create_app_seeds_offline_from_env_at_boot(tmp_path, monkeypatch):
     application = _app_module.create_app()
     body = application.test_client().get("/api/v1/settings").get_json()
     assert body["offline"] is True
+    assert application.extensions["trove.network_policy"].offline is True
+
+
+def test_offline_patch_rejects_active_network_work_without_mutating_settings(client, monkeypatch):
+    app, c = client
+    store = app.extensions["trove.settings"]
+    policy = app.extensions["trove.network_policy"]
+    settings_path = Path(store.path)
+    before_store = store.get()
+    before_file = settings_path.read_bytes() if settings_path.exists() else None
+    save_calls = 0
+    real_save = store._save
+
+    def counting_save(*args, **kwargs):
+        nonlocal save_calls
+        save_calls += 1
+        return real_save(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_save", counting_save)
+    with policy.egress("url_download"):
+        response = c.patch("/api/v1/settings", json={"offline": True})
+
+    assert response.status_code == 409
+    assert response.get_json() == {"error": "network_work_active"}
+    assert save_calls == 0
+    assert policy.offline is False
+    assert store.get() == before_store
+    assert (settings_path.read_bytes() if settings_path.exists() else None) == before_file
+    from settings import SettingsStore
+    assert SettingsStore(store.path).get() == before_store
+    assert os.environ.get("SPOOL_OFFLINE") is None
+
+
+def test_settings_patches_serialize_the_policy_through_route_return(client, monkeypatch):
+    app, _ = client
+    store = app.extensions["trove.settings"]
+    policy = app.extensions["trove.network_policy"]
+    first_updated = threading.Event()
+    release_first = threading.Event()
+    first_done = threading.Event()
+    second_done = threading.Event()
+    responses = []
+    real_update = store.update
+    calls = 0
+
+    def blocking_update(*args, **kwargs):
+        nonlocal calls
+        values = real_update(*args, **kwargs)
+        calls += 1
+        if calls == 1:
+            first_updated.set()
+            assert release_first.wait(1)
+        return values
+
+    monkeypatch.setattr(store, "update", blocking_update)
+
+    def patch(body, done):
+        with app.test_client() as thread_client:
+            responses.append(thread_client.patch("/api/v1/settings", json=body))
+        done.set()
+
+    first = threading.Thread(target=patch, args=({"offline": True}, first_done))
+    first.start()
+    assert first_updated.wait(1)
+
+    second = threading.Thread(target=patch, args=({"fast_default": False}, second_done))
+    second.start()
+    assert second_done.wait(0.05) is False
+
+    release_first.set()
+    assert first_done.wait(1)
+    assert second_done.wait(1)
+    first.join(timeout=1)
+    second.join(timeout=1)
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert store.get()["offline"] is True
+    assert store.get()["fast_default"] is False
+    persisted = Path(store.path).read_text()
+    assert '"offline": true' in persisted
+    assert '"fast_default": false' in persisted
+    assert os.environ.get("SPOOL_OFFLINE") == "1"
+    assert policy.offline is True
 
 
 @pytest.mark.parametrize(
