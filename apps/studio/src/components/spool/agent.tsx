@@ -4,8 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import { useSpool, type AgentMessage } from "./context";
 import { Icon, Progress } from "@spool/ui";
 
-/* The Phase 0 Codex agent is text-only. It receives the user's message and any attached
- * transcript text, but no local tool catalog or application state. */
+/* The visible Phase 0 Codex agent is message-only. These surfaces attach no transcript,
+ * local tool catalog, or application state. */
 
 function ToolTrace({ tools }: { tools: NonNullable<AgentMessage["tools"]> }) {
   return (
@@ -91,7 +91,7 @@ export function AgentPanel() {
           if (m.role === "elicit" && m.confirmFor) return (
             <div key={i} className="msg"><div className="bubble">
               <div style={{ fontWeight: 600, marginBottom: 4 }}>{m.q || "This request needs an action."}</div>
-              <div style={{ color: "var(--text-faint)", fontSize: 12 }}>Agent changes are unavailable in Phase 0. Codex can answer only from your message and attached transcript text.</div>
+              <div style={{ color: "var(--text-faint)", fontSize: 12 }}>Agent changes are unavailable in Phase 0. Codex can answer only from the message you send here.</div>
             </div></div>
           );
           if (m.role === "elicit") return <ClarificationCard key={i} msg={m} onAnswer={ctx.answerElicit} disabled={ctx.working} />;
@@ -101,11 +101,11 @@ export function AgentPanel() {
 
       <div className="agent-foot">
         <div className="agent-input">
-          <textarea rows={1} placeholder="Ask about supplied text or the attached transcript…" value={text} disabled={ctx.working}
+          <textarea rows={1} placeholder="Ask Codex from this message…" value={text} disabled={ctx.working}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
           <div className="row" style={{ gap: 6 }}>
-            <span style={{ fontSize: 10.5, color: "var(--text-faint)" }}>Message + attached transcript only</span>
+            <span style={{ fontSize: 10.5, color: "var(--text-faint)" }}>Message only · no attachments</span>
             <span className="spacer" />
             <button className="iconbtn" aria-label="Send question" disabled={ctx.working || !text.trim()} style={{ width: 30, height: 30, background: "var(--accent)", color: "var(--accent-ink)" }} onClick={send}><Icon name="arrowR" size={16} /></button>
           </div>

@@ -85,7 +85,7 @@ export interface AgentMessage {
 }
 
 export const INITIAL_AGENT: AgentMessage[] = [
-  { role: "agent", text: "Hi — I'm your text-only clip assistant. I can answer from your message and any attached transcript. I can't inspect your library, queues, watches, models, storage, files, or other local app state." },
+  { role: "agent", text: "Hi — I'm your text-only clip assistant. I can answer from the message you send here. I can't inspect your library, queues, watches, models, storage, files, transcripts, or other local app state." },
 ];
 
 function originOf(url: string | null | undefined): string | undefined {

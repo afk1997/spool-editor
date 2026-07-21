@@ -931,7 +931,7 @@ describe("product truth: visible control inventory", () => {
     expect(INITIAL_AGENT).toEqual([
       {
         role: "agent",
-        text: "Hi — I'm your text-only clip assistant. I can answer from your message and any attached transcript. I can't inspect your library, queues, watches, models, storage, files, or other local app state.",
+        text: "Hi — I'm your text-only clip assistant. I can answer from the message you send here. I can't inspect your library, queues, watches, models, storage, files, transcripts, or other local app state.",
       },
     ]);
     const askAgent = vi.fn();
@@ -943,34 +943,36 @@ describe("product truth: visible control inventory", () => {
     render(<AgentPanel />);
 
     expect(screen.getByText("Agent · text-only")).toBeInTheDocument();
-    expect(screen.getByText("Message + attached transcript only")).toBeInTheDocument();
-    const input = screen.getByPlaceholderText(
-      "Ask about supplied text or the attached transcript…",
-    );
+    expect(screen.getByText("Message only · no attachments")).toBeInTheDocument();
+    const input = screen.getByPlaceholderText("Ask Codex from this message…");
     fireEvent.change(input, { target: { value: "What does this passage mean?" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(askAgent).toHaveBeenCalledWith("What does this passage mean?");
+    expect(askAgent.mock.calls).toEqual([["What does this passage mean?"]]);
     expect(input).toHaveValue("");
+    expect(screen.queryByText(/attached transcript/i)).not.toBeInTheDocument();
     expect(screen.queryByText("Agent · read-only")).not.toBeInTheDocument();
     expect(screen.queryByText("Inspection only")).not.toBeInTheDocument();
     for (const fake of ["Undo last agent action", "Detected 2 speakers", "Run recipe"])
       expect(screen.queryByText(fake)).not.toBeInTheDocument();
   });
 
-  it("describes the home Agent as supplied-text only, never local inspection", () => {
-    importHarness.ctx = baseCtx();
+  it("describes and submits the visible home Agent as message-only", () => {
+    const askAgent = vi.fn();
+    const openAgent = vi.fn();
+    importHarness.ctx = baseCtx({ askAgent, openAgent });
     render(<HomeScreen />);
 
-    expect(screen.getByText("Import media or ask from supplied text")).toBeInTheDocument();
+    expect(screen.getByText("Import media or ask Codex a question")).toBeInTheDocument();
+    const input = screen.getByPlaceholderText("Paste a URL, or ask Codex a question…");
+    fireEvent.change(input, { target: { value: "Summarize this message" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    expect(askAgent.mock.calls).toEqual([["Summarize this message"]]);
+    expect(openAgent).toHaveBeenCalledTimes(1);
+    expect(input).toHaveValue("");
     expect(
-      screen.getByPlaceholderText(
-        "Paste a URL, or ask about supplied text or an attached transcript…",
-      ),
+      screen.getByText("Codex sees only the message you send here—not local app state"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Ask" })).toBeInTheDocument();
-    expect(
-      screen.getByText("Codex sees your message and attached transcript—not local app state"),
-    ).toBeInTheDocument();
+    expect(screen.queryByText(/attached transcript/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/agent inspection is read-only/i)).not.toBeInTheDocument();
   });
 

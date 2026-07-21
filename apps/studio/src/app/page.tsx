@@ -33,14 +33,14 @@ export default function Home() {
   return (
     <div className="mainpad fadein">
       <div style={{ marginBottom: 6 }} className="eyebrow">Welcome back</div>
-      <h1 style={{ fontSize: 34, marginBottom: 24 }}>Import media or ask from supplied text</h1>
+      <h1 style={{ fontSize: 34, marginBottom: 24 }}>Import media or ask Codex a question</h1>
 
       <div className="panel" style={{ padding: 20, marginBottom: 34, background: "linear-gradient(135deg, var(--bg-1), var(--bg-2))" }}>
         <div className="agent-input" style={{ marginBottom: 16, padding: "12px 14px" }}>
           <div className="row" style={{ gap: 10 }}>
             <Icon name="sparkles" size={18} style={{ color: "var(--accent)", flex: "none" }} />
             <input className="input" style={{ border: 0, background: "transparent", padding: 0, height: 26, fontSize: 15 }}
-              placeholder="Paste a URL, or ask about supplied text or an attached transcript…"
+              placeholder="Paste a URL, or ask Codex a question…"
               value={prompt} disabled={ctx.working} onChange={(e) => setPrompt(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
             <Btn variant="primary" size="sm" icon="arrowR" onClick={submit} disabled={ctx.working}>{ctx.working ? "Answering…" : "Ask"}</Btn>
           </div>
@@ -49,7 +49,7 @@ export default function Home() {
           <Btn variant="primary" size="lg" icon="import" onClick={goImport}>Import / Paste URL</Btn>
           <Btn variant="ghost" size="lg" icon="film" onClick={() => ctx.nav("library")}>Open library</Btn>
           <div className="spacer" />
-          <span className="mono" style={{ color: "var(--text-faint)", fontSize: 11 }}>Codex sees your message and attached transcript—not local app state</span>
+          <span className="mono" style={{ color: "var(--text-faint)", fontSize: 11 }}>Codex sees only the message you send here—not local app state</span>
         </div>
       </div>
 
