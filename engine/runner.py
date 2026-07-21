@@ -9,6 +9,9 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from network_policy import NetworkPolicy
+from safety import _is_safe_url_unleased
+
 
 def _ytdlp_bin() -> str:
     """Resolve the yt-dlp binary to invoke.
@@ -154,7 +157,16 @@ def _build_quality_options(raw_formats: list[dict]) -> list[dict]:
     return out
 
 
-def run_info(url: str, *, timeout: int = 60) -> InfoResult:
+def run_info(
+    url: str, *, network_policy: NetworkPolicy, timeout: int = 60,
+) -> InfoResult:
+    with network_policy.egress("url_info"):
+        if not _is_safe_url_unleased(url):
+            return InfoResult(error_category="unsupported_url", error_raw="unsafe URL")
+        return _run_info_leased(url, timeout=timeout)
+
+
+def _run_info_leased(url: str, *, timeout: int) -> InfoResult:
     argv = build_info_argv(url)
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
@@ -192,6 +204,23 @@ def _cleanup_glob(out_template: str) -> None:
         try:
             os.remove(f)
         except OSError:
+            pass
+
+
+def _reap_if_running(proc) -> None:
+    """Do not let an exceptional streaming path outlive its network lease."""
+    try:
+        running = proc.poll() is None
+    except Exception:
+        running = True
+    if not running:
+        return
+    try:
+        proc.kill()
+    finally:
+        try:
+            proc.wait(timeout=2)
+        except Exception:
             pass
 
 
@@ -264,6 +293,39 @@ def _download_timeout_default() -> int:
 
 
 def run_download(
+    *,
+    url: str,
+    out_template: str,
+    format_choice: str,
+    format_id: str | None,
+    network_policy: NetworkPolicy,
+    timeout: int | None = None,
+    progress_cb=None,
+    register_process=None,
+    was_paused_check: object = None,
+    subtitles: bool = False,
+    chapters: bool = False,
+    embed: bool = False,
+) -> DownloadResult:
+    with network_policy.egress("url_download"):
+        if not _is_safe_url_unleased(url):
+            return DownloadResult(error_category="unsupported_url", error_raw="unsafe URL")
+        return _run_download_leased(
+            url=url,
+            out_template=out_template,
+            format_choice=format_choice,
+            format_id=format_id,
+            timeout=timeout,
+            progress_cb=progress_cb,
+            register_process=register_process,
+            was_paused_check=was_paused_check,
+            subtitles=subtitles,
+            chapters=chapters,
+            embed=embed,
+        )
+
+
+def _run_download_leased(
     *,
     url: str,
     out_template: str,
@@ -348,7 +410,11 @@ def run_download(
         return DownloadResult(error_category="unknown", error_raw=str(e))
 
     if register_process:
-        register_process(proc)
+        try:
+            register_process(proc)
+        except BaseException:
+            _reap_if_running(proc)
+            raise
 
     stderr_buf: list[str] = []
 
@@ -386,24 +452,32 @@ def run_download(
 
     out_thread = threading.Thread(target=_drain, args=(proc.stdout, None), daemon=True)
     err_thread = threading.Thread(target=_drain, args=(proc.stderr, stderr_buf), daemon=True)
-    out_thread.start()
-    err_thread.start()
+    try:
+        out_thread.start()
+        err_thread.start()
+    except BaseException:
+        _reap_if_running(proc)
+        raise
 
     deadline = time.monotonic() + timeout
-    while True:
-        rc = proc.poll()
-        if rc is not None:
-            break
-        if time.monotonic() >= deadline:
-            proc.kill()
-            try:
-                proc.wait(timeout=2)
-            except Exception:
-                pass
-            if not (was_paused_check and was_paused_check()):
-                _cleanup_glob(out_template)
-            return DownloadResult(error_category="timeout", error_raw="download timed out")
-        time.sleep(0.2)
+    try:
+        while True:
+            rc = proc.poll()
+            if rc is not None:
+                break
+            if time.monotonic() >= deadline:
+                proc.kill()
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
+                if not (was_paused_check and was_paused_check()):
+                    _cleanup_glob(out_template)
+                return DownloadResult(error_category="timeout", error_raw="download timed out")
+            time.sleep(0.2)
+    except BaseException:
+        _reap_if_running(proc)
+        raise
 
     out_thread.join(timeout=3)
     err_thread.join(timeout=3)

@@ -33,6 +33,7 @@ import models_store
 import transcribe_jobs
 import transcript_io
 from jobs import JobStatus
+from network_policy import NetworkPolicyError
 from safety import (
     token_or_sig_required, token_required,
     SCOPE_MEDIA, SCOPE_TRANSCRIPT_EXPORT,
@@ -400,6 +401,10 @@ def _txidx():
 
 def _actions():
     return current_app.extensions["trove.actions"]
+
+
+def _network_policy():
+    return current_app.extensions["trove.network_policy"]
 
 
 # Mirrors clip.reframe._ASPECTS/_MODES, clip.exporter._PRESETS, clip.captioner._VALID_STYLES.
@@ -817,13 +822,13 @@ def _submit_one(url: str, *, format_choice: str = "video",
 
     if not url:
         return None, {"error": "missing_url"}
-    if not is_safe_url(url):
+    if not is_safe_url(url, network_policy=_network_policy()):
         return None, {"error": "unsupported_url"}
 
     given_title = bool(title)
     if not title:
         if probe:
-            info = run_info(url)
+            info = run_info(url, network_policy=_network_policy())
             if info.error_category:
                 return None, {"error": info.error_category}
             title = info.title or url
@@ -843,6 +848,10 @@ def _submit_one(url: str, *, format_choice: str = "video",
             subtitles=subtitles, chapters=chapters, embed=embed,
             resolve_title=(not probe and not given_title),
         )
+    except NetworkPolicyError:
+        raise
+    except ValueError:
+        return None, {"error": "unsupported_url"}
     except RuntimeError:
         return None, {"error": "busy"}
     return _job_view(_jm().get(job_id)), None
@@ -2181,7 +2190,7 @@ def _validate_watch(data, *, require_name: bool, current: dict | None = None):
             return (jsonify({"error": "unsafe_target"}), 400)
         if kind in ("channel", "playlist"):
             from safety import is_safe_url
-            if not tgt or not is_safe_url(tgt):
+            if not tgt or not is_safe_url(tgt, network_policy=_network_policy()):
                 return (jsonify({"error": "unsafe_target"}), 400)
     return None
 

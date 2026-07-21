@@ -13,6 +13,8 @@ from collections import deque
 from threading import Lock
 import secrets
 
+from network_policy import NetworkPolicy
+
 
 _ALLOWED_SCHEMES = {"http", "https"}
 
@@ -41,7 +43,45 @@ def _is_blocked_ip(addr: str) -> bool:
     return any(ip in net for net in _BLOCKED_NETWORKS)
 
 
-def is_safe_url(url: str) -> bool:
+def _url_host_if_safe_shape(url: str) -> str | None:
+    """Return the normalized host after non-network URL checks, else ``None``."""
+    if not url or not isinstance(url, str):
+        return None
+    s = url.strip()
+    if not s or s.startswith("-"):
+        return None
+    try:
+        parsed = urlparse(s)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in _ALLOWED_SCHEMES:
+        return None
+    host = parsed.hostname
+    if not host:
+        return None
+    host = host.lower()
+    if host in {"localhost", "ip6-localhost", "ip6-loopback"}:
+        return None
+    if _is_blocked_ip(host):
+        return None
+    return host
+
+
+def _host_resolves_publicly(host: str) -> bool:
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return False
+    return all(not _is_blocked_ip(info[4][0]) for info in infos)
+
+
+def _is_safe_url_unleased(url: str) -> bool:
+    """Validate under a caller-owned execution lease (runner boundary only)."""
+    host = _url_host_if_safe_shape(url)
+    return bool(host and _host_resolves_publicly(host))
+
+
+def is_safe_url(url: str, *, network_policy: NetworkPolicy) -> bool:
     """Return True only if url is a public http(s) URL we're willing to hand to a fetcher.
 
     Rejects: non-http schemes, option-shaped strings (argv-injection guard), localhost,
@@ -53,42 +93,11 @@ def is_safe_url(url: str) -> bool:
     redirect to an internal address after validation is not caught. Acceptable in the
     default loopback single-user posture; do not rely on it alone on a public bind.
     """
-    if not url or not isinstance(url, str):
-        return False
-    s = url.strip()
-    if not s:
-        return False
-    # Refuse anything that looks like a CLI option — guards against argv injection
-    # even though we also use `--` separator at the subprocess layer.
-    if s.startswith("-"):
-        return False
-    try:
-        parsed = urlparse(s)
-    except ValueError:
-        return False
-    if parsed.scheme.lower() not in _ALLOWED_SCHEMES:
-        return False
-    host = parsed.hostname
+    host = _url_host_if_safe_shape(url)
     if not host:
         return False
-    host = host.lower()
-    if host in {"localhost", "ip6-localhost", "ip6-loopback"}:
-        return False
-    # If host is a bare IP literal, check it directly.
-    if _is_blocked_ip(host):
-        return False
-    # Otherwise resolve and check every returned address.
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        # Fail CLOSED: an unresolvable host can't be vetted, and "let the fetcher find
-        # out" previously meant resolution failure skipped this check entirely.
-        return False
-    for info in infos:
-        addr = info[4][0]
-        if _is_blocked_ip(addr):
-            return False
-    return True
+    with network_policy.egress("url_validation"):
+        return _host_resolves_publicly(host)
 
 
 def token_required(view):

@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 from flask import Flask, jsonify, request
 
-from safety import RateLimiter, attach_cors, attach_security_headers
+from safety import RateLimiter, attach_cors, attach_security_headers, is_safe_url
 from runner import run_download, run_info
 from jobs import AttemptUnwindingError, JobManager, Job, JobStatus
 from attempt_staging import AttemptOutcome, Promotion
@@ -546,10 +546,12 @@ def create_app() -> Flask:
                 # Bulk-submitted jobs defer title/thumbnail resolution here so
                 # the request thread is never blocked on network metadata.
                 try:
-                    info = run_info(url)
+                    info = run_info(url, network_policy=network_policy)
                     if not info.error_category:
                         resolved_title = info.title or resolved_title
                         resolved_thumbnail = info.thumbnail or resolved_thumbnail
+                except NetworkPolicyError:
+                    raise
                 except Exception:
                     pass
 
@@ -580,6 +582,7 @@ def create_app() -> Flask:
                 subtitles=subtitles,
                 chapters=chapters,
                 embed=embed,
+                network_policy=network_policy,
             )
             if result.error_category:
                 if job_manager.attempt_cancelled(job.id, job, attempt):
@@ -632,6 +635,8 @@ def create_app() -> Flask:
         subtitles: bool = False, chapters: bool = False, embed: bool = False,
         resolve_title: bool = False,
     ) -> str:
+        if not is_safe_url(url, network_policy=network_policy):
+            raise ValueError("unsafe URL")
         return job_manager.submit(
             target=_build_download_target(
                 url=url,
@@ -663,6 +668,8 @@ def create_app() -> Flask:
         if job is None:
             return False
         url = job.url
+        if not is_safe_url(url, network_policy=network_policy):
+            return False
         format_choice = job.format_choice
         format_id = job.format_id
         title = job.title
@@ -760,14 +767,18 @@ def create_app() -> Flask:
             # the URL if the metadata probe fails (offline / 4xx), never blocking the ingest.
             title, thumbnail = key, ""
             try:
-                info = run_info(key)
+                info = run_info(key, network_policy=network_policy)
                 if not info.error_category:
                     title = info.title or key
                     thumbnail = info.thumbnail or ""
+            except NetworkPolicyError:
+                raise
             except Exception:
                 pass
             return _enqueue_download(url=key, format_choice="video", format_id=None,
                                      title=title, thumbnail=thumbnail, auto_transcribe=True)
+        except NetworkPolicyError:
+            raise
         except Exception:
             app.logger.warning("watch ingest failed for %r", key, exc_info=True)
             return None

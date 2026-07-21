@@ -12,6 +12,7 @@ class NetworkPolicyError(RuntimeError):
 
     def __init__(self, code: str, *, purpose: str | None = None):
         self.code = code
+        self.error_category = code
         self.purpose = purpose
         if code == "offline_network_disabled":
             message = f"Offline mode blocks network work ({purpose or 'unknown purpose'})."

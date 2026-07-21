@@ -35,9 +35,16 @@ def test_offline_rejects_a_new_lease_without_incrementing():
             raise AssertionError("offline lease body must not run")
 
     assert denied.value.code == "offline_network_disabled"
+    assert denied.value.error_category == "offline_network_disabled"
     assert denied.value.purpose == "model_download"
     assert policy.offline is True
     assert policy.active_leases == 0
+
+
+def test_network_policy_error_category_matches_code():
+    error = NetworkPolicyError("network_work_active")
+
+    assert error.error_category == error.code == "network_work_active"
 
 
 def test_active_lease_rejects_offline_transition_without_changing_state():

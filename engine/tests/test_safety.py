@@ -1,5 +1,6 @@
 import pytest
 from safety import is_safe_url
+from network_policy import NetworkPolicy, NetworkPolicyError
 
 
 @pytest.mark.parametrize("url", [
@@ -8,7 +9,7 @@ from safety import is_safe_url
     "https://www.tiktok.com/@user/video/1234",
 ])
 def test_is_safe_url_accepts_public(url):
-    assert is_safe_url(url) is True
+    assert is_safe_url(url, network_policy=NetworkPolicy()) is True
 
 
 @pytest.mark.parametrize("url", [
@@ -27,7 +28,7 @@ def test_is_safe_url_accepts_public(url):
     "not a url",
 ])
 def test_is_safe_url_rejects_unsafe(url):
-    assert is_safe_url(url) is False
+    assert is_safe_url(url, network_policy=NetworkPolicy()) is False
 
 
 import os
@@ -313,4 +314,39 @@ def test_attach_security_headers_includes_per_request_nonce():
 def test_unresolvable_host_fails_closed():
     """An unresolvable host can't be vetted; returning True meant DNS failure (or a
     rebinding setup) bypassed the whole check. .invalid never resolves (RFC 2606)."""
-    assert safety.is_safe_url("https://definitely-not-real.invalid/video") is False
+    assert safety.is_safe_url(
+        "https://definitely-not-real.invalid/video",
+        network_policy=NetworkPolicy(),
+    ) is False
+
+
+def test_safe_url_offline_denial_happens_before_dns(monkeypatch):
+    policy = NetworkPolicy(offline=True)
+    dns_calls = []
+    monkeypatch.setattr(safety.socket, "getaddrinfo", lambda *args: dns_calls.append(args))
+
+    with pytest.raises(NetworkPolicyError) as denied:
+        safety.is_safe_url("https://example.com/video", network_policy=policy)
+
+    assert denied.value.error_category == "offline_network_disabled"
+    assert dns_calls == []
+    assert policy.active_leases == 0
+
+
+@pytest.mark.parametrize("outcome", ["safe", "unsafe", "resolver_error"])
+def test_safe_url_online_releases_validation_lease(monkeypatch, outcome):
+    policy = NetworkPolicy()
+
+    def resolve(*_args):
+        assert policy.active_leases == 1
+        if outcome == "resolver_error":
+            raise safety.socket.gaierror("not found")
+        address = "127.0.0.1" if outcome == "unsafe" else "93.184.216.34"
+        return [(safety.socket.AF_INET, safety.socket.SOCK_STREAM, 6, "", (address, 0))]
+
+    monkeypatch.setattr(safety.socket, "getaddrinfo", resolve)
+
+    assert safety.is_safe_url(
+        "https://example.com/video", network_policy=policy,
+    ) is (outcome == "safe")
+    assert policy.active_leases == 0

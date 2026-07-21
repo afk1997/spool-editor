@@ -4,6 +4,18 @@ import types
 import pytest
 import runner
 from runner import build_info_argv, build_download_argv
+from network_policy import NetworkPolicy, NetworkPolicyError
+
+
+@pytest.fixture(autouse=True)
+def _public_url_validation(monkeypatch):
+    """Runner unit tests exercise process contracts, not live DNS."""
+    monkeypatch.setattr(runner, "_is_safe_url_unleased", lambda _url: True, raising=False)
+
+
+@pytest.fixture()
+def online_policy():
+    return NetworkPolicy()
 
 
 def test_info_argv_dash_dash_separator():
@@ -101,7 +113,7 @@ from unittest.mock import patch
 from runner import run_info, InfoResult
 
 
-def test_run_info_success(monkeypatch):
+def test_run_info_success(monkeypatch, online_policy):
     fake_stdout = json.dumps({
         "title": "T",
         "thumbnail": "https://x/y.jpg",
@@ -120,7 +132,7 @@ def test_run_info_success(monkeypatch):
 
     monkeypatch.setattr("runner.subprocess.run", lambda *a, **kw: FakeCompleted())
 
-    res = run_info("https://example.com/v")
+    res = run_info("https://example.com/v", network_policy=online_policy)
     assert isinstance(res, InfoResult)
     assert res.title == "T"
     assert res.uploader == "U"
@@ -128,9 +140,10 @@ def test_run_info_success(monkeypatch):
     assert len(res.formats) == 2
     assert res.formats[0]["height"] == 1080
     assert res.formats[0]["label"] == "1080p"
+    assert online_policy.active_leases == 0
 
 
-def test_run_info_handles_multiline_stdout(monkeypatch):
+def test_run_info_handles_multiline_stdout(monkeypatch, online_policy):
     obj = {"title": "first", "thumbnail": "", "duration": 0, "uploader": "", "formats": []}
     fake = json.dumps(obj) + "\n" + json.dumps({"title": "second"})
 
@@ -141,11 +154,11 @@ def test_run_info_handles_multiline_stdout(monkeypatch):
 
     monkeypatch.setattr("runner.subprocess.run", lambda *a, **kw: FakeCompleted())
 
-    res = run_info("https://example.com/v")
+    res = run_info("https://example.com/v", network_policy=online_policy)
     assert res.title == "first"
 
 
-def test_run_info_returns_error_on_nonzero(monkeypatch):
+def test_run_info_returns_error_on_nonzero(monkeypatch, online_policy):
     class FakeCompleted:
         returncode = 1
         stdout = ""
@@ -153,15 +166,51 @@ def test_run_info_returns_error_on_nonzero(monkeypatch):
 
     monkeypatch.setattr("runner.subprocess.run", lambda *a, **kw: FakeCompleted())
 
-    res = run_info("https://example.com/v")
+    res = run_info("https://example.com/v", network_policy=online_policy)
     assert res.error_category == "auth_required"
     assert res.title is None
+    assert online_policy.active_leases == 0
+
+
+def test_run_info_offline_invokes_neither_dns_nor_subprocess(monkeypatch):
+    policy = NetworkPolicy(offline=True)
+    dns_calls = []
+    process_calls = []
+    monkeypatch.setattr(runner, "_is_safe_url_unleased", lambda url: dns_calls.append(url))
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **kw: process_calls.append((a, kw)))
+
+    with pytest.raises(NetworkPolicyError) as denied:
+        run_info("https://example.com/v", network_policy=policy)
+
+    assert denied.value.error_category == "offline_network_disabled"
+    assert dns_calls == []
+    assert process_calls == []
+    assert policy.active_leases == 0
+
+
+def test_run_info_online_holds_one_lease_and_releases_on_error(monkeypatch):
+    policy = NetworkPolicy()
+
+    def validate(_url):
+        assert policy.active_leases == 1
+        return True
+
+    def fail(*_args, **_kwargs):
+        assert policy.active_leases == 1
+        raise OSError("spawn failed")
+
+    monkeypatch.setattr(runner, "_is_safe_url_unleased", validate)
+    monkeypatch.setattr(runner.subprocess, "run", fail)
+
+    with pytest.raises(OSError, match="spawn failed"):
+        run_info("https://example.com/v", network_policy=policy)
+    assert policy.active_leases == 0
 
 
 from runner import run_download, DownloadResult
 
 
-def test_run_download_success(monkeypatch, tmp_path):
+def test_run_download_success(monkeypatch, tmp_path, online_policy):
     out_template = str(tmp_path / "abc.%(ext)s")
     target = tmp_path / "abc.mp4"
     target.write_bytes(b"fakempegdata")
@@ -178,13 +227,15 @@ def test_run_download_success(monkeypatch, tmp_path):
         out_template=out_template,
         format_choice="video",
         format_id=None,
+        network_policy=online_policy,
     )
     assert isinstance(res, DownloadResult)
     assert res.error_category is None
     assert res.file_path == str(target)
+    assert online_policy.active_leases == 0
 
 
-def test_run_download_audio_must_be_mp3(monkeypatch, tmp_path):
+def test_run_download_audio_must_be_mp3(monkeypatch, tmp_path, online_policy):
     out_template = str(tmp_path / "abc.%(ext)s")
     leftover = tmp_path / "abc.webm"
     leftover.write_bytes(b"x")
@@ -201,12 +252,13 @@ def test_run_download_audio_must_be_mp3(monkeypatch, tmp_path):
         out_template=out_template,
         format_choice="audio",
         format_id=None,
+        network_policy=online_policy,
     )
     assert res.error_category == "unknown"
     assert "mp3" in (res.error_raw or "").lower()
 
 
-def test_run_download_cleans_orphans_on_timeout(monkeypatch, tmp_path):
+def test_run_download_cleans_orphans_on_timeout(monkeypatch, tmp_path, online_policy):
     out_template = str(tmp_path / "abc.%(ext)s")
     (tmp_path / "abc.part").write_bytes(b"x")
     (tmp_path / "abc.webm").write_bytes(b"x")
@@ -221,10 +273,104 @@ def test_run_download_cleans_orphans_on_timeout(monkeypatch, tmp_path):
         out_template=out_template,
         format_choice="video",
         format_id=None,
+        network_policy=online_policy,
     )
     assert res.error_category == "timeout"
     assert not (tmp_path / "abc.part").exists()
     assert not (tmp_path / "abc.webm").exists()
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_run_download_offline_invokes_neither_dns_nor_process(
+    monkeypatch, tmp_path, streaming,
+):
+    policy = NetworkPolicy(offline=True)
+    dns_calls = []
+    run_calls = []
+    popen_calls = []
+    monkeypatch.setattr(runner, "_is_safe_url_unleased", lambda url: dns_calls.append(url))
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **kw: run_calls.append((a, kw)))
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *a, **kw: popen_calls.append((a, kw)))
+    kwargs = {}
+    if streaming:
+        kwargs = {"progress_cb": lambda *_a: None}
+
+    with pytest.raises(NetworkPolicyError) as denied:
+        run_download(
+            url="https://example.com/v",
+            out_template=str(tmp_path / "x.%(ext)s"),
+            format_choice="video",
+            format_id=None,
+            network_policy=policy,
+            **kwargs,
+        )
+
+    assert denied.value.code == "offline_network_disabled"
+    assert dns_calls == []
+    assert run_calls == []
+    assert popen_calls == []
+    assert policy.active_leases == 0
+
+
+def test_run_download_online_releases_lease_after_blocking_error(monkeypatch, tmp_path):
+    policy = NetworkPolicy()
+    monkeypatch.setattr(
+        runner.subprocess, "run",
+        lambda *a, **kw: types.SimpleNamespace(returncode=1, stderr="boom", stdout=""),
+    )
+
+    result = run_download(
+        url="https://example.com/v",
+        out_template=str(tmp_path / "x.%(ext)s"),
+        format_choice="video",
+        format_id=None,
+        network_policy=policy,
+    )
+
+    assert result.error_category == "unknown"
+    assert policy.active_leases == 0
+
+
+def test_streaming_download_keeps_lease_until_spawned_process_is_reaped_on_callback_error(
+    monkeypatch, tmp_path,
+):
+    policy = NetworkPolicy()
+    events = []
+
+    class FakeProc:
+        returncode = None
+
+        def __init__(self, *_args, **_kwargs):
+            self.stdout = iter([])
+            self.stderr = iter([])
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            assert policy.active_leases == 1
+            events.append("kill")
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            assert policy.active_leases == 1
+            events.append("wait")
+            return self.returncode
+
+    monkeypatch.setattr(runner.subprocess, "Popen", FakeProc)
+
+    with pytest.raises(RuntimeError, match="register failed"):
+        run_download(
+            url="https://example.com/v",
+            out_template=str(tmp_path / "x.%(ext)s"),
+            format_choice="video",
+            format_id=None,
+            network_policy=policy,
+            register_process=lambda _proc: (_ for _ in ()).throw(RuntimeError("register failed")),
+        )
+
+    assert events == ["kill", "wait"]
+    assert policy.active_leases == 0
 
 
 def test_download_argv_includes_concurrent_fragments():
@@ -282,7 +428,7 @@ def test_download_argv_includes_retry_flags():
     assert argv[fr_idx + 1] == "10"
 
 
-def test_run_download_skips_cleanup_when_was_paused(monkeypatch, tmp_path):
+def test_run_download_skips_cleanup_when_was_paused(monkeypatch, tmp_path, online_policy):
     """When the caller flags the job as paused, .part files must be preserved."""
     from runner import run_download
     out_template = str(tmp_path / "abc.%(ext)s")
@@ -323,12 +469,14 @@ def test_run_download_skips_cleanup_when_was_paused(monkeypatch, tmp_path):
         progress_cb=progress_cb,
         register_process=register_process,
         was_paused_check=lambda: pause_signal["was_paused"],
+        network_policy=online_policy,
     )
     assert part_file.exists()  # NOT cleaned up
     assert other_part.exists()  # NOT cleaned up
+    assert online_policy.active_leases == 0
 
 
-def test_run_download_runs_cleanup_when_not_paused(monkeypatch, tmp_path):
+def test_run_download_runs_cleanup_when_not_paused(monkeypatch, tmp_path, online_policy):
     """When the failure was a real error, cleanup runs as before."""
     from runner import run_download
     out_template = str(tmp_path / "abc.%(ext)s")
@@ -357,12 +505,14 @@ def test_run_download_runs_cleanup_when_not_paused(monkeypatch, tmp_path):
         progress_cb=lambda *a, **k: None,
         register_process=lambda p: None,
         was_paused_check=lambda: False,
+        network_policy=online_policy,
     )
     assert not part_file.exists()  # cleaned up
     assert res.error_category is not None
+    assert online_policy.active_leases == 0
 
 
-def test_download_timeout_defaults_to_an_hour(monkeypatch, tmp_path):
+def test_download_timeout_defaults_to_an_hour(monkeypatch, tmp_path, online_policy):
     monkeypatch.delenv("TROVE_DOWNLOAD_TIMEOUT", raising=False)
     seen = {}
     def fake_run(argv, capture_output, text, timeout):
@@ -370,11 +520,11 @@ def test_download_timeout_defaults_to_an_hour(monkeypatch, tmp_path):
         return types.SimpleNamespace(returncode=1, stderr="boom", stdout="")
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
     runner.run_download(url="https://example.com/v", out_template=str(tmp_path / "x.%(ext)s"),
-                        format_choice="video", format_id=None)
+                        format_choice="video", format_id=None, network_policy=online_policy)
     assert seen["timeout"] == 3600
 
 
-def test_download_timeout_env_override(monkeypatch, tmp_path):
+def test_download_timeout_env_override(monkeypatch, tmp_path, online_policy):
     monkeypatch.setenv("TROVE_DOWNLOAD_TIMEOUT", "7200")
     seen = {}
     def fake_run(argv, capture_output, text, timeout):
@@ -382,11 +532,11 @@ def test_download_timeout_env_override(monkeypatch, tmp_path):
         return types.SimpleNamespace(returncode=1, stderr="boom", stdout="")
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
     runner.run_download(url="https://example.com/v", out_template=str(tmp_path / "x.%(ext)s"),
-                        format_choice="video", format_id=None)
+                        format_choice="video", format_id=None, network_policy=online_policy)
     assert seen["timeout"] == 7200
 
 
-def test_download_timeout_garbage_env_falls_back(monkeypatch, tmp_path):
+def test_download_timeout_garbage_env_falls_back(monkeypatch, tmp_path, online_policy):
     monkeypatch.setenv("TROVE_DOWNLOAD_TIMEOUT", "not-a-number")
     seen = {}
     def fake_run(argv, capture_output, text, timeout):
@@ -394,5 +544,5 @@ def test_download_timeout_garbage_env_falls_back(monkeypatch, tmp_path):
         return types.SimpleNamespace(returncode=1, stderr="boom", stdout="")
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
     runner.run_download(url="https://example.com/v", out_template=str(tmp_path / "x.%(ext)s"),
-                        format_choice="video", format_id=None)
+                        format_choice="video", format_id=None, network_policy=online_policy)
     assert seen["timeout"] == 3600

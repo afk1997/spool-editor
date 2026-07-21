@@ -7,6 +7,7 @@ existing endpoint tests use.
 """
 from __future__ import annotations
 import os
+import copy
 import threading
 import time
 from pathlib import Path
@@ -14,6 +15,7 @@ import pytest
 from app import create_app
 from jobs import Job, JobStatus
 import transcribe_jobs
+import safety
 
 
 @pytest.fixture()
@@ -373,6 +375,178 @@ def test_attempt_unwinding_resume_returns_structured_409(client):
 
     assert response.status_code == 409
     assert response.get_json() == {"error": "attempt_unwinding"}
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/api/v1/jobs", {"url": "https://93.184.216.34/video"}),
+        ("/api/v1/jobs/bulk", {"urls": ["https://93.184.216.34/a", "https://93.184.216.34/b"]}),
+    ],
+)
+def test_offline_download_submission_is_exact_409_before_dns_or_job_creation(
+    client, monkeypatch, path, payload,
+):
+    app, c = client
+    policy = app.extensions["trove.network_policy"]
+    manager = app.extensions["trove.jobs"]
+    before_jobs = manager.snapshot_jobs()
+    dns_calls = []
+    submit_calls = []
+    monkeypatch.setattr(safety.socket, "getaddrinfo", lambda *args: dns_calls.append(args))
+    monkeypatch.setattr(manager._executor, "submit", lambda *a, **kw: submit_calls.append((a, kw)))
+    policy.enable_offline()
+
+    response = c.post(path, json=payload)
+
+    assert response.status_code == 409
+    assert response.get_json() == {"error": "offline_network_disabled"}
+    assert dns_calls == []
+    assert manager.snapshot_jobs() == before_jobs
+    assert submit_calls == []
+
+
+def test_offline_direct_enqueue_rechecks_admission_before_dns_or_submit(client, monkeypatch):
+    app, _ = client
+    policy = app.extensions["trove.network_policy"]
+    manager = app.extensions["trove.jobs"]
+    dns_calls = []
+    submit_calls = []
+    monkeypatch.setattr(safety.socket, "getaddrinfo", lambda *args: dns_calls.append(args))
+    monkeypatch.setattr(manager, "submit", lambda *a, **kw: submit_calls.append((a, kw)))
+    policy.enable_offline()
+
+    from network_policy import NetworkPolicyError
+    with pytest.raises(NetworkPolicyError, match="Offline mode"):
+        app.extensions["trove.actions"]["enqueue_download"](
+            "https://93.184.216.34/video", "video", None, "title",
+        )
+
+    assert dns_calls == []
+    assert submit_calls == []
+
+
+def test_offline_remote_watch_target_validation_denies_before_dns(client, monkeypatch):
+    app, c = client
+    dns_calls = []
+    monkeypatch.setattr(safety.socket, "getaddrinfo", lambda *args: dns_calls.append(args))
+    app.extensions["trove.network_policy"].enable_offline()
+
+    response = c.post("/api/v1/watches", json={
+        "name": "remote",
+        "kind": "playlist",
+        "target": "https://93.184.216.34/playlist",
+    })
+
+    assert response.status_code == 409
+    assert response.get_json() == {"error": "offline_network_disabled"}
+    assert app.extensions["trove.watches"].list() == []
+    assert dns_calls == []
+
+
+def test_resume_offline_leaves_paused_job_and_persisted_snapshot_unchanged(
+    client, monkeypatch,
+):
+    app, c = client
+    manager = app.extensions["trove.jobs"]
+    job = Job(
+        id="paused-offline", url="https://93.184.216.34/video", title="paused",
+        status=JobStatus.PAUSED, format_choice="video", out_template="existing.%(ext)s",
+        _was_paused=True, _attempt=3,
+    )
+    manager._jobs[job.id] = job
+    manager._persist()
+    before_job = copy.deepcopy(job)
+    store_path = Path(app.extensions["trove.download_dir"]) / "jobs.json"
+    before_bytes = store_path.read_bytes()
+    executor_calls = []
+    dns_calls = []
+    monkeypatch.setattr(manager._executor, "submit", lambda *a, **kw: executor_calls.append((a, kw)))
+    monkeypatch.setattr(safety.socket, "getaddrinfo", lambda *args: dns_calls.append(args))
+    app.extensions["trove.network_policy"].enable_offline()
+
+    response = c.post(f"/api/v1/jobs/{job.id}/resume")
+
+    assert response.status_code == 409
+    assert response.get_json() == {"error": "offline_network_disabled"}
+    after_job = copy.deepcopy(manager.get(job.id))
+    # Reading a job intentionally refreshes its non-persisted TTL access clock;
+    # resume state, attempts, errors, and artifacts must otherwise be identical.
+    after_job.last_accessed = before_job.last_accessed
+    assert after_job == before_job
+    assert store_path.read_bytes() == before_bytes
+    assert executor_calls == []
+    assert dns_calls == []
+
+
+def test_queued_download_rechecks_offline_before_deferred_info_or_download(
+    tmp_path, monkeypatch,
+):
+    import app as app_module
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TROVE_RATE_LIMIT", "0")
+    monkeypatch.delenv("SPOOL_OFFLINE", raising=False)
+    download_dir = tmp_path / "downloads"
+    download_dir.mkdir()
+    monkeypatch.setattr(app_module, "DOWNLOAD_DIR", download_dir)
+    monkeypatch.setattr(app_module, "MAX_WORKERS", 1)
+    application = app_module.create_app()
+    client = application.test_client()
+    manager = application.extensions["trove.jobs"]
+    blocker_entered = threading.Event()
+    release_blocker = threading.Event()
+    dns_calls = []
+    subprocess_calls = []
+
+    def blocker(_job):
+        blocker_entered.set()
+        assert release_blocker.wait(2)
+
+    manager.submit(target=blocker, title="blocker", url="file://blocker")
+    assert blocker_entered.wait(1)
+    monkeypatch.setattr(
+        safety.socket, "getaddrinfo",
+        lambda *_args: [(safety.socket.AF_INET, safety.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
+    )
+    response = client.post(
+        "/api/v1/jobs", json={"url": "https://example.com/deferred-title"},
+    )
+    assert response.status_code == 201
+    target_id = response.get_json()["id"]
+    monkeypatch.setattr(safety.socket, "getaddrinfo", lambda *args: dns_calls.append(args))
+    monkeypatch.setattr(app_module.run_info.__globals__["subprocess"], "run", lambda *a, **kw: subprocess_calls.append((a, kw)))
+    monkeypatch.setattr(app_module.run_info.__globals__["subprocess"], "Popen", lambda *a, **kw: subprocess_calls.append((a, kw)))
+    application.extensions["trove.network_policy"].enable_offline()
+    release_blocker.set()
+
+    deadline = time.time() + 3
+    while time.time() < deadline and manager.get(target_id).status not in {JobStatus.ERROR, JobStatus.DONE}:
+        time.sleep(0.01)
+    target = manager.get(target_id)
+    assert target.status is JobStatus.ERROR
+    assert target.error_category == "offline_network_disabled"
+    assert dns_calls == []
+    assert subprocess_calls == []
+
+
+def test_offline_keeps_settings_reads_job_reads_and_local_import_available(
+    client, tmp_path,
+):
+    app, c = client
+    policy = app.extensions["trove.network_policy"]
+    policy.enable_offline()
+    source = tmp_path / "local.mp4"
+    source.write_bytes(b"local media")
+
+    job_id = app.extensions["trove.actions"]["import_local_file"](
+        str(source), auto_transcribe=False,
+    )
+    assert _wait_download_worker_inactive(app.extensions["trove.jobs"], job_id)
+
+    assert c.get("/api/v1/settings").status_code == 200
+    assert c.get("/api/v1/jobs").status_code == 200
+    assert app.extensions["trove.jobs"].get(job_id).status is JobStatus.DONE
+    assert policy.active_leases == 0
 
 
 def _wait_download_worker_inactive(manager, job_id, timeout=5.0):
