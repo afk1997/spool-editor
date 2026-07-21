@@ -622,6 +622,8 @@ def capabilities():
     # would otherwise be invisible to capability consumers.
     rl = current_app.extensions.get("trove.rate_limiter")
     jm = current_app.extensions.get("trove.jobs")
+    tm = current_app.extensions.get("trove.transcribe")
+    cm = current_app.extensions.get("trove.clips")
     batch_max = current_app.extensions.get("trove.batch_max", 0)
     return jsonify({
         "api_version":    "v1",
@@ -658,6 +660,11 @@ def capabilities():
             "max_workers":           int(getattr(jm, "max_workers", 0) or 0),
             "job_ttl_seconds":       int(getattr(jm, "ttl_seconds", 0) or 0),
             "batch_max_urls":        int(batch_max or 0),
+            "pending_capacity": {
+                "download":      int(getattr(jm, "pending_capacity", 0) or 0),
+                "transcription": int(getattr(tm, "pending_capacity", 0) or 0),
+                "media":         int(getattr(cm, "pending_capacity", 0) or 0),
+            },
             "transcript_chunk": {
                 "text_default_bytes":    _CHUNK_TEXT_DEFAULT_LIMIT,
                 "text_max_bytes":        _CHUNK_TEXT_MAX_LIMIT,

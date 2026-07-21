@@ -122,6 +122,21 @@ def test_capabilities_reflects_live_runtime_objects(client):
     assert lim["batch_max_urls"] == 13
 
 
+def test_capabilities_exposes_live_pending_capacity_by_workload(client):
+    app, c = client
+    app.extensions["trove.jobs"].pending_capacity = 11
+    app.extensions["trove.transcribe"].pending_capacity = 12
+    app.extensions["trove.clips"].pending_capacity = 13
+
+    limits = c.get("/api/v1/capabilities").get_json()["limits"]
+
+    assert limits["pending_capacity"] == {
+        "download": 11,
+        "transcription": 12,
+        "media": 13,
+    }
+
+
 def test_capabilities_exposes_idempotency_policy(client):
     """Operators wiring retry logic need the header name + TTL +
     capacity surfaced explicitly so they don't have to read the
