@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import type { EventsSnapshot } from "@spool/types";
-import { SpoolApiError } from "@spool/api-client";
+import { SpoolApiError, type EngineSettings } from "@spool/api-client";
 
 const importHarness = vi.hoisted(() => ({
   ctx: null as null | Record<string, unknown>,
@@ -143,6 +143,18 @@ const clientFixture = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+const settingsFixture = (overrides: Partial<EngineSettings> = {}): EngineSettings => ({
+  fast_default: true,
+  default_preset: "tiktok",
+  offline: false,
+  reasoning_provider: "none",
+  reasoning_egress_consent: false,
+  clip_workers: 2,
+  max_workers: 4,
+  mcp_transport: "stdio",
+  ...overrides,
+});
+
 const baseCtx = (overrides: Record<string, unknown> = {}) => ({
   client: clientFixture(),
   sources: [],
@@ -170,7 +182,16 @@ const baseCtx = (overrides: Record<string, unknown> = {}) => ({
   awaitClipJob: vi.fn().mockResolvedValue(undefined),
   toasts: [],
   pushToast: vi.fn(),
-  offline: true,
+  settings: settingsFixture(),
+  settingsReady: true,
+  settingsLoading: false,
+  settingsError: null,
+  reasoningProvider: "none",
+  reasoningEgressConsent: false,
+  settingsPending: false,
+  updateSettings: vi.fn().mockResolvedValue(settingsFixture()),
+  offline: false,
+  offlinePending: false,
   toggleOffline: vi.fn(),
   ...overrides,
 });

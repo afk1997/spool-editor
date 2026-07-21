@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { EngineSettings } from "@spool/api-client";
 import { useSpool } from "@/components/spool/context";
-import { useEngine, useEngineQuery } from "@/lib/engine-context";
+import { useEngineQuery } from "@/lib/engine-context";
 import { describeActionError } from "@/lib/action-error";
 import { SettingCard, Row } from "@/components/spool/panels";
 import { Icon, Switch, Seg } from "@spool/ui";
@@ -19,37 +19,29 @@ const PRESETS = ["tiktok", "reels", "shorts", "youtube", "linkedin", "x"];
 
 export default function SettingsScreen() {
   const ctx = useSpool();
-  const client = useEngine();
+  const client = ctx.client;
   const doctor = useEngineQuery((c) => c.doctor());
-  const settingsQ = useEngineQuery((c) => c.getSettings(), []);
   const modelsQ = useEngineQuery((c) => c.listModels(), []);
   const [sec, setSec] = useState("Models");
-  const activeSettingsPatch = useRef<Partial<EngineSettings> | null>(null);
-  const queuedSettingsPatch = useRef<Partial<EngineSettings> | null>(null);
-  const debouncedSettingsPatch = useRef<Partial<EngineSettings> | null>(null);
-  const optimisticSettingsPatch = useRef<Partial<EngineSettings>>({});
-  const confirmedSettings = useRef<EngineSettings | null>(null);
+  const pendingSettingsRef = useRef<Set<keyof EngineSettings>>(new Set());
+  const [pendingSettings, setPendingSettings] = useState<ReadonlySet<keyof EngineSettings>>(() => new Set());
+  const [settingsSaveError, setSettingsSaveError] = useState<string | null>(null);
+  const [concurrencyDraft, setConcurrencyDraft] = useState<number | null>(null);
+  const concurrencyDraftRef = useRef<number | null>(null);
+  const concurrencyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modelMutationRef = useRef(false);
   const [modelMutating, setModelMutating] = useState(false);
   const mounted = useRef(true);
-  const concurrencyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
       if (concurrencyTimer.current) clearTimeout(concurrencyTimer.current);
-      queuedSettingsPatch.current = null;
-      debouncedSettingsPatch.current = null;
     };
   }, []);
-
-  // Local editable copy, seeded once from the server, reconciled from each PATCH response.
-  const [s, setS] = useState<EngineSettings | null>(null);
-  useEffect(() => {
-    if (!settingsQ.data || confirmedSettings.current) return;
-    confirmedSettings.current = settingsQ.data;
-    setS({ ...settingsQ.data, ...optimisticSettingsPatch.current });
-  }, [settingsQ.data]);
+  const s = ctx.settings;
+  const settingDisabled = (...keys: (keyof EngineSettings)[]) =>
+    !ctx.settingsReady || keys.some((key) => pendingSettings.has(key));
 
   // Poll the model list while a download is in flight so the progress + installed state update.
   const installing = modelsQ.data?.install_progress?.downloading ? modelsQ.data.install_progress : null;
@@ -60,81 +52,56 @@ export default function SettingsScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [!!installing]);
 
-  const settleSettingsPatch = (patch: Partial<EngineSettings>, next?: EngineSettings) => {
-    if (next) confirmedSettings.current = next;
-    const stillPending = {
-      ...queuedSettingsPatch.current,
-      ...debouncedSettingsPatch.current,
-    };
-    const optimistic = { ...optimisticSettingsPatch.current };
-    for (const key of Object.keys(patch) as (keyof EngineSettings)[]) {
-      if (!Object.prototype.hasOwnProperty.call(stillPending, key)) delete optimistic[key];
-    }
-    optimisticSettingsPatch.current = optimistic;
-    if (mounted.current && confirmedSettings.current) {
-      setS({ ...confirmedSettings.current, ...optimistic });
-    }
-  };
-
-  const runSettingsQueue = () => {
-    if (!mounted.current || activeSettingsPatch.current || !queuedSettingsPatch.current) return;
-    const patch = queuedSettingsPatch.current;
-    queuedSettingsPatch.current = null;
-    activeSettingsPatch.current = patch;
-    void (async () => {
-      try {
-        const next = await client.updateSettings(patch);
-        settleSettingsPatch(patch, next);
-      } catch (error) {
-        if (mounted.current) {
-          settleSettingsPatch(patch);
-          const failure = describeActionError(error);
-          ctx.pushToast({ icon: "alert", tone: "warn", title: "Couldn't save setting", body: `${failure.code}: ${failure.message}` });
-        }
-      } finally {
-        activeSettingsPatch.current = null;
-        runSettingsQueue();
-      }
-    })();
-  };
-
   const save = (patch: Partial<EngineSettings>) => {
-    const pending = { ...activeSettingsPatch.current, ...queuedSettingsPatch.current };
     const keys = Object.keys(patch) as (keyof EngineSettings)[];
-    const duplicatesPending = keys.every((key) =>
-      Object.prototype.hasOwnProperty.call(pending, key) && Object.is(pending[key], patch[key]),
-    );
-    if (duplicatesPending) return;
-
-    const duplicatesConfirmed = !activeSettingsPatch.current && !queuedSettingsPatch.current
-      && !!confirmedSettings.current
-      && keys.every((key) => Object.is(confirmedSettings.current?.[key], patch[key]));
-    if (duplicatesConfirmed) {
-      const optimistic = { ...optimisticSettingsPatch.current };
-      keys.forEach((key) => delete optimistic[key]);
-      optimisticSettingsPatch.current = optimistic;
-      setS({ ...confirmedSettings.current!, ...optimistic });
-      return;
-    }
-
-    queuedSettingsPatch.current = { ...queuedSettingsPatch.current, ...patch };
-    optimisticSettingsPatch.current = { ...optimisticSettingsPatch.current, ...patch };
-    setS((cur) => (cur ? { ...cur, ...patch } : cur));
-    runSettingsQueue();
+    if (!ctx.settingsReady || keys.length === 0 || keys.some((key) => pendingSettingsRef.current.has(key))) return null;
+    const pending = new Set(pendingSettingsRef.current);
+    keys.forEach((key) => pending.add(key));
+    pendingSettingsRef.current = pending;
+    setPendingSettings(pending);
+    setSettingsSaveError(null);
+    const work = ctx.updateSettings(patch)
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        if (!mounted.current) return;
+        const failure = describeActionError(error);
+        setSettingsSaveError(failure.message);
+        ctx.pushToast({
+          icon: "alert",
+          tone: "warn",
+          title: "Couldn't save setting",
+          body: `${failure.code}: ${failure.message}`,
+        });
+      })
+      .finally(() => {
+        const next = new Set(pendingSettingsRef.current);
+        keys.forEach((key) => next.delete(key));
+        pendingSettingsRef.current = next;
+        if (mounted.current) setPendingSettings(next);
+      });
+    return work;
   };
 
-  // The concurrency slider streams values while dragging (and on each keyboard arrow); debounce
-  // the persist so we PATCH once on settle, not per tick — and so keyboard users still save.
   const onConcurrency = (v: number) => {
-    const patch = { clip_workers: v };
-    debouncedSettingsPatch.current = patch;
-    optimisticSettingsPatch.current = { ...optimisticSettingsPatch.current, ...patch };
-    setS((cur) => (cur ? { ...cur, clip_workers: v } : cur));
+    if (settingDisabled("clip_workers")) return;
+    concurrencyDraftRef.current = v;
+    setConcurrencyDraft(v);
     if (concurrencyTimer.current) clearTimeout(concurrencyTimer.current);
     concurrencyTimer.current = setTimeout(() => {
-      const pending = debouncedSettingsPatch.current;
-      debouncedSettingsPatch.current = null;
-      if (pending) save(pending);
+      concurrencyTimer.current = null;
+      const next = concurrencyDraftRef.current;
+      if (next == null) return;
+      if (next === s?.clip_workers) {
+        concurrencyDraftRef.current = null;
+        if (mounted.current) setConcurrencyDraft(null);
+        return;
+      }
+      const work = save({ clip_workers: next });
+      if (!work) return;
+      void work.finally(() => {
+        concurrencyDraftRef.current = null;
+        if (mounted.current) setConcurrencyDraft(null);
+      });
     }, 400);
   };
 
@@ -173,6 +140,19 @@ export default function SettingsScreen() {
   const ver = (k: string) => (tools[k]?.version || "").split(/[-+ ]/)[0] || "—";
   const mono = (t: string, color = "var(--text-dim)") => <span className="mono" style={{ fontSize: 12, color }}>{t}</span>;
   const sections: [string, string][] = [["General", "settings"], ["Models", "cpu"], ["Hardware", "drive"], ["Integrations", "link"], ["MCP server", "terminal"], ["Privacy", "shield"], ["Storage", "folder"], ["About", "help"]];
+  const providerName = !ctx.settingsReady ? "not loaded" : s?.reasoning_provider === "codex" ? "Codex" : "None";
+  const egressState = !ctx.settingsReady
+    ? "settings unavailable"
+    : s?.reasoning_provider !== "codex"
+      ? "disabled"
+      : s.reasoning_egress_consent
+        ? "consented"
+        : "consent required";
+  const privacyReadiness = ctx.settingsReady
+    ? null
+    : ctx.settingsLoading
+      ? "Loading privacy settings…"
+      : "Privacy settings are unavailable. Check the engine connection and try again.";
 
   return (
     <div className="mainpad fadein">
@@ -185,6 +165,11 @@ export default function SettingsScreen() {
           ))}
         </div>
         <div style={{ maxWidth: 620 }}>
+          {settingsSaveError && (
+            <div role="alert" className="mono" style={{ marginBottom: 16, borderLeft: "3px solid var(--warn)", padding: "10px 12px", color: "var(--warn)", background: "var(--warn-soft)", borderRadius: 8, fontSize: 12, lineHeight: 1.55 }}>
+              <b>Couldn&rsquo;t save settings.</b> {settingsSaveError}
+            </div>
+          )}
           {sec === "Models" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
               <SettingCard title="Whisper transcription">
@@ -195,8 +180,8 @@ export default function SettingsScreen() {
                 <Row l="Engine" r={mono(`whisper.cpp ${ver("whisper_cpp")} · on-device`)} />
               </SettingCard>
               <SettingCard title="Moment-finding LLM">
-                <Row l="Provider" r={mono("Codex CLI bridge")} sub="Your ChatGPT/Codex subscription — no API key, no GPU (SPOOL_LLM_PROVIDER)." />
-                <Row l="Egress" r={mono("transcript text only", "var(--ok)")} sub="Media never leaves your machine; offline mode disables the bridge." />
+                <Row l="Provider" r={mono(providerName)} sub="Choose the remote reasoning provider in Privacy. None keeps transcript reasoning on this machine." />
+                <Row l="Transcript egress" r={mono(egressState, egressState === "consented" ? "var(--warn)" : "var(--text-dim)")} sub="Codex remote reasoning sends transcript text only after explicit consent; media files are not sent to Codex." />
               </SettingCard>
             </div>
           )}
@@ -206,12 +191,13 @@ export default function SettingsScreen() {
               <Row l="GPU" r={mono(machine.gpu ?? "—")} />
               <Row l="CPU cores" r={mono(String(machine.cpu_cores ?? "—"))} />
               <Row l="Render concurrency"
-                r={<input type="range" aria-label="Render concurrency" min={1} max={8} step={1} value={s?.clip_workers ?? 2}
+                r={<input type="range" aria-label="Render concurrency" min={1} max={8} step={1} value={concurrencyDraft ?? s?.clip_workers ?? 2}
                   onChange={(e) => onConcurrency(+e.target.value)}
+                  disabled={settingDisabled("clip_workers")}
                   style={{ width: 180, accentColor: "var(--accent)" }} />}
-                sub={`${s?.clip_workers ?? 2} parallel render${(s?.clip_workers ?? 2) === 1 ? "" : "s"} · applies on restart`} />
+                sub={`${concurrencyDraft ?? s?.clip_workers ?? 2} parallel render${(concurrencyDraft ?? s?.clip_workers ?? 2) === 1 ? "" : "s"} · ${concurrencyDraft == null ? "applies on restart" : "pending save"}`} />
               <Row l="Mode"
-                r={<Seg value={(s?.fast_default ?? true) ? "fast" : "quality"} onChange={(v) => save({ fast_default: v === "fast" })} options={[{ value: "fast", label: "Fast" }, { value: "quality", label: "Quality" }]} />}
+                r={<Seg value={(s?.fast_default ?? true) ? "fast" : "quality"} onChange={(v) => save({ fast_default: v === "fast" })} disabled={settingDisabled("fast_default")} options={[{ value: "fast", label: "Fast" }, { value: "quality", label: "Quality" }]} />}
                 sub="Fast uses the hardware encoder; Quality is slower with a higher bitrate. Applies to new renders." />
             </SettingCard>
           )}
@@ -219,7 +205,7 @@ export default function SettingsScreen() {
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
               <SettingCard title="MCP server">
                 <Row l="Transport"
-                  r={<Seg value={s?.mcp_transport ?? "stdio"} onChange={(v) => save({ mcp_transport: v })} options={[{ value: "stdio", label: "stdio" }, { value: "streamable-http", label: "HTTP" }]} />}
+                  r={<Seg value={s?.mcp_transport ?? "stdio"} onChange={(v) => save({ mcp_transport: v })} disabled={settingDisabled("mcp_transport")} options={[{ value: "stdio", label: "stdio" }, { value: "streamable-http", label: "HTTP" }]} />}
                   sub="stdio for Claude Desktop / Code; HTTP for headless or self-host. Applies on restart." />
                 <Row l="Phase 0 access" r={mono("read-only inspection", "var(--warn)")} sub="Agent and MCP mutation requests are rejected by the runtime safety fuse." />
               </SettingCard>
@@ -233,13 +219,45 @@ export default function SettingsScreen() {
           {sec === "Privacy" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
               <SettingCard title="Privacy">
-                <Row l="Offline mode" r={<Switch label="Offline mode" on={ctx.offline} disabled={ctx.offlinePending} onClick={ctx.toggleOffline} />} sub="Blocks LLM egress (agent + find-moments). Downloads you start explicitly still run. Applies immediately (SPOOL_OFFLINE)." />
+                {privacyReadiness && <div role="status" className="mono" style={{ color: "var(--text-faint)", fontSize: 11.5, marginBottom: 12 }}>{privacyReadiness}</div>}
+                <Row
+                  l="Offline mode"
+                  r={<Switch label="Offline mode" on={!!s?.offline} disabled={settingDisabled("offline")} onClick={() => save({ offline: !s?.offline })} />}
+                  sub="Blocks all non-loopback network access, including URL downloads, remote models, watches, and Codex. Local media work remains available." />
+                <Row
+                  l="Reasoning provider"
+                  r={<Seg
+                    value={s?.reasoning_provider ?? "none"}
+                    disabled={settingDisabled("reasoning_provider", "reasoning_egress_consent")}
+                    onChange={(provider) => {
+                      if (provider === "none" || provider === "codex") save({ reasoning_provider: provider });
+                    }}
+                    options={[{ value: "none", label: "None" }, { value: "codex", label: "Codex" }]}
+                  />}
+                  sub="None keeps transcript reasoning on this machine. Codex is remote and requires explicit consent." />
+                {s?.reasoning_provider === "codex" && (
+                  <Row
+                    l="Codex transcript consent"
+                    r={<Switch
+                      label="Allow transcript text to leave this machine for Codex"
+                      on={s.reasoning_egress_consent}
+                      disabled={settingDisabled("reasoning_provider", "reasoning_egress_consent")}
+                      onClick={() => save({ reasoning_egress_consent: !s.reasoning_egress_consent })}
+                    />}
+                    sub="When enabled, transcript text leaves this machine and is sent to Codex for remote reasoning. Media files are not sent to Codex." />
+                )}
               </SettingCard>
               <SettingCard title="What leaves your machine">
                 <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.9 }}>
-                  <div>yt-dlp → the site you paste · <span style={{ color: "var(--warn)" }}>download (you start it)</span></div>
+                  <div>URL import → the site you paste · <span style={{ color: "var(--warn)" }}>network download (you start it)</span></div>
                   <div>whisper · <span style={{ color: "var(--ok)" }}>on-device</span></div>
-                  <div>find-moments · transcript text → Codex bridge</div>
+                  <div>remote reasoning · {ctx.settingsReady
+                    ? s?.reasoning_provider === "codex" && s.reasoning_egress_consent
+                      ? <span style={{ color: "var(--warn)" }}>transcript text → Codex (consented)</span>
+                      : s?.reasoning_provider === "codex"
+                        ? "Codex selected · transcript egress blocked until consent"
+                        : "disabled"
+                    : "settings unavailable"}</div>
                 </div>
               </SettingCard>
             </div>
@@ -254,7 +272,7 @@ export default function SettingsScreen() {
           {sec === "General" && (
             <SettingCard title="General">
               <Row l="Default platform preset"
-                r={<Seg value={s?.default_preset ?? "tiktok"} onChange={(v) => save({ default_preset: v })} options={PRESETS} />}
+                r={<Seg value={s?.default_preset ?? "tiktok"} onChange={(v) => save({ default_preset: v })} disabled={settingDisabled("default_preset")} options={PRESETS} />}
                 sub="The export preset used when a render doesn't name a platform. Applies immediately." />
               <Row l="Appearance" r={mono("Light")} sub="Spool is light-only by design (the paper aesthetic)." />
             </SettingCard>

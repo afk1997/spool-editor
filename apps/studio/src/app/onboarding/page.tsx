@@ -34,6 +34,32 @@ export default function OnboardingScreen() {
   const encoders = doctor.data?.encoders ?? [];
   const encoder = encoders.some((e) => e.includes("videotoolbox")) ? "VideoToolbox" : encoders.some((e) => e.includes("nvenc")) ? "NVENC" : encoders[0] || "x264";
   const freeDisk = machine.free_disk_gb != null ? `${machine.free_disk_gb} GB free on disk` : "checking disk…";
+  const privacySummary = !ctx.settingsReady
+    ? ctx.settingsLoading
+      ? "Checking privacy settings…"
+      : "Privacy settings unavailable."
+    : ctx.offline
+      ? "Offline mode blocks network access."
+      : ctx.reasoningProvider === "codex" && ctx.reasoningEgressConsent
+        ? "Codex remote reasoning is enabled."
+        : "Remote reasoning is off.";
+  const momentFindingSummary = !ctx.settingsReady
+    ? "Privacy settings not loaded"
+    : ctx.reasoningProvider !== "codex"
+      ? "No remote provider selected · transcript text stays on this machine"
+      : ctx.reasoningEgressConsent
+        ? "Codex remote reasoning · transcript text leaves this machine with consent"
+        : "Codex selected · transcript text stays on this machine until you consent";
+  const momentFindingTone = !ctx.settingsReady || (ctx.reasoningProvider === "codex" && !ctx.reasoningEgressConsent)
+    ? "warn"
+    : "ok";
+  const momentFindingState = !ctx.settingsReady
+    ? "checking"
+    : ctx.reasoningProvider !== "codex"
+      ? "disabled"
+      : ctx.reasoningEgressConsent
+        ? "enabled"
+        : "consent required";
 
   const fix = (id: string, hint: string) => { ctx.pushToast({ icon: "terminal", tone: "info", title: `Install ${id}`, body: hint ? `Run: ${hint}` : "See the docs, then re-check." }); doctor.reload(); };
 
@@ -53,8 +79,8 @@ export default function OnboardingScreen() {
           ))}
         </div>
         <div className="spacer" />
-        <div className="card" style={{ padding: 13, background: "var(--ok-soft)", borderColor: "transparent" }}>
-          <div className="row" style={{ gap: 8, fontSize: 12.5 }}><Icon name="shield" size={15} style={{ color: "var(--ok)" }} />Everything runs on your machine.</div>
+        <div className="card" style={{ padding: 13, background: "var(--bg-2)", borderColor: "var(--line)" }}>
+          <div className="row" style={{ gap: 8, fontSize: 12.5 }}><Icon name="shield" size={15} style={{ color: "var(--text-dim)" }} />{privacySummary}</div>
         </div>
       </div>
 
@@ -63,8 +89,8 @@ export default function OnboardingScreen() {
           {step === 0 && (
             <div>
               <div className="eyebrow" style={{ marginBottom: 14 }}>Welcome to Spool</div>
-              <h1 style={{ fontSize: 34, lineHeight: 1.1, marginBottom: 16 }}>Turn long videos into platform-ready shorts — without the cloud.</h1>
-              <p style={{ color: "var(--text-dim)", fontSize: 15, lineHeight: 1.6, marginBottom: 28 }}>Download → transcribe → find moments → reframe → caption → render — entirely on your machine. Let&rsquo;s check your setup.</p>
+              <h1 style={{ fontSize: 34, lineHeight: 1.1, marginBottom: 16 }}>Turn long videos into platform-ready shorts with local media processing.</h1>
+              <p style={{ color: "var(--text-dim)", fontSize: 15, lineHeight: 1.6, marginBottom: 28 }}>URL downloads use the network. Transcription and rendering run on this machine; Codex receives transcript text only when remote reasoning is selected and consented.</p>
               <div className="row" style={{ gap: 12 }}><Btn variant="primary" size="lg" iconR="arrowR" onClick={() => setStep(1)}>Let&rsquo;s set up</Btn><Btn variant="ghost" size="lg" onClick={() => ctx.nav("home")}>Skip for now</Btn></div>
             </div>
           )}
@@ -91,7 +117,7 @@ export default function OnboardingScreen() {
               <p style={{ color: "var(--text-faint)", marginTop: 0, marginBottom: 22 }}>What Spool found on your machine. Model download/switching gets a full settings UI in Phase 2.</p>
               <div className="panel" style={{ overflow: "hidden", marginBottom: 20 }}>
                 <div className="row" style={{ padding: "13px 16px", gap: 12, borderBottom: "1px solid var(--line-2)" }}><Icon name="type" size={16} style={{ color: "var(--accent)" }} /><div className="grow"><b>Transcription</b><div style={{ fontSize: 12, color: "var(--text-faint)" }}>whisper.cpp {trimVer(tools.whisper_cpp?.version ?? null)} · on-device</div></div><Chip tone={tools.whisper_cpp?.present ? "ok" : "warn"}>{tools.whisper_cpp?.present ? "ready" : "missing"}</Chip></div>
-                <div className="row" style={{ padding: "13px 16px", gap: 12 }}><Icon name="sparkles" size={16} style={{ color: "var(--accent)" }} /><div className="grow"><b>Moment-finding</b><div style={{ fontSize: 12, color: "var(--text-faint)" }}>Codex CLI bridge · only transcript text leaves the machine</div></div><Chip tone="ok">default</Chip></div>
+                <div className="row" style={{ padding: "13px 16px", gap: 12 }}><Icon name="sparkles" size={16} style={{ color: "var(--accent)" }} /><div className="grow"><b>Moment-finding</b><div style={{ fontSize: 12, color: "var(--text-faint)" }}>{momentFindingSummary}</div></div><Chip tone={momentFindingTone}>{momentFindingState}</Chip></div>
               </div>
               <span className="field-label">Storage location</span>
               <input className="input mono" defaultValue="~/Spool" readOnly />

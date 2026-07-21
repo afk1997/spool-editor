@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { StrictMode } from "react";
-import { SpoolApiError } from "@spool/api-client";
+import { SpoolApiError, type EngineSettings } from "@spool/api-client";
 import type { EventsSnapshot } from "@spool/types";
 import type { SpoolClip, SpoolJob, SpoolSource, TranscriptLine } from "@/components/spool/context";
 
@@ -11,6 +11,7 @@ const harness = vi.hoisted(() => ({
   snapshot: { ts: 1, jobs: [], transcripts: [], clips: [] } as unknown as EventsSnapshot,
   queryData: {} as Record<string, unknown>,
   queryReload: {} as Record<string, ReturnType<typeof vi.fn>>,
+  queryCalls: [] as string[],
   router: {
     push: vi.fn(),
     replace: vi.fn(),
@@ -42,6 +43,7 @@ vi.mock("@/lib/engine-context", () => ({
       },
     );
     query(recordingClient);
+    if (method) harness.queryCalls.push(method);
     return {
       data: harness.queryData[method],
       loading: false,
@@ -141,6 +143,18 @@ const clientFixture = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+const settingsFixture = (overrides: Partial<EngineSettings> = {}): EngineSettings => ({
+  fast_default: true,
+  default_preset: "tiktok",
+  offline: false,
+  reasoning_provider: "none",
+  reasoning_egress_consent: false,
+  clip_workers: 2,
+  max_workers: 4,
+  mcp_transport: "stdio",
+  ...overrides,
+});
+
 const baseCtx = (overrides: Record<string, unknown> = {}) => ({
   client: clientFixture(),
   sources: [],
@@ -153,6 +167,17 @@ const baseCtx = (overrides: Record<string, unknown> = {}) => ({
   pushToast: vi.fn(),
   makeClipsFrom: vi.fn().mockResolvedValue(undefined),
   awaitClipJob: vi.fn().mockResolvedValue(undefined),
+  settings: settingsFixture(),
+  settingsReady: true,
+  settingsLoading: false,
+  settingsError: null,
+  reasoningProvider: "none",
+  reasoningEgressConsent: false,
+  settingsPending: false,
+  updateSettings: vi.fn().mockResolvedValue(settingsFixture()),
+  offline: false,
+  offlinePending: false,
+  toggleOffline: vi.fn(),
   ...overrides,
 });
 
@@ -175,6 +200,7 @@ beforeEach(() => {
   harness.snapshot = { ts: 1, jobs: [], transcripts: [], clips: [] } as unknown as EventsSnapshot;
   harness.queryData = {};
   harness.queryReload = {};
+  harness.queryCalls = [];
   Object.values(harness.router).forEach((method) => method.mockReset());
   window.history.replaceState({}, "", "/");
 });
@@ -1133,18 +1159,30 @@ describe("visible mutation inventory: same-tick persistence locks", () => {
 describe("visible mutation inventory: Settings", () => {
   const settingsQueries = (model: Record<string, unknown>) => ({
     doctor: { tools: {}, machine: {}, encoders: [] },
-    getSettings: { mcp_transport: "stdio", clip_workers: 2, fast_default: true },
     listModels: { models: [model], active: "base" },
   });
 
+  it("uses context settings without creating a second GET settings subscription", () => {
+    harness.queryData = settingsQueries({
+      name: "base", label: "Base", is_active: true, is_installed: true, size_bytes: 1,
+    });
+    harness.ctx = baseCtx();
+
+    render(<SettingsScreen />);
+
+    expect(harness.queryCalls).toContain("doctor");
+    expect(harness.queryCalls).toContain("listModels");
+    expect(harness.queryCalls).not.toContain("getSettings");
+  });
+
   it("single-flights a setting update and surfaces its structured rejection", async () => {
-    const delayed = deferred<Record<string, unknown>>();
+    const delayed = deferred<EngineSettings>();
     const updateSettings = vi.fn().mockReturnValue(delayed.promise);
     const pushToast = vi.fn();
     harness.queryData = settingsQueries({
       name: "base", label: "Base", is_active: true, is_installed: true, size_bytes: 1,
     });
-    harness.ctx = baseCtx({ client: clientFixture({ updateSettings }), pushToast });
+    harness.ctx = baseCtx({ updateSettings, pushToast });
     render(<SettingsScreen />);
     fireEvent.click(screen.getByRole("button", { name: "MCP server" }));
     const http = screen.getByRole("button", { name: "HTTP" });
@@ -1163,84 +1201,73 @@ describe("visible mutation inventory: Settings", () => {
     })));
   });
 
-  it("serializes a different setting changed while a settings write is pending", async () => {
-    const first = deferred<Record<string, unknown>>();
-    const second = deferred<Record<string, unknown>>();
-    const updateSettings = vi
-      .fn()
+  it("allows a different setting to join the context queue while another key is pending", async () => {
+    const first = deferred<EngineSettings>();
+    const second = deferred<EngineSettings>();
+    const updateSettings = vi.fn()
       .mockReturnValueOnce(first.promise)
       .mockReturnValueOnce(second.promise);
     harness.queryData = settingsQueries({
       name: "base", label: "Base", is_active: true, is_installed: true, size_bytes: 1,
     });
-    harness.ctx = baseCtx({ client: clientFixture({ updateSettings }) });
+    harness.ctx = baseCtx({ updateSettings });
     render(<SettingsScreen />);
 
     fireEvent.click(screen.getByRole("button", { name: "MCP server" }));
     fireEvent.click(screen.getByRole("button", { name: "HTTP" }));
     fireEvent.click(screen.getByRole("button", { name: "Hardware" }));
-    fireEvent.click(screen.getByRole("button", { name: "Quality" }));
+    const quality = screen.getByRole("button", { name: "Quality" });
 
     expect(updateSettings).toHaveBeenCalledTimes(1);
     expect(updateSettings).toHaveBeenNthCalledWith(1, { mcp_transport: "streamable-http" });
-
-    await act(async () => {
-      first.resolve({
-        mcp_transport: "streamable-http", clip_workers: 2, fast_default: true,
-      });
-      await first.promise;
-      await Promise.resolve();
-    });
-
+    expect(quality).toBeEnabled();
+    fireEvent.click(quality);
     expect(updateSettings).toHaveBeenCalledTimes(2);
     expect(updateSettings).toHaveBeenNthCalledWith(2, { fast_default: false });
 
     await act(async () => {
-      second.resolve({
-        mcp_transport: "streamable-http", clip_workers: 2, fast_default: false,
-      });
+      first.resolve(settingsFixture({ mcp_transport: "streamable-http" }));
+      second.resolve(settingsFixture({ mcp_transport: "streamable-http", fast_default: false }));
+      await first.promise;
       await second.promise;
     });
+    await waitFor(() => expect(quality).toBeEnabled());
   });
 
-  it("keeps a debounced concurrency write queued behind another settings write", async () => {
+  it("debounces a concurrency draft and marks it pending until canonical settings change", async () => {
     vi.useFakeTimers();
     try {
-      const first = deferred<Record<string, unknown>>();
-      const second = deferred<Record<string, unknown>>();
-      const updateSettings = vi
-        .fn()
-        .mockReturnValueOnce(first.promise)
-        .mockReturnValueOnce(second.promise);
+      const write = deferred<EngineSettings>();
+      const updateSettings = vi.fn().mockReturnValue(write.promise);
       harness.queryData = settingsQueries({
         name: "base", label: "Base", is_active: true, is_installed: true, size_bytes: 1,
       });
-      harness.ctx = baseCtx({ client: clientFixture({ updateSettings }) });
-      render(<SettingsScreen />);
+      harness.ctx = baseCtx({ updateSettings });
+      const view = render(<SettingsScreen />);
       fireEvent.click(screen.getByRole("button", { name: "Hardware" }));
+      const slider = screen.getByRole("slider", { name: "Render concurrency" });
 
-      fireEvent.click(screen.getByRole("button", { name: "Quality" }));
-      fireEvent.change(screen.getByRole("slider", { name: "Render concurrency" }), {
-        target: { value: "5" },
-      });
-      act(() => vi.advanceTimersByTime(400));
+      fireEvent.change(slider, { target: { value: "3" } });
+      fireEvent.change(slider, { target: { value: "4" } });
+      fireEvent.change(slider, { target: { value: "5" } });
 
+      expect(updateSettings).not.toHaveBeenCalled();
+      expect(screen.getByText("5 parallel renders · pending save")).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(399));
+      expect(updateSettings).not.toHaveBeenCalled();
+      act(() => vi.advanceTimersByTime(1));
       expect(updateSettings).toHaveBeenCalledTimes(1);
+      expect(updateSettings).toHaveBeenCalledWith({ clip_workers: 5 });
+      expect(slider).toBeDisabled();
+
+      const canonical = settingsFixture({ clip_workers: 5 });
+      await act(async () => {
+        write.resolve(canonical);
+        await write.promise;
+      });
+      harness.ctx = baseCtx({ settings: canonical, updateSettings });
+      view.rerender(<SettingsScreen />);
       expect(screen.getByText("5 parallel renders · applies on restart")).toBeInTheDocument();
-
-      await act(async () => {
-        first.resolve({ mcp_transport: "stdio", clip_workers: 2, fast_default: false });
-        await first.promise;
-        await Promise.resolve();
-      });
-
-      expect(updateSettings).toHaveBeenCalledTimes(2);
-      expect(updateSettings).toHaveBeenNthCalledWith(2, { clip_workers: 5 });
-
-      await act(async () => {
-        second.resolve({ mcp_transport: "stdio", clip_workers: 5, fast_default: false });
-        await second.promise;
-      });
     } finally {
       vi.useRealTimers();
     }

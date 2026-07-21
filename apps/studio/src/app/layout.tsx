@@ -5,7 +5,7 @@ import { Providers } from "./providers";
 export const metadata: Metadata = {
   title: "Spool",
   description:
-    "Local-first clip studio — turn long videos into platform-ready vertical clips, entirely on your machine.",
+    "Local-first clip studio for platform-ready vertical clips, with optional consented Codex reasoning.",
 };
 
 export default function RootLayout({

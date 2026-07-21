@@ -101,6 +101,15 @@ function Rail() {
 function TopBar() {
   const ctx = useSpool();
   const running = useRunningCount();
+  const privacyLabel = !ctx.settingsReady
+    ? ctx.settingsLoading
+      ? "Privacy status loading"
+      : "Privacy status unavailable"
+    : ctx.offline
+      ? "Offline"
+      : ctx.reasoningProvider === "codex" && ctx.reasoningEgressConsent
+        ? "Remote reasoning enabled"
+        : "Fully local";
   return (
     <div className="topbar">
       <div className="row" style={{ gap: 9, paddingRight: 8 }}>
@@ -112,7 +121,9 @@ function TopBar() {
         <span className="kbd">⌘K</span>
       </div>
       <span className="spacer" />
-      <div className="pill" onClick={() => ctx.nav("settings")} title="Privacy"><span className="led" />{ctx.offline ? "On-device" : "Online"}</div>
+      <button type="button" className="pill" onClick={() => ctx.nav("settings")} title={`Privacy: ${privacyLabel}`} aria-label={`Privacy: ${privacyLabel}`}>
+        <span className="led" />{privacyLabel}
+      </button>
       <div className="pill" onClick={() => ctx.nav("queue")}><Icon name="layers" size={14} />Queue<span className="chip acc" style={{ height: 18, padding: "0 6px" }}>{running}</span></div>
       <button className="iconbtn" aria-label="Settings" onClick={() => ctx.nav("settings")}><Icon name="settings" size={17} /></button>
       <button className="iconbtn" aria-label="Keyboard shortcuts" onClick={ctx.openShortcuts}><Icon name="help" size={17} /></button>
@@ -141,8 +152,6 @@ function StatusBar() {
       <span style={{ color: "var(--text-faint)" }}>·</span>
       <span className="mono">{queued} queued</span>
       <span className="spacer" />
-      <span className="row" style={{ gap: 6 }} title="On-device"><Icon name="shield" size={13} style={{ color: "var(--ok)" }} />{ctx.offline ? "offline · on-device" : "online"}</span>
-      <span style={{ color: "var(--text-faint)" }}>·</span>
       <span className="mono">{connection === "online" ? "engine connected" : "engine offline"}</span>
     </div>
   );
