@@ -539,8 +539,11 @@ def _fill_transcribe_capacity(manager, gate):
     ]
 
 
-def test_transcribe_capacity_plus_one_creates_no_record_or_executor_work(monkeypatch):
-    manager = TranscribeJobManager(max_workers=1)
+def test_transcribe_capacity_plus_one_creates_no_record_or_executor_work(
+    tmp_path, monkeypatch,
+):
+    store = tmp_path / "transcribe.json"
+    manager = TranscribeJobManager(max_workers=1, store_path=store)
     gate = threading.Event()
     try:
         admitted = _fill_transcribe_capacity(manager, gate)
@@ -563,6 +566,7 @@ def test_transcribe_capacity_plus_one_creates_no_record_or_executor_work(monkeyp
             )
 
         assert [job.id for job in manager.snapshot_jobs()] == before_ids == admitted
+        assert list(json.loads(store.read_text())["jobs"]) == admitted
         assert manager.pending_count == manager.pending_capacity
         assert executor_calls == []
     finally:
@@ -657,6 +661,8 @@ def test_transcribe_submit_rejection_rolls_back_reservation_record_and_store(tmp
     assert manager.pending_count == 0
     assert manager.snapshot_jobs() == []
     assert json.loads(store.read_text()) == {"schema_version": 1, "jobs": {}}
+    attempts = tmp_path / ".attempts" / "transcribe"
+    assert not attempts.exists() or list(attempts.iterdir()) == []
     assert rejecting.submit_calls == 1
     manager.shutdown(wait=True)
 
