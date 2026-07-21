@@ -3,9 +3,18 @@
 // usage: node scripts/smoke.mjs   (engine on :8899, studio on :3000)
 import { chromium } from "playwright";
 
-const ENGINE = process.env.SPOOL_ENGINE_URL ?? "http://127.0.0.1:8899/api/v1";
-const STUDIO = process.env.SPOOL_STUDIO_URL ?? "http://localhost:3000";
-const j = async (p) => (await fetch(ENGINE + p)).json().catch(() => ({}));
+const ENGINE = process.env.E2E_ENGINE_API_URL ?? "http://127.0.0.1:8899/api/v1";
+const STUDIO = process.env.SPOOL_STUDIO_URL ?? "http://127.0.0.1:3000";
+const TOKEN = process.env.TROVE_TOKEN?.trim();
+const ENGINE_HEADERS = TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {};
+const j = async (p) => {
+  const response = await fetch(ENGINE + p, {
+    headers: ENGINE_HEADERS,
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) throw new Error(`${p} returned ${response.status}`);
+  return response.json();
+};
 
 const { jobs = [] } = await j("/jobs");
 const { clip_jobs = [] } = await j("/clip-jobs");

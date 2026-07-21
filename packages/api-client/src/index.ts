@@ -223,7 +223,7 @@ export class SpoolApiClient {
 
   private headers(extra?: HeadersInit): Headers {
     const h = new Headers(extra);
-    h.set("Accept", "application/json");
+    if (!h.has("Accept")) h.set("Accept", "application/json");
     if (this.token) h.set("Authorization", `Bearer ${this.token}`);
     return h;
   }
@@ -513,7 +513,7 @@ export class SpoolApiClient {
   }
 
   /** Direct URL for a produced render's .mp4 — for `<video src>` / download links.
-   *  (Token-auth deployments need a signed URL; the local-first default is unauthenticated.) */
+   *  The Studio client uses its same-origin authenticated engine proxy as baseUrl. */
   renderFileUrl(clipId: string, renderId: string): string {
     return `${this.baseUrl}/api/v1/clips/${encodeURIComponent(clipId)}/renders/${encodeURIComponent(renderId)}/file`;
   }

@@ -1,10 +1,7 @@
 import { SpoolApiClient } from "@spool/api-client";
 
 /**
- * The studio's singleton engine client. Base URL comes from the environment so the same
- * build can target a local or remote engine; defaults to the localhost dev bind. Components
- * use this — they never call `fetch` directly (spec §6.3).
+ * The browser knows only the same-origin Studio route. The server-side proxy owns the engine
+ * origin and optional bearer, so JSON, SSE, media, and downloads share one credential boundary.
  */
-export const engine = new SpoolApiClient({
-  baseUrl: process.env.NEXT_PUBLIC_SPOOL_ENGINE_URL ?? "http://127.0.0.1:8899",
-});
+export const engine = new SpoolApiClient({ baseUrl: "/api/engine" });

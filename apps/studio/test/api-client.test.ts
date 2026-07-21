@@ -78,6 +78,26 @@ function sseResponse(frames: string[]): Response {
 }
 
 describe("subscribeEvents clean close", () => {
+  it("preserves Accept: text/event-stream instead of replacing it with JSON", async () => {
+    const fetchImpl = vi.fn(async (...args: Parameters<typeof fetch>) => {
+      void args;
+      return sseResponse([]);
+    });
+    const client = new SpoolApiClient({
+      baseUrl: "/api/engine",
+      fetch: fetchImpl as unknown as typeof fetch,
+    });
+    const errors: unknown[] = [];
+
+    client.subscribeEvents(() => {}, { onError: (error) => errors.push(error) });
+
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
+    const init = fetchImpl.mock.calls[0]![1];
+    if (!init) throw new Error("subscribeEvents did not pass fetch options");
+    expect(new Headers(init.headers).get("accept")).toBe("text/event-stream");
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
+  });
+
   it("routes a clean EOF through onError so callers reconnect", async () => {
     const fetchImpl = vi.fn(async () => sseResponse(['{"ts":1,"jobs":[],"transcripts":[],"clips":[]}']));
     const client = new SpoolApiClient({ baseUrl: "http://x", fetch: fetchImpl as unknown as typeof fetch });
@@ -97,6 +117,25 @@ describe("subscribeEvents clean close", () => {
     stop();
     await new Promise((r) => setTimeout(r, 20));
     expect(errors.length).toBe(0);
+  });
+});
+
+describe("same-origin media helpers", () => {
+  const client = new SpoolApiClient({ baseUrl: "/api/engine" });
+
+  it("routes source media through the authenticated Studio proxy", () => {
+    expect(client.jobFileUrl("job/with space")).toBe(
+      "/api/engine/api/v1/jobs/job%2Fwith%20space/file",
+    );
+  });
+
+  it("routes render downloads and clip artifacts through the Studio proxy", () => {
+    expect(client.renderFileUrl("clip one", "render/two")).toBe(
+      "/api/engine/api/v1/clips/clip%20one/renders/render%2Ftwo/file",
+    );
+    expect(client.clipArtifactUrl("clip one", "reframed")).toBe(
+      "/api/engine/api/v1/clips/clip%20one/artifacts/reframed",
+    );
   });
 });
 

@@ -50,6 +50,11 @@ cd engine && ./trove.sh
 docker build -t spool-engine engine/
 ```
 
+The Studio's `/api/engine` route injects the optional server-side engine token for JSON, SSE,
+media, and downloads. Copy `apps/studio/.env.example` to `.env.local` when token auth is enabled.
+Both Studio scripts intentionally bind to `127.0.0.1`: this bearer-injecting route is
+**loopback-only** and must not be exposed by a public reverse proxy.
+
 The build follows the phased roadmap in [`docs/Spool_Engineering-Spec.md`](docs/Spool_Engineering-Spec.md)
 (§5). A root `docker compose` and the headless de-coupling from the legacy editor land in Phase 0.
 
