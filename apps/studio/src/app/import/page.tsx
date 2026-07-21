@@ -33,9 +33,17 @@ function ImportScreen() {
   const pendingDownloadActionsRef = useRef<Record<string, PendingDownloadAction>>({});
   const [pendingDownloadActions, setPendingDownloadActions] = useState<Record<string, PendingDownloadAction>>({});
   const downloads = ctx.downloads;
+  const networkActionBlock = !ctx.settingsReady || !ctx.settings
+    ? ctx.settingsLoading
+      ? "Checking privacy settings. Network downloads and resumes are disabled."
+      : "Privacy settings are unavailable. Network downloads and resumes are disabled."
+    : ctx.settings?.offline
+      ? "Offline mode blocks network downloads and resumes. Pause and local media work remain available."
+      : null;
+  const networkActionsBlocked = networkActionBlock !== null;
 
   const resolve = async () => {
-    if (submittingRef.current) return;
+    if (networkActionsBlocked || submittingRef.current) return;
     const urls = url.split(/\s+/).filter(Boolean);
     if (!urls.length) {
       setSubmitError({
@@ -108,6 +116,7 @@ function ImportScreen() {
   };
 
   const runDownloadAction = async (id: string, action: DownloadAction) => {
+    if (action === "resume" && networkActionsBlocked) return;
     const existing = pendingDownloadActionsRef.current[id];
     if (existing) {
       const currentDownload = downloads.find((download) => download.id === id);
@@ -148,6 +157,11 @@ function ImportScreen() {
       <div className="eyebrow" style={{ marginBottom: 6 }}>Import</div>
       <h1 style={{ fontSize: 30, marginBottom: 4 }}>Import a source</h1>
       <p style={{ color: "var(--text-faint)", marginTop: 0, marginBottom: 22 }}>Paste one or more HTTP or HTTPS media URLs. Downloads run through yt-dlp on this machine.</p>
+      {networkActionBlock && (
+        <div id="network-action-status" role="status" className="mono" style={{ color: "var(--warn)", fontSize: 11.5, marginBottom: 16 }}>
+          {networkActionBlock}
+        </div>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 320px", gap: 24, alignItems: "start" }}>
         <div className="panel" style={{ overflow: "hidden" }}>
@@ -183,7 +197,7 @@ function ImportScreen() {
               <div className="row" style={{ gap: 14, marginTop: 14, flexWrap: "wrap" }}>
                 <div><span className="field-label">Format</span><Seg value={format} onChange={setFormat} neutral options={["Video", "Audio"]} /></div>
                 <div className="spacer" />
-                <Btn variant="primary" icon="download" onClick={resolve} disabled={submitting} style={{ alignSelf: "flex-end" }}>
+                <Btn variant="primary" icon="download" onClick={resolve} disabled={submitting || networkActionsBlocked} aria-describedby={networkActionsBlocked ? "network-action-status" : undefined} style={{ alignSelf: "flex-end" }}>
                   {submitting ? "Submitting…" : "Download"}
                 </Btn>
               </div>
@@ -260,7 +274,14 @@ function ImportScreen() {
                           disabled
                         ><Icon name={pendingAction === "pause" ? "pause" : "play"} size={16} /></button>
                     : d.status === "paused"
-                      ? <button className="iconbtn" aria-label="Resume download" onClick={() => void runDownloadAction(d.id, "resume")}><Icon name="play" size={16} /></button>
+                      ? <button
+                          className="iconbtn"
+                          aria-label="Resume download"
+                          aria-describedby={networkActionsBlocked ? "network-action-status" : undefined}
+                          title={networkActionBlock ?? undefined}
+                          disabled={networkActionsBlocked}
+                          onClick={() => void runDownloadAction(d.id, "resume")}
+                        ><Icon name="play" size={16} /></button>
                       : <button className="iconbtn" aria-label="Pause download" onClick={() => void runDownloadAction(d.id, "pause")}><Icon name="pause" size={16} /></button>}
                 </div>
               );

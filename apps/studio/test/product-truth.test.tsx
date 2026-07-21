@@ -196,15 +196,16 @@ const baseCtx = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-const importClient = () => {
+const importClient = (ctxOverrides: Record<string, unknown> = {}) => {
   const submitDownload = vi.fn().mockResolvedValue({ id: "download-1" });
   const pushToast = vi.fn();
-  importHarness.ctx = {
+  importHarness.ctx = baseCtx({
     downloads: [],
-    client: { submitDownload },
+    client: clientFixture({ submitDownload }),
     pushToast,
     nav: vi.fn(),
-  };
+    ...ctxOverrides,
+  });
   return { submitDownload, pushToast };
 };
 
@@ -959,6 +960,79 @@ describe("product truth: structured action errors", () => {
 });
 
 describe("product truth: URL import", () => {
+  it.each([
+    {
+      state: "while privacy settings are loading",
+      ctx: { settings: null, settingsReady: false, settingsLoading: true, settingsError: null },
+      reason: /checking privacy settings/i,
+    },
+    {
+      state: "when privacy settings are unavailable",
+      ctx: { settings: null, settingsReady: false, settingsLoading: false, settingsError: "unreachable" },
+      reason: /privacy settings are unavailable/i,
+    },
+    {
+      state: "in Offline mode",
+      ctx: { settings: settingsFixture({ offline: true }), settingsReady: true, offline: true },
+      reason: /offline mode blocks network downloads and resumes/i,
+    },
+  ])("disables URL submission $state without disabling typing or local controls", ({ ctx, reason }) => {
+    const { submitDownload } = importClient(ctx);
+    render(<ImportPage />);
+
+    const input = screen.getByRole("textbox");
+    const download = screen.getByRole("button", { name: "Download" });
+    expect(input).toBeEnabled();
+    fireEvent.change(input, { target: { value: "https://media.example.test/watch/1" } });
+    expect(input).toHaveValue("https://media.example.test/watch/1");
+    expect(screen.getByRole("button", { name: "Audio" })).toBeEnabled();
+    expect(screen.getByRole("switch", { name: "Download subtitles if available" })).toBeEnabled();
+    expect(download).toBeDisabled();
+    fireEvent.click(download);
+
+    expect(submitDownload).not.toHaveBeenCalled();
+    expect(screen.getByRole("status")).toHaveTextContent(reason);
+  });
+
+  it.each([
+    {
+      state: "while privacy settings are unavailable",
+      ctx: { settings: null, settingsReady: false, settingsLoading: false, settingsError: "unreachable" },
+    },
+    {
+      state: "in Offline mode",
+      ctx: { settings: settingsFixture({ offline: true }), settingsReady: true, offline: true },
+    },
+  ])("blocks paused-download resume $state while keeping pause usable", ({ ctx }) => {
+    const pauseJob = vi.fn().mockResolvedValue(undefined);
+    const resumeJob = vi.fn().mockResolvedValue(undefined);
+    importHarness.ctx = baseCtx({
+      ...ctx,
+      downloads: [
+        {
+          id: "paused-download", title: "Paused download", src: "youtube", prog: 20,
+          status: "paused", size: "10 MB", speed: "—", eta: "—",
+        },
+        {
+          id: "active-download", title: "Active download", src: "youtube", prog: 40,
+          status: "downloading", size: "20 MB", speed: "1 MB/s", eta: "10s",
+        },
+      ],
+      client: clientFixture({ pauseJob, resumeJob }),
+    });
+    render(<ImportPage />);
+
+    const resume = screen.getByRole("button", { name: "Resume download" });
+    const pause = screen.getByRole("button", { name: "Pause download" });
+    expect(resume).toBeDisabled();
+    fireEvent.click(resume);
+    expect(resumeJob).not.toHaveBeenCalled();
+
+    expect(pause).toBeEnabled();
+    fireEvent.click(pause);
+    expect(pauseJob).toHaveBeenCalledTimes(1);
+  });
+
   it("prevalidates the complete batch and submits nothing when one URL is invalid", async () => {
     const { submitDownload, pushToast } = importClient();
     render(<ImportPage />);

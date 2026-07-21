@@ -1156,10 +1156,191 @@ describe("visible mutation inventory: same-tick persistence locks", () => {
   );
 });
 
+describe("visible mutation inventory: Offline watch gates", () => {
+  const blockedStates = [
+    {
+      state: "when privacy settings are unavailable",
+      ctx: { settings: null, settingsReady: false, settingsLoading: false, settingsError: "unreachable" },
+      reason: "Privacy settings are unavailable. Remote watch actions are disabled.",
+    },
+    {
+      state: "in Offline mode",
+      ctx: { settings: settingsFixture({ offline: true }), settingsReady: true, offline: true },
+      reason: "Offline mode blocks remote watch actions. Folder watches remain available.",
+    },
+  ];
+  const watchFixture = (kind: "folder" | "channel" | "playlist") => ({
+    id: "watch-1",
+    name: kind === "folder" ? "Incoming folder" : "Remote feed",
+    kind,
+    target: kind === "folder" ? "/tmp/incoming" : "https://media.example.test/feed",
+    enabled: true,
+    produced: [],
+    seen: [],
+  });
+  const scanResult = {
+    ingested: [],
+    produced: [],
+    producing: {},
+    pending: {},
+    ingesting: {},
+  };
+
+  it.each(blockedStates.flatMap((privacy) => (["channel", "playlist"] as const).map((kind) => ({ ...privacy, kind }))))(
+    "blocks $kind create $state with an exact zero-call result",
+    ({ ctx, kind, reason }) => {
+      const createWatch = vi.fn().mockResolvedValue(watchFixture(kind));
+      harness.queryData = { listWatches: { watches: [] }, listRecipes: { recipes: [] } };
+      harness.ctx = baseCtx({ ...ctx, client: clientFixture({ createWatch }) });
+      render(<WatchesScreen />);
+
+      fireEvent.click(screen.getByRole("button", { name: kind === "channel" ? "Channel" : "Playlist" }));
+      fireEvent.change(screen.getByPlaceholderText("Watch name"), { target: { value: "Remote feed" } });
+      fireEvent.change(screen.getByPlaceholderText("https://youtube.com/@channel"), {
+        target: { value: "https://media.example.test/feed" },
+      });
+      const create = screen.getByRole("button", { name: "Create" });
+      expect(create).toBeDisabled();
+      fireEvent.click(create);
+
+      expect(createWatch).not.toHaveBeenCalled();
+      expect(screen.getByRole("status")).toHaveTextContent(reason);
+      expect(harness.queryCalls).toContain("listWatches");
+    },
+  );
+
+  it.each(blockedStates.flatMap((privacy) => (["channel", "playlist"] as const).map((kind) => ({ ...privacy, kind }))))(
+    "blocks $kind update and scan $state while keeping delete and list usable",
+    ({ ctx, kind, reason }) => {
+      const watch = watchFixture(kind);
+      const updateWatch = vi.fn().mockResolvedValue(watch);
+      const scanWatch = vi.fn().mockResolvedValue(scanResult);
+      const deleteWatch = vi.fn().mockResolvedValue(undefined);
+      harness.queryData = { listWatches: { watches: [watch] }, listRecipes: { recipes: [] } };
+      harness.ctx = baseCtx({
+        ...ctx,
+        client: clientFixture({ updateWatch, scanWatch, deleteWatch }),
+      });
+      render(<WatchesScreen />);
+
+      const save = screen.getByRole("button", { name: "Save" });
+      const scan = screen.getByRole("button", { name: "Scan now" });
+      const remove = screen.getByTitle("Delete watch");
+      expect(save).toBeDisabled();
+      expect(scan).toBeDisabled();
+      fireEvent.click(save);
+      fireEvent.click(scan);
+      expect(updateWatch).not.toHaveBeenCalled();
+      expect(scanWatch).not.toHaveBeenCalled();
+
+      expect(remove).toBeEnabled();
+      fireEvent.click(remove);
+      expect(deleteWatch).toHaveBeenCalledTimes(1);
+      expect(harness.queryCalls).toContain("listWatches");
+      expect(screen.getByRole("status")).toHaveTextContent(reason);
+    },
+  );
+
+  it.each(blockedStates.flatMap((privacy) => (["create", "update", "scan"] as const).map((operation) => ({ ...privacy, operation }))))(
+    "keeps folder $operation usable $state",
+    async ({ ctx, operation }) => {
+      const watch = watchFixture("folder");
+      const createWatch = vi.fn().mockResolvedValue(watch);
+      const updateWatch = vi.fn().mockResolvedValue(watch);
+      const scanWatch = vi.fn().mockResolvedValue(scanResult);
+      harness.queryData = {
+        listWatches: { watches: operation === "create" ? [] : [watch] },
+        listRecipes: { recipes: [] },
+      };
+      harness.ctx = baseCtx({
+        ...ctx,
+        client: clientFixture({ createWatch, updateWatch, scanWatch }),
+      });
+      render(<WatchesScreen />);
+
+      if (operation === "create") {
+        fireEvent.change(screen.getByPlaceholderText("Watch name"), { target: { value: watch.name } });
+        fireEvent.change(screen.getByPlaceholderText("/Users/you/Movies/clips-in"), { target: { value: watch.target } });
+        const create = screen.getByRole("button", { name: "Create" });
+        expect(create).toBeEnabled();
+        fireEvent.click(create);
+        await waitFor(() => expect(createWatch).toHaveBeenCalledTimes(1));
+      } else if (operation === "update") {
+        const save = screen.getByRole("button", { name: "Save" });
+        expect(save).toBeEnabled();
+        fireEvent.click(save);
+        await waitFor(() => expect(updateWatch).toHaveBeenCalledTimes(1));
+      } else {
+        const scan = screen.getByRole("button", { name: "Scan now" });
+        expect(scan).toBeEnabled();
+        fireEvent.click(scan);
+        await waitFor(() => expect(scanWatch).toHaveBeenCalledTimes(1));
+      }
+      expect(harness.queryCalls).toContain("listWatches");
+    },
+  );
+});
+
 describe("visible mutation inventory: Settings", () => {
   const settingsQueries = (model: Record<string, unknown>) => ({
     doctor: { tools: {}, machine: {}, encoders: [] },
     listModels: { models: [model], active: "base" },
+  });
+
+  it.each([
+    {
+      state: "while privacy settings load",
+      ctx: { settings: null, settingsReady: false, settingsLoading: true, settingsError: null },
+      reason: "Checking privacy settings. New model downloads are unavailable; installed models remain available.",
+    },
+    {
+      state: "when privacy settings are unavailable",
+      ctx: { settings: null, settingsReady: false, settingsLoading: false, settingsError: "unreachable" },
+      reason: "Privacy settings are unavailable. New model downloads are unavailable; installed models remain available.",
+    },
+    {
+      state: "in Offline mode",
+      ctx: { settings: settingsFixture({ offline: true }), settingsReady: true, offline: true },
+      reason: "Offline mode blocks new model downloads. Installed models remain available.",
+    },
+  ])("semantically disables an uninstalled model $state and makes zero install calls", async ({ ctx, reason }) => {
+    const installModel = vi.fn().mockResolvedValue(undefined);
+    harness.queryData = settingsQueries({
+      name: "candidate", label: "Candidate model", is_active: false,
+      is_installed: false, size_bytes: 1_000_000,
+    });
+    harness.ctx = baseCtx({ ...ctx, client: clientFixture({ installModel }) });
+    render(<SettingsScreen />);
+
+    const model = await screen.findByRole("button", { name: "Candidate model" });
+    expect(model).toBeDisabled();
+    fireEvent.click(model);
+    expect(installModel).not.toHaveBeenCalled();
+    expect(screen.getByText(reason, { exact: true })).toBeInTheDocument();
+  });
+
+  it.each([
+    {
+      state: "while privacy settings are unavailable",
+      ctx: { settings: null, settingsReady: false, settingsLoading: false, settingsError: "unreachable" },
+    },
+    {
+      state: "in Offline mode",
+      ctx: { settings: settingsFixture({ offline: true }), settingsReady: true, offline: true },
+    },
+  ])("keeps switching to an installed model enabled $state", async ({ ctx }) => {
+    const useModel = vi.fn().mockResolvedValue(undefined);
+    harness.queryData = settingsQueries({
+      name: "candidate", label: "Candidate model", is_active: false,
+      is_installed: true, size_bytes: 1_000_000,
+    });
+    harness.ctx = baseCtx({ ...ctx, client: clientFixture({ useModel }) });
+    render(<SettingsScreen />);
+
+    const model = await screen.findByRole("button", { name: "Candidate model" });
+    expect(model).toBeEnabled();
+    fireEvent.click(model);
+    await waitFor(() => expect(useModel).toHaveBeenCalledTimes(1));
   });
 
   it("uses context settings without creating a second GET settings subscription", () => {

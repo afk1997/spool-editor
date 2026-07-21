@@ -45,21 +45,27 @@ export default function OnboardingScreen() {
         : "Remote reasoning is off.";
   const momentFindingSummary = !ctx.settingsReady
     ? "Privacy settings not loaded"
-    : ctx.reasoningProvider !== "codex"
-      ? "No remote provider selected · transcript text stays on this machine"
-      : ctx.reasoningEgressConsent
-        ? "Codex remote reasoning · transcript text leaves this machine with consent"
-        : "Codex selected · transcript text stays on this machine until you consent";
-  const momentFindingTone = !ctx.settingsReady || (ctx.reasoningProvider === "codex" && !ctx.reasoningEgressConsent)
+    : ctx.offline
+      ? ctx.reasoningProvider === "codex" && ctx.reasoningEgressConsent
+        ? "Codex configured with consent · no current transcript egress"
+        : "Offline mode · no current transcript egress"
+      : ctx.reasoningProvider !== "codex"
+        ? "No remote provider selected · transcript text stays on this machine"
+        : ctx.reasoningEgressConsent
+          ? "Codex remote reasoning · transcript text leaves this machine with consent"
+          : "Codex selected · transcript text stays on this machine until you consent";
+  const momentFindingTone = !ctx.settingsReady || ctx.offline || (ctx.reasoningProvider === "codex" && !ctx.reasoningEgressConsent)
     ? "warn"
     : "ok";
   const momentFindingState = !ctx.settingsReady
     ? "checking"
-    : ctx.reasoningProvider !== "codex"
-      ? "disabled"
-      : ctx.reasoningEgressConsent
-        ? "enabled"
-        : "consent required";
+    : ctx.offline
+      ? "blocked by Offline"
+      : ctx.reasoningProvider !== "codex"
+        ? "disabled"
+        : ctx.reasoningEgressConsent
+          ? "enabled"
+          : "consent required";
 
   const fix = (id: string, hint: string) => { ctx.pushToast({ icon: "terminal", tone: "info", title: `Install ${id}`, body: hint ? `Run: ${hint}` : "See the docs, then re-check." }); doctor.reload(); };
 

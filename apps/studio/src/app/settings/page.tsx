@@ -42,6 +42,13 @@ export default function SettingsScreen() {
   const s = ctx.settings;
   const settingDisabled = (...keys: (keyof EngineSettings)[]) =>
     !ctx.settingsReady || keys.some((key) => pendingSettings.has(key));
+  const modelInstallBlock = !ctx.settingsReady || !s
+    ? ctx.settingsLoading
+      ? "Checking privacy settings. New model downloads are unavailable; installed models remain available."
+      : "Privacy settings are unavailable. New model downloads are unavailable; installed models remain available."
+    : s?.offline
+      ? "Offline mode blocks new model downloads. Installed models remain available."
+      : null;
 
   // Poll the model list while a download is in flight so the progress + installed state update.
   const installing = modelsQ.data?.install_progress?.downloading ? modelsQ.data.install_progress : null;
@@ -109,7 +116,7 @@ export default function SettingsScreen() {
   const installedLabels = models.filter((m) => m.is_installed).map((m) => m.label);
   const pickModel = (name: string) => {
     const m = models.find((x) => x.name === name);
-    if (!m || m.is_active || modelMutationRef.current) return;
+    if (!m || m.is_active || modelMutationRef.current || (!m.is_installed && modelInstallBlock)) return;
     modelMutationRef.current = true;
     setModelMutating(true);
     void (async () => {
@@ -143,11 +150,13 @@ export default function SettingsScreen() {
   const providerName = !ctx.settingsReady ? "not loaded" : s?.reasoning_provider === "codex" ? "Codex" : "None";
   const egressState = !ctx.settingsReady
     ? "settings unavailable"
-    : s?.reasoning_provider !== "codex"
-      ? "disabled"
-      : s.reasoning_egress_consent
-        ? "consented"
-        : "consent required";
+    : s?.offline
+      ? "blocked by Offline"
+      : s?.reasoning_provider !== "codex"
+        ? "disabled"
+        : s.reasoning_egress_consent
+          ? "consented"
+          : "consent required";
   const privacyReadiness = ctx.settingsReady
     ? null
     : ctx.settingsLoading
@@ -174,8 +183,12 @@ export default function SettingsScreen() {
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
               <SettingCard title="Whisper transcription">
                 <Row l="Active model"
-                  r={<Seg value={modelsQ.data?.active ?? ""} onChange={pickModel} disabled={modelMutating} options={models.map((m) => ({ value: m.name, label: m.label }))} />}
-                  sub={installing ? `Downloading ${installing.name} — ${installing.total ? Math.round((installing.received / installing.total) * 100) : 0}%` : "Click a model to make it active; an un-downloaded model downloads first. The next transcribe uses it."} />
+                  r={<Seg value={modelsQ.data?.active ?? ""} onChange={pickModel} disabled={modelMutating} options={models.map((m) => ({ value: m.name, label: m.label, disabled: !m.is_installed && !!modelInstallBlock }))} />}
+                  sub={installing
+                    ? `Downloading ${installing.name} — ${installing.total ? Math.round((installing.received / installing.total) * 100) : 0}%`
+                    : modelInstallBlock && models.some((model) => !model.is_installed)
+                      ? modelInstallBlock
+                      : "Click a model to make it active; an un-downloaded model downloads first. The next transcribe uses it."} />
                 <Row l="Downloaded models" r={mono(installedLabels.join(", ") || "none yet")} />
                 <Row l="Engine" r={mono(`whisper.cpp ${ver("whisper_cpp")} · on-device`)} />
               </SettingCard>
@@ -252,11 +265,13 @@ export default function SettingsScreen() {
                   <div>URL import → the site you paste · <span style={{ color: "var(--warn)" }}>network download (you start it)</span></div>
                   <div>whisper · <span style={{ color: "var(--ok)" }}>on-device</span></div>
                   <div>remote reasoning · {ctx.settingsReady
-                    ? s?.reasoning_provider === "codex" && s.reasoning_egress_consent
-                      ? <span style={{ color: "var(--warn)" }}>transcript text → Codex (consented)</span>
-                      : s?.reasoning_provider === "codex"
-                        ? "Codex selected · transcript egress blocked until consent"
-                        : "disabled"
+                    ? s?.offline
+                      ? <span style={{ color: "var(--warn)" }}>blocked by Offline · no current egress</span>
+                      : s?.reasoning_provider === "codex" && s.reasoning_egress_consent
+                        ? <span style={{ color: "var(--warn)" }}>transcript text → Codex (consented)</span>
+                        : s?.reasoning_provider === "codex"
+                          ? "Codex selected · transcript egress blocked until consent"
+                          : "disabled"
                     : "settings unavailable"}</div>
                 </div>
               </SettingCard>

@@ -20,6 +20,7 @@ const KINDS: { key: string; label: string; hint: string }[] = [
 
 interface Form { name: string; kind: string; target: string; recipe_id: string; enabled: boolean }
 const EMPTY: Form = { name: "", kind: "folder", target: "", recipe_id: "", enabled: true };
+const isRemoteKind = (kind: string) => kind === "channel" || kind === "playlist";
 const toForm = (w: Watch): Form => ({
   name: w.name || "", kind: w.kind || "folder", target: w.target || "",
   recipe_id: w.recipe_id || "", enabled: w.enabled ?? true,
@@ -37,6 +38,13 @@ export default function WatchesScreen() {
   const [synced, setSynced] = useState(false);
   const [busy, setBusy] = useState(false);
   const operationRef = useRef<"save" | "delete" | "scan" | null>(null);
+  const remoteWatchBlock = !ctx.settingsReady || !ctx.settings
+    ? ctx.settingsLoading
+      ? "Checking privacy settings. Remote watch actions are disabled."
+      : "Privacy settings are unavailable. Remote watch actions are disabled."
+    : ctx.settings.offline
+      ? "Offline mode blocks remote watch actions. Folder watches remain available."
+      : null;
 
   if (!synced && sel === null && watches[0]) { setSel(watches[0].id); setF(toForm(watches[0])); setSynced(true); }
 
@@ -46,7 +54,7 @@ export default function WatchesScreen() {
   const recipeName = (id?: string) => recipes.find((r) => r.id === id)?.name || "—";
 
   const save = async () => {
-    if (operationRef.current) return;
+    if (operationRef.current || (isRemoteKind(f.kind) && remoteWatchBlock)) return;
     if (!f.name.trim() || !f.target.trim()) { ctx.pushToast({ icon: "alert", tone: "warn", title: "Name and a folder/URL are required" }); return; }
     operationRef.current = "save";
     setBusy(true);
@@ -84,7 +92,7 @@ export default function WatchesScreen() {
     }
   };
   const scan = async (w: Watch) => {
-    if (operationRef.current) return;
+    if (operationRef.current || (isRemoteKind(w.kind) && remoteWatchBlock)) return;
     operationRef.current = "scan";
     setBusy(true);
     try {
@@ -103,6 +111,9 @@ export default function WatchesScreen() {
 
   const selWatch = watches.find((w) => w.id === sel) || null;
   const kindHint = KINDS.find((k) => k.key === f.kind)?.hint ?? "";
+  const saveRemoteBlocked = isRemoteKind(f.kind) && remoteWatchBlock !== null;
+  const scanRemoteBlocked = !!selWatch && isRemoteKind(selWatch.kind) && remoteWatchBlock !== null;
+  const visibleRemoteBlock = saveRemoteBlocked || scanRemoteBlocked ? remoteWatchBlock : null;
 
   return (
     <div className="mainpad fadein" style={{ maxWidth: 1100 }}>
@@ -136,10 +147,16 @@ export default function WatchesScreen() {
             <input value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="Watch name"
               style={{ font: "inherit", fontSize: 17, fontWeight: 600, background: "transparent", border: 0, borderBottom: "1px solid var(--line)", color: "var(--text)", outline: "none", padding: "2px 0", flex: 1 }} />
             <span className="spacer" />
-            {selWatch && <Btn variant="ghost" icon="eye" onClick={() => scan(selWatch)} disabled={busy}>Scan now</Btn>}
+            {selWatch && <Btn variant="ghost" icon="eye" onClick={() => scan(selWatch)} disabled={busy || scanRemoteBlocked} aria-describedby={scanRemoteBlocked ? "remote-watch-status" : undefined}>Scan now</Btn>}
             {sel && <button className="btn subtle sm" disabled={busy} style={{ color: "var(--err, #e5484d)" }} onClick={del} title="Delete watch"><Icon name="trash" size={14} /></button>}
-            <Btn variant="primary" icon="check" onClick={save} disabled={busy}>{sel ? "Save" : "Create"}</Btn>
+            <Btn variant="primary" icon="check" onClick={save} disabled={busy || saveRemoteBlocked} aria-describedby={saveRemoteBlocked ? "remote-watch-status" : undefined}>{sel ? "Save" : "Create"}</Btn>
           </div>
+
+          {visibleRemoteBlock && (
+            <div id="remote-watch-status" role="status" className="mono" style={{ color: "var(--warn)", fontSize: 11.5 }}>
+              {visibleRemoteBlock}
+            </div>
+          )}
 
           <div className="row" style={{ gap: 28, flexWrap: "wrap", alignItems: "flex-start" }}>
             <div><div className="eyebrow" style={{ marginBottom: 8 }}>Kind</div>

@@ -435,6 +435,31 @@ describe("truthful privacy copy", () => {
       "Local-first clip studio for platform-ready vertical clips, with optional consented Codex reasoning.",
     );
   });
+
+  it("gives Offline precedence over configured Codex consent in Settings and onboarding", async () => {
+    const offlineCodex = engineSettings({
+      offline: true,
+      reasoning_provider: "codex",
+      reasoning_egress_consent: true,
+    });
+    const settingsView = await renderPrivacySettings(offlineCodex);
+
+    expect(screen.getByText("blocked by Offline · no current egress", { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText(/transcript text → Codex \(consented\)/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Models" }));
+    expect(screen.getByText("blocked by Offline", { exact: true })).toBeInTheDocument();
+    settingsView.unmount();
+
+    settingsQuery = { data: offlineCodex, loading: false, reload: vi.fn() };
+    renderWithProvider(<OnboardingScreen />);
+    fireEvent.click(screen.getByRole("button", { name: /Let.s set up/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(screen.getByText("Codex configured with consent · no current transcript egress", { exact: true })).toBeInTheDocument();
+    expect(screen.getByText("blocked by Offline", { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText(/transcript text leaves this machine with consent/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("enabled", { exact: true })).not.toBeInTheDocument();
+  });
 });
 
 describe("privacy action error copy", () => {

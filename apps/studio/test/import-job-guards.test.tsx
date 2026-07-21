@@ -42,6 +42,10 @@ const downloadFixture = (overrides: Partial<SpoolDownload> = {}): SpoolDownload 
 
 const importCtx = (downloads: SpoolDownload[], client: Record<string, unknown>) => ({
   downloads,
+  settings: { offline: false },
+  settingsReady: true,
+  settingsLoading: false,
+  settingsError: null,
   client: {
     submitDownload: vi.fn().mockResolvedValue({ id: "new-download" }),
     pauseJob: vi.fn().mockResolvedValue(undefined),
