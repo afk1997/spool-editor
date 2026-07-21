@@ -202,6 +202,7 @@ def create_app() -> Flask:
         clip_manager=clip_manager,
         settings_store=settings_store,
         brand_kits_store=brand_kit_store,
+        network_policy=network_policy,
     )
     app.extensions["trove.clip_runner"] = clip_runner_inst
     # Recipes — saved end-to-end pipelines that drive render.pipeline + watch-folder (spec §5 P3).

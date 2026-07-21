@@ -167,7 +167,17 @@ def test_reasoning_routes_reject_before_clip_job_admission(
     assert provider_calls == []
 
 
-def test_queued_reasoning_rechecks_consent_before_provider_execution(client, monkeypatch):
+@pytest.mark.parametrize(
+    ("revocation", "expected_error"),
+    [
+        ("provider", "reasoning_provider_required"),
+        ("consent", "egress_consent_required"),
+        ("offline", "offline_network_disabled"),
+    ],
+)
+def test_queued_reasoning_rechecks_live_privacy_before_provider_execution(
+    client, monkeypatch, revocation, expected_error,
+):
     import clip_runner as cr
     from clip import llm
 
@@ -177,30 +187,36 @@ def test_queued_reasoning_rechecks_consent_before_provider_execution(client, mon
     release = threading.Event()
     provider_calls = []
 
-    def delayed_reasoning(*_args, **_kwargs):
+    def delayed_reasoning(*_args, **kwargs):
         entered.set()
         assert release.wait(2), "reasoning worker was not released"
-        llm.complete("transcript text", provider="codex")
+        llm.complete(
+            "transcript text",
+            provider="codex",
+            network_policy=kwargs["network_policy"],
+            privacy_state=kwargs["privacy_state"],
+        )
         return []
 
     monkeypatch.setattr(cr.moments, "find_moments", delayed_reasoning)
-    monkeypatch.setattr(
-        llm.CodexProvider,
-        "complete",
-        lambda self, prompt, system=None: provider_calls.append(prompt) or "[]",
-    )
+    monkeypatch.setattr(llm.shutil, "which", lambda _bin: provider_calls.append(_bin))
 
     response = c.post("/api/v1/sources/src1/moments", json={"mode": "funny"})
     assert response.status_code == 201
     job_id = response.get_json()["id"]
     assert entered.wait(2), "reasoning worker never reached the barrier"
 
-    revoked = c.patch("/api/v1/settings", json={"reasoning_egress_consent": False})
+    change = {
+        "provider": {"reasoning_provider": "none"},
+        "consent": {"reasoning_egress_consent": False},
+        "offline": {"offline": True},
+    }[revocation]
+    revoked = c.patch("/api/v1/settings", json=change)
     assert revoked.status_code == 200
     release.set()
 
     failed = _await(c, job_id, status="error")
-    assert failed["error_category"] == "egress_consent_required"
+    assert failed["error_category"] == expected_error
     assert provider_calls == []
 
 

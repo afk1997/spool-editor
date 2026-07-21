@@ -25,6 +25,7 @@ ENGINE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ENGINE)
 
 import transcript_io                       # noqa: E402
+from network_policy import NetworkPolicy   # noqa: E402
 from clip import moments, signals          # noqa: E402
 
 DL = os.path.join(ENGINE, "downloads")
@@ -79,7 +80,17 @@ def main():
         print(f"candidates: {len(cands)} sampled windows (≤18s each, no LLM)")
     else:
         print(f"find_moments(mode={args.mode}, count={args.count}) via the codex bridge …")
-        cands = moments.find_moments(words_path, mode=args.mode, count=args.count)
+        policy = NetworkPolicy(
+            offline=(os.environ.get("SPOOL_OFFLINE") or "").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        cands = moments.find_moments(
+            words_path,
+            mode=args.mode,
+            count=args.count,
+            network_policy=policy,
+            env=os.environ,
+        )
         print(f"candidates: {len(cands)} from the moment-finder")
     if not cands:
         sys.exit("no candidates")

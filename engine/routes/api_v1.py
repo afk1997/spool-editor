@@ -1636,7 +1636,7 @@ def _source_or_error(source_id):
 def _reasoning_preflight():
     """Return a structured 409 before admitting work that requires remote reasoning."""
     values = _settings().get()
-    if values.get("offline") is True:
+    if values.get("offline") is True or _network_policy().offline:
         return jsonify({"error": "offline_network_disabled"}), 409
     if values.get("reasoning_provider") != "codex":
         return jsonify({"error": "reasoning_provider_required"}), 409
@@ -2347,6 +2347,9 @@ def agent_message():
     message = (data.get("message") or "").strip()
     if not message:
         return jsonify({"error": "missing_message"}), 400
+    privacy_error = _reasoning_preflight()
+    if privacy_error:
+        return privacy_error
     source_id = (data.get("source_id") or "").strip() or None
     confirmed = (data.get("confirm_tool") or "").strip() or None
 
@@ -2367,9 +2370,17 @@ def agent_message():
     # agent's tools drive the same HTTP surface as every other client, so nothing can diverge.
     client = TroveClient()
     try:
-        result = clip_agent.run_agent(message, client=client, transcript_lines=lines,
-                                      confirmed_tool=confirmed)
-    except (clip_llm.OfflineError, clip_llm.ProviderUnavailableError) as e:
+        result = clip_agent.run_agent(
+            message,
+            client=client,
+            transcript_lines=lines,
+            confirmed_tool=confirmed,
+            network_policy=_network_policy(),
+            privacy_state=_settings().get,
+        )
+    except (clip_llm.OfflineError, clip_llm.ReasoningDisabledError) as e:
+        return jsonify({"error": e.error_category}), 409
+    except clip_llm.ProviderUnavailableError as e:
         return jsonify({"error": "llm_unavailable", "message": str(e)}), 503
     except RuntimeError as e:
         # The bridge died before the loop ran any tool (post-retry): a 503 with the

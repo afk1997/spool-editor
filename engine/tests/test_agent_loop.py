@@ -11,6 +11,7 @@ import json
 import pytest
 
 from clip import agent, agent_tools, llm
+from network_policy import NetworkPolicy
 
 
 def _provider(*responses):
@@ -235,6 +236,33 @@ def test_transient_llm_failure_is_retried(monkeypatch):
     out = agent.run_agent("hi", client=object())
     assert out["action"] == "reply" and out["reply"] == "ok"
     assert len(attempts) == 2
+
+
+def test_agent_threads_explicit_policy_and_live_privacy_state_to_completion(monkeypatch):
+    policy = NetworkPolicy()
+    state = lambda: {
+        "offline": False,
+        "reasoning_provider": "codex",
+        "reasoning_egress_consent": True,
+    }
+    captured = {}
+
+    def fake_complete(*args, **kwargs):
+        captured.update(kwargs)
+        return '{"final":{"reply":"ok"}}'
+
+    monkeypatch.setattr(agent.llm, "complete", fake_complete)
+    out = agent.run_agent(
+        "hi",
+        client=object(),
+        provider=_provider('{"final":{"reply":"unused"}}'),
+        network_policy=policy,
+        privacy_state=state,
+    )
+
+    assert out["reply"] == "ok"
+    assert captured["network_policy"] is policy
+    assert captured["privacy_state"] is state
 
 
 def test_mid_loop_llm_death_finishes_with_partial_results(monkeypatch):

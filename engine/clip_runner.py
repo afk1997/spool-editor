@@ -97,13 +97,16 @@ def _kept_spans(words_path, start: float, end: float) -> list:
 
 class ClipRunner:
     def __init__(self, *, download_dir, job_manager, clip_manager, settings_store=None,
-                 brand_kits_store=None, staging_output_root=None):
+                 brand_kits_store=None, network_policy=None, staging_output_root=None):
         self.download_dir = Path(download_dir)
         self.job_manager = job_manager
         self.clip_manager = clip_manager
         # Optional settings.SettingsStore — its in-memory get() is read per render so a
         # ``PATCH /settings`` is hot (no file re-read; the same object the API mutates).
         self.settings_store = settings_store
+        # The one app-owned policy is threaded to every remote reasoning boundary.
+        # Tests/local injected providers may omit it; an egress provider then fails closed.
+        self.network_policy = network_policy
         # Optional brand_kits.BrandKitStore — lets the engine resolve a referenced ``brand_kit_id``
         # into its caption look at produce/render time (so a recipe's brand kit actually burns in,
         # the same path a manual kit-apply uses — the golden rule).
@@ -436,6 +439,8 @@ class ClipRunner:
                 count=int(params.get("count", 5)),
                 transcript_window=params.get("window"),
                 source_id=source_id,
+                network_policy=self.network_policy,
+                privacy_state=self.settings_store.get if self.settings_store is not None else None,
             )
             # Attach glass-box NON-text signals (Q&A/sentiment/pace + audio energy + scene density)
             # to each candidate so the Phase-3 ranking can score on visible inputs. Best-effort —
@@ -600,8 +605,14 @@ class ClipRunner:
             # `count` the model returns, and the weights would have no selective effect.
             pool = max(count + 4, count * 2)
             self._progress(job, 10, stage="find", attempt=attempt)
-            cands = moments.find_moments(words_path, mode=recipe.get("content_mode", "funny"),
-                                         count=pool, source_id=source_id)
+            cands = moments.find_moments(
+                words_path,
+                mode=recipe.get("content_mode", "funny"),
+                count=pool,
+                source_id=source_id,
+                network_policy=self.network_policy,
+                privacy_state=self.settings_store.get if self.settings_store is not None else None,
+            )
             try:
                 words = (transcript_io.load(words_path).get("words") if words_path else None) or None
                 signals.annotate(cands, words=words, media_path=media_path)

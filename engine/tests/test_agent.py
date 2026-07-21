@@ -6,6 +6,7 @@ import json
 import pytest
 
 from clip import agent, llm
+from network_policy import NetworkPolicy
 
 
 def _provider(response, capture=None):
@@ -72,4 +73,13 @@ def test_transcript_lines_reach_the_model():
 
 def test_offline_default_provider_raises():
     with pytest.raises(llm.OfflineError):
-        agent.plan("x", provider="codex", env={"SPOOL_OFFLINE": "1"})
+        agent.plan(
+            "x",
+            provider="codex",
+            env={
+                "SPOOL_OFFLINE": "1",
+                "SPOOL_LLM_PROVIDER": "codex",
+                "SPOOL_LLM_EGRESS_CONSENT": "1",
+            },
+            network_policy=NetworkPolicy(offline=True),
+        )

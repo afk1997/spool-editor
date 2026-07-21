@@ -23,10 +23,14 @@ a local provider would still run offline. Egress providers declare ``egress = Tr
 from __future__ import annotations
 
 import os
+import signal
 import shutil
 import subprocess
 import tempfile
-from typing import Callable, Protocol, runtime_checkable
+import time
+from typing import Callable, Mapping, Protocol, runtime_checkable
+
+from network_policy import NetworkPolicy, NetworkPolicyError
 
 # Configurable knobs (env). New Spool functionality → ``SPOOL_*`` namespace.
 DEFAULT_PROVIDER = "none"
@@ -69,12 +73,184 @@ def is_offline(env: dict | None = None) -> bool:
     return (e.get("SPOOL_OFFLINE") or "").strip().lower() in _TRUE
 
 
+PrivacyState = Callable[[], Mapping[str, object]]
+
+
+def _env_privacy_state(env: Mapping[str, object]) -> dict[str, object]:
+    """Translate the live applied environment into the persisted settings shape."""
+    return {
+        "offline": str(env.get("SPOOL_OFFLINE") or "").strip().lower() in _TRUE,
+        "reasoning_provider": str(
+            env.get("SPOOL_LLM_PROVIDER") or DEFAULT_PROVIDER
+        ).strip().lower(),
+        "reasoning_egress_consent": str(
+            env.get("SPOOL_LLM_EGRESS_CONSENT") or ""
+        ).strip().lower() in _TRUE,
+    }
+
+
+def _privacy_getter(
+    privacy_state: PrivacyState | None,
+    env: Mapping[str, object] | None,
+) -> PrivacyState:
+    if privacy_state is not None:
+        def current() -> Mapping[str, object]:
+            values = privacy_state()
+            if any(
+                key in values
+                for key in ("offline", "reasoning_provider", "reasoning_egress_consent")
+            ):
+                return values
+            return _env_privacy_state(values)
+
+        return current
+    live_env = os.environ if env is None else env
+    return lambda: _env_privacy_state(live_env)
+
+
+def _require_remote_reasoning(state: Mapping[str, object], *, provider_name: str) -> None:
+    """Validate the current applied privacy state, with Offline always strongest."""
+    if state.get("offline") is True:
+        raise OfflineError(
+            f"LLM provider {provider_name!r} needs network egress, but offline mode is on."
+        )
+    if str(state.get("reasoning_provider") or DEFAULT_PROVIDER).lower() != "codex":
+        raise ReasoningDisabledError(
+            "Remote reasoning is disabled. Select the Codex provider before using "
+            "reasoning features."
+        )
+    if state.get("reasoning_egress_consent") is not True:
+        raise EgressConsentError(
+            f"LLM provider {provider_name!r} requires explicit consent before transcript "
+            "text can leave this machine."
+        )
+
+
 @runtime_checkable
 class LLMProvider(Protocol):
     name: str
     egress: bool
 
     def complete(self, prompt: str, *, system: str | None = None) -> str: ...
+
+
+class _OwnedReasoningProcess:
+    """Own a Codex parent and every descendant in its POSIX process group."""
+
+    def __init__(self, process, *, owns_group: bool):
+        self._process = process
+        self._pgid = process.pid if owns_group and hasattr(process, "pid") else None
+        self._tree_exited = False
+
+    def __getattr__(self, name):
+        return getattr(self._process, name)
+
+    def kill(self) -> None:
+        if self._tree_exited:
+            return
+        if self._pgid is not None:
+            try:
+                os.killpg(self._pgid, getattr(signal, "SIGKILL", signal.SIGTERM))
+                return
+            except ProcessLookupError:
+                # A shim may accept ``start_new_session`` but ignore it. A missing
+                # process group therefore does not prove the direct parent exited.
+                self._pgid = None
+            except (AttributeError, OSError):
+                pass
+        try:
+            self._process.kill()
+        except ProcessLookupError:
+            self._tree_exited = True
+
+    def wait_for_group_exit(self, *, timeout: float = 0.25) -> None:
+        """Keep the lease until the group is gone; kill a detached lingering child."""
+        if self._pgid is None:
+            self._tree_exited = True
+            return
+
+        def group_is_gone() -> bool:
+            try:
+                os.killpg(self._pgid, 0)
+            except ProcessLookupError:
+                self._pgid = None
+                self._tree_exited = True
+                return True
+            except AttributeError:
+                self._pgid = None
+                self._tree_exited = True
+                return True
+            except OSError:
+                # EPERM and other probe errors do not prove the group is gone.
+                return False
+            return False
+
+        def wait_phase(seconds: float) -> bool:
+            deadline = time.monotonic() + seconds
+            while not group_is_gone():
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(0.01)
+            return True
+
+        if wait_phase(timeout):
+            return
+        try:
+            os.killpg(self._pgid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        except ProcessLookupError:
+            self._pgid = None
+            self._tree_exited = True
+            return
+        except (AttributeError, OSError):
+            try:
+                self._process.kill()
+            except (ProcessLookupError, OSError):
+                pass
+        forced_timeout = max(2.0, timeout)
+        if wait_phase(forced_timeout):
+            return
+        raise RuntimeError(
+            f"Codex process group did not exit after SIGKILL within {forced_timeout:g}s"
+        )
+
+
+def _spawn_reasoning_process(argv: list[str], **kwargs) -> _OwnedReasoningProcess:
+    """Start Codex in a new POSIX session, with a fake/non-POSIX fallback."""
+    owns_group = os.name == "posix"
+    try:
+        process = subprocess.Popen(argv, start_new_session=owns_group, **kwargs)
+    except TypeError:
+        process = subprocess.Popen(argv, **kwargs)
+        owns_group = False
+    return _OwnedReasoningProcess(process, owns_group=owns_group)
+
+
+def _communicate_reasoning_process(
+    process: _OwnedReasoningProcess,
+    *,
+    input_text: str,
+    timeout: float,
+) -> tuple[str, str]:
+    """Communicate, reap the parent, and confirm tree exit before returning."""
+    try:
+        stdout, stderr = process.communicate(input=input_text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            process.communicate()
+        finally:
+            process.wait_for_group_exit()
+        raise
+    except BaseException:
+        try:
+            if process.poll() is None:
+                process.kill()
+            process.communicate()
+        finally:
+            process.wait_for_group_exit()
+        raise
+    process.wait_for_group_exit()
+    return stdout or "", stderr or ""
 
 
 class CodexProvider:
@@ -88,9 +264,14 @@ class CodexProvider:
     name = "codex"
     egress = True
 
-    def __init__(self, *, bin: str | None = None, model: str | None = None,
+    def __init__(self, *, network_policy: NetworkPolicy,
+                 privacy_state: PrivacyState | None = None,
+                 env: Mapping[str, object] | None = None,
+                 bin: str | None = None, model: str | None = None,
                  timeout: int | None = None, cwd: str | None = None,
                  reasoning: str | None = None):
+        self.network_policy = network_policy
+        self.privacy_state = _privacy_getter(privacy_state, env)
         self.bin = bin or CODEX_BIN
         self.model = model if model is not None else CODEX_MODEL
         self.timeout = timeout if timeout is not None else CODEX_TIMEOUT
@@ -98,6 +279,19 @@ class CodexProvider:
         self.reasoning = CODEX_REASONING if reasoning is None else reasoning
 
     def complete(self, prompt: str, *, system: str | None = None) -> str:
+        _require_remote_reasoning(self.privacy_state(), provider_name=self.name)
+        try:
+            with self.network_policy.egress("codex_reasoning"):
+                # Re-read after lease admission: a queued caller must not execute using
+                # the provider/consent snapshot that was true when it was submitted.
+                _require_remote_reasoning(self.privacy_state(), provider_name=self.name)
+                return self._complete_leased(prompt, system=system)
+        except NetworkPolicyError as exc:
+            raise OfflineError(
+                "LLM provider 'codex' needs network egress, but offline mode is on."
+            ) from exc
+
+    def _complete_leased(self, prompt: str, *, system: str | None = None) -> str:
         if shutil.which(self.bin) is None:
             raise ProviderUnavailableError(
                 f"the Codex CLI ({self.bin!r}) was not found on PATH. Install it "
@@ -110,42 +304,57 @@ class CodexProvider:
         # no session files; read-only sandbox blocks any FS write; -o captures *just* the
         # final message (vs the noisy event log on stdout). Prompt goes over stdin (`-`).
         scratch = self.cwd or tempfile.mkdtemp(prefix="spool-codex-")
-        out_fd, out_path = tempfile.mkstemp(prefix="spool-codex-out-", suffix=".txt")
-        os.close(out_fd)
-        argv = [
-            self.bin, "exec", "--sandbox", "read-only", "--skip-git-repo-check",
-            "--ephemeral", "--color", "never", "-C", scratch, "-o", out_path,
-        ]
-        if self.model:
-            argv += ["-m", self.model]
-        if self.reasoning:
-            argv += ["-c", f"model_reasoning_effort={self.reasoning}"]
-        argv += ["-"]
+        out_path: str | None = None
         try:
-            proc = subprocess.run(
-                argv, input=full, capture_output=True, text=True,
-                timeout=self.timeout, cwd=scratch,
+            out_fd, out_path = tempfile.mkstemp(prefix="spool-codex-out-", suffix=".txt")
+            os.close(out_fd)
+            argv = [
+                self.bin, "exec", "--sandbox", "read-only", "--skip-git-repo-check",
+                "--ephemeral", "--color", "never", "-C", scratch, "-o", out_path,
+            ]
+            if self.model:
+                argv += ["-m", self.model]
+            if self.reasoning:
+                argv += ["-c", f"model_reasoning_effort={self.reasoning}"]
+            argv += ["-"]
+
+            # Local CLI discovery and scratch setup can take time. This final live read
+            # is intentionally adjacent to spawn so revocation during setup wins.
+            _require_remote_reasoning(self.privacy_state(), provider_name=self.name)
+            try:
+                proc = _spawn_reasoning_process(
+                    argv,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    cwd=scratch,
+                )
+            except FileNotFoundError as e:  # race: vanished between which() and spawn
+                raise ProviderUnavailableError(
+                    f"the Codex CLI ({self.bin!r}) could not be run: {e}"
+                ) from e
+            stdout, stderr = _communicate_reasoning_process(
+                proc, input_text=full, timeout=self.timeout
             )
-        except FileNotFoundError as e:  # race: vanished between which() and run()
-            raise ProviderUnavailableError(f"the Codex CLI ({self.bin!r}) could not be run: {e}") from e
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"codex exec failed (rc={proc.returncode}): {stderr.strip()[-500:]}"
+                )
+            try:
+                with open(out_path) as f:
+                    answer = f.read()
+            except OSError:
+                answer = ""
+            return answer or stdout
         finally:
+            if out_path is not None:
+                self._cleanup(out_path)
             try:
                 if not self.cwd:
                     shutil.rmtree(scratch, ignore_errors=True)
             except OSError:
                 pass
-        if proc.returncode != 0:
-            self._cleanup(out_path)
-            raise RuntimeError(
-                f"codex exec failed (rc={proc.returncode}): {(proc.stderr or '').strip()[-500:]}"
-            )
-        try:
-            with open(out_path) as f:
-                answer = f.read()
-        except OSError:
-            answer = ""
-        self._cleanup(out_path)
-        return answer or proc.stdout
 
     @staticmethod
     def _cleanup(path: str) -> None:
@@ -185,7 +394,13 @@ class CallableProvider:
         return self._fn(prompt, system=system)
 
 
-def get_provider(provider: "str | LLMProvider | None" = None, *, env: dict | None = None) -> LLMProvider:
+def get_provider(
+    provider: "str | LLMProvider | None" = None,
+    *,
+    env: Mapping[str, object] | None = None,
+    network_policy: NetworkPolicy | None = None,
+    privacy_state: PrivacyState | None = None,
+) -> LLMProvider:
     """Resolve a provider.
 
     ``provider`` may be an :class:`LLMProvider` instance (returned as-is — this is how
@@ -199,28 +414,52 @@ def get_provider(provider: "str | LLMProvider | None" = None, *, env: dict | Non
     if name == "none":
         return NoneProvider()
     if name == "codex":
-        return CodexProvider()
+        if network_policy is None:
+            raise ValueError("network_policy is required for the Codex provider")
+        return CodexProvider(
+            network_policy=network_policy,
+            privacy_state=privacy_state,
+            env=e,
+        )
     raise ProviderUnavailableError(
         f"unknown LLM provider {name!r}. Built-in providers: 'none', 'codex'. The "
         "'agent' provider is injected by the MCP layer — pass it as an instance, not a name."
     )
 
 
-def complete(prompt: str, *, system: str | None = None,
-             provider: "str | LLMProvider | None" = None, env: dict | None = None) -> str:
-    """Run a single completion through the resolved provider, enforcing offline-mode."""
-    p = get_provider(provider, env=env)
-    if getattr(p, "egress", False) and is_offline(env):
+def complete(
+    prompt: str,
+    *,
+    system: str | None = None,
+    provider: "str | LLMProvider | None" = None,
+    env: Mapping[str, object] | None = None,
+    network_policy: NetworkPolicy | None = None,
+    privacy_state: PrivacyState | None = None,
+) -> str:
+    """Run one completion, leasing every engine-owned egress provider explicitly."""
+    p = get_provider(
+        provider,
+        env=env,
+        network_policy=network_policy,
+        privacy_state=privacy_state,
+    )
+    if not getattr(p, "egress", False):
+        return p.complete(prompt, system=system)
+
+    # Codex owns the direct boundary itself so even callers that invoke the provider
+    # instance directly cannot bypass the live checks or the shared lease.
+    if isinstance(p, CodexProvider):
+        return p.complete(prompt, system=system)
+
+    if network_policy is None:
+        raise ValueError("network_policy is required for an egress provider")
+    state = _privacy_getter(privacy_state, env)
+    _require_remote_reasoning(state(), provider_name=p.name)
+    try:
+        with network_policy.egress("codex_reasoning"):
+            _require_remote_reasoning(state(), provider_name=p.name)
+            return p.complete(prompt, system=system)
+    except NetworkPolicyError as exc:
         raise OfflineError(
-            f"LLM provider {p.name!r} needs network egress, but offline-mode "
-            "(SPOOL_OFFLINE=1) is on. Use a local provider or turn offline-mode off. "
-            "Only transcript text would have been sent — media never leaves the machine."
-        )
-    if getattr(p, "egress", False):
-        e = env if env is not None else os.environ
-        if (e.get("SPOOL_LLM_EGRESS_CONSENT") or "").strip().lower() not in _TRUE:
-            raise EgressConsentError(
-                f"LLM provider {p.name!r} requires explicit consent before transcript "
-                "text can leave this machine."
-            )
-    return p.complete(prompt, system=system)
+            f"LLM provider {p.name!r} needs network egress, but offline mode is on."
+        ) from exc

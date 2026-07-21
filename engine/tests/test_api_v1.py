@@ -2471,6 +2471,152 @@ def test_source_filmstrip_endpoint_returns_data_uri(client, tmp_path, monkeypatc
 
 # ---- agent: NL → bounded ReAct tool-loop over the full /api/v1 surface ----
 
+def _enable_reasoning(c):
+    response = c.patch("/api/v1/settings", json={
+        "reasoning_provider": "codex",
+        "reasoning_egress_consent": True,
+    })
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("privacy_state", "expected_error"),
+    [
+        ("provider-none", "reasoning_provider_required"),
+        ("consent-missing", "egress_consent_required"),
+        ("offline", "offline_network_disabled"),
+    ],
+)
+def test_agent_route_rejects_privacy_state_before_client_or_provider_work(
+    client, monkeypatch, privacy_state, expected_error,
+):
+    import clip.agent as clip_agent
+    import trove_client
+
+    app, c = client
+    if privacy_state == "consent-missing":
+        assert c.patch(
+            "/api/v1/settings", json={"reasoning_provider": "codex"}
+        ).status_code == 200
+    elif privacy_state == "offline":
+        _enable_reasoning(c)
+        assert c.patch("/api/v1/settings", json={"offline": True}).status_code == 200
+
+    calls = []
+    monkeypatch.setattr(
+        trove_client,
+        "TroveClient",
+        lambda: calls.append("client") or object(),
+    )
+    monkeypatch.setattr(
+        clip_agent,
+        "run_agent",
+        lambda *_args, **_kwargs: calls.append("provider") or {
+            "action": "reply", "reply": "unexpected", "tools": [], "jobs": [],
+        },
+    )
+
+    response = c.post("/api/v1/agent", json={"message": "what is queued?"})
+
+    assert response.status_code == 409
+    assert response.get_json() == {"error": expected_error}
+    assert calls == []
+    assert app.extensions["trove.network_policy"].active_leases == 0
+
+
+def test_agent_route_threads_the_app_policy_and_live_settings_getter(client, monkeypatch):
+    import clip.agent as clip_agent
+
+    app, c = client
+    _enable_reasoning(c)
+    captured = {}
+
+    def fake_run(message, **kwargs):
+        captured.update(kwargs)
+        return {"action": "reply", "reply": "ok", "tools": [], "jobs": []}
+
+    monkeypatch.setattr(clip_agent, "run_agent", fake_run)
+    response = c.post("/api/v1/agent", json={"message": "hi"})
+
+    assert response.status_code == 200
+    assert captured["network_policy"] is app.extensions["trove.network_policy"]
+    assert captured["privacy_state"] == app.extensions["trove.settings"].get
+    assert app.extensions["trove.clip_runner"].network_policy is captured["network_policy"]
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_code"),
+    [
+        (lambda llm: llm.OfflineError("offline"), "offline_network_disabled"),
+        (lambda llm: llm.ReasoningDisabledError("none"), "reasoning_provider_required"),
+        (lambda llm: llm.EgressConsentError("revoked"), "egress_consent_required"),
+    ],
+)
+def test_agent_route_surfaces_last_moment_privacy_denials_as_exact_409(
+    client, monkeypatch, error, expected_code,
+):
+    import clip.agent as clip_agent
+    from clip import llm
+
+    _, c = client
+    _enable_reasoning(c)
+    monkeypatch.setattr(
+        clip_agent,
+        "run_agent",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(error(llm)),
+    )
+
+    response = c.post("/api/v1/agent", json={"message": "hi"})
+
+    assert response.status_code == 409
+    assert response.get_json() == {"error": expected_code}
+
+
+def test_active_reasoning_lease_blocks_offline_persistence_until_completion(client):
+    from clip import llm
+
+    app, c = client
+    _enable_reasoning(c)
+    policy = app.extensions["trove.network_policy"]
+    settings = app.extensions["trove.settings"]
+    entered = threading.Event()
+    release = threading.Event()
+    outcomes = []
+
+    def remote(_prompt, *, system=None):
+        assert policy.active_leases == 1
+        entered.set()
+        assert release.wait(2), "reasoning completion was not released"
+        return "ok"
+
+    def complete():
+        try:
+            outcomes.append(llm.complete(
+                "transcript",
+                provider=llm.CallableProvider(remote, name="remote", egress=True),
+                network_policy=policy,
+                privacy_state=settings.get,
+            ))
+        except BaseException as exc:  # pragma: no cover - asserted below
+            outcomes.append(exc)
+
+    worker = threading.Thread(target=complete)
+    worker.start()
+    assert entered.wait(2), "reasoning lease was not acquired"
+
+    blocked = c.patch("/api/v1/settings", json={"offline": True})
+    assert blocked.status_code == 409
+    assert blocked.get_json() == {"error": "network_work_active"}
+    assert settings.get()["offline"] is False
+    assert "SPOOL_OFFLINE" not in os.environ
+
+    release.set()
+    worker.join(2)
+    assert not worker.is_alive()
+    assert outcomes == ["ok"]
+    assert policy.active_leases == 0
+    assert c.patch("/api/v1/settings", json={"offline": True}).status_code == 200
+
 def test_agent_route_shapes_loop_result(client, monkeypatch):
     # The route drives clip.agent.run_agent and returns its reply + real tool trace + jobs.
     import clip.agent as clip_agent
@@ -2484,6 +2630,7 @@ def test_agent_route_shapes_loop_result(client, monkeypatch):
 
     monkeypatch.setattr(clip_agent, "run_agent", fake_run)
     _, c = client
+    _enable_reasoning(c)
     r = c.post("/api/v1/agent", json={"message": "what's in the queue?"})
     assert r.status_code == 200
     b = r.get_json()
@@ -2498,6 +2645,7 @@ def test_agent_route_clarify_carries_kind(client, monkeypatch):
         "action": "clarify", "reply": "Which one?", "question": "Which source?",
         "options": ["a", "b"], "kind": "enum", "tools": [], "jobs": []})
     _, c = client
+    _enable_reasoning(c)
     b = c.post("/api/v1/agent", json={"message": "clip it"}).get_json()
     assert b["action"] == "clarify" and b["question"] == "Which source?"
     assert b["options"] == ["a", "b"] and b["kind"] == "enum"
@@ -2516,6 +2664,7 @@ def test_agent_route_returns_exact_mutation_disabled_envelope(client, monkeypatc
 
     monkeypatch.setattr(clip_agent, "run_agent", disabled)
     _, c = client
+    _enable_reasoning(c)
     r = c.post("/api/v1/agent", json={
         "message": "delete my recipe",
         "confirm_tool": "delete_recipe",
@@ -2538,9 +2687,10 @@ def test_agent_route_llm_unavailable_503(client, monkeypatch):
     import clip.agent as clip_agent
     from clip import llm
     def boom(*a, **k):
-        raise llm.OfflineError("offline")
+        raise llm.ProviderUnavailableError("missing")
     monkeypatch.setattr(clip_agent, "run_agent", boom)
     _, c = client
+    _enable_reasoning(c)
     assert c.post("/api/v1/agent", json={"message": "hi"}).status_code == 503
 
 

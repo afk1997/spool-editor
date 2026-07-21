@@ -1,14 +1,21 @@
 """Tests for clip.llm — the pluggable moment-finding LLM provider layer.
 
 Remote reasoning is disabled by default. The opt-in ``codex`` provider shells out to the user's Codex CLI.
-We never invoke the real CLI here — ``shutil.which`` and ``subprocess.run`` are
+We never invoke the real CLI here — ``shutil.which`` and ``subprocess.Popen`` are
 mocked and we assert the ``codex exec`` argv/stdin contract + the offline guard.
 """
 from __future__ import annotations
 
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
 import pytest
 
 from clip import llm
+from network_policy import NetworkPolicy
 
 
 class _FakeProc:
@@ -16,6 +23,20 @@ class _FakeProc:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+
+    def communicate(self, input=None, timeout=None):
+        return self.stdout, self.stderr
+
+    def poll(self):
+        return self.returncode
+
+
+def _codex(*, policy=None, state=None, **kwargs):
+    return llm.CodexProvider(
+        network_policy=policy or NetworkPolicy(),
+        privacy_state=lambda: dict(state or _privacy()),
+        **kwargs,
+    )
 
 
 # --- provider resolution -------------------------------------------------
@@ -35,7 +56,13 @@ def test_get_provider_passes_through_an_instance():
 
 
 def test_get_provider_reads_env_default():
-    assert isinstance(llm.get_provider(env={"SPOOL_LLM_PROVIDER": "codex"}), llm.CodexProvider)
+    assert isinstance(
+        llm.get_provider(
+            env={"SPOOL_LLM_PROVIDER": "codex", "SPOOL_LLM_EGRESS_CONSENT": "1"},
+            network_policy=NetworkPolicy(),
+        ),
+        llm.CodexProvider,
+    )
 
 
 def test_get_provider_unknown_name_raises():
@@ -54,16 +81,24 @@ def _write_o(argv, text):
 def test_codex_builds_read_only_exec_argv(monkeypatch):
     captured = {}
 
-    def fake_run(argv, **kw):
+    def fake_popen(argv, **kw):
         captured["argv"] = argv
         captured["kw"] = kw
         _write_o(argv, "RESULT")
-        return _FakeProc(returncode=0)
+        proc = _FakeProc(returncode=0)
+
+        def communicate(input=None, timeout=None):
+            captured["input"] = input
+            captured["timeout"] = timeout
+            return "", ""
+
+        proc.communicate = communicate
+        return proc
 
     monkeypatch.setattr(llm.shutil, "which", lambda b: "/usr/local/bin/codex")
-    monkeypatch.setattr(llm.subprocess, "run", fake_run)
+    monkeypatch.setattr(llm.subprocess, "Popen", fake_popen)
 
-    out = llm.CodexProvider().complete("find clips", system="you are a producer")
+    out = _codex().complete("find clips", system="you are a producer")
 
     assert out == "RESULT"  # read from the -o file, not the noisy stdout log
     argv = captured["argv"]
@@ -73,21 +108,21 @@ def test_codex_builds_read_only_exec_argv(monkeypatch):
     assert "--skip-git-repo-check" in argv and "--ephemeral" in argv and "-o" in argv
     assert "model_reasoning_effort=low" in argv  # cheap-by-default (SPOOL_CODEX_REASONING)
     # prompt goes over stdin (transcripts can be large); system is prepended
-    assert "find clips" in captured["kw"]["input"]
-    assert "you are a producer" in captured["kw"]["input"]
+    assert "find clips" in captured["input"]
+    assert "you are a producer" in captured["input"]
 
 
 def test_codex_includes_model_flag_when_configured(monkeypatch):
     captured = {}
     monkeypatch.setattr(llm.shutil, "which", lambda b: "/usr/local/bin/codex")
 
-    def fake_run(argv, **kw):
+    def fake_popen(argv, **kw):
         captured["argv"] = argv
         _write_o(argv, "x")
         return _FakeProc(returncode=0)
 
-    monkeypatch.setattr(llm.subprocess, "run", fake_run)
-    llm.CodexProvider(model="gpt-5-codex").complete("hi")
+    monkeypatch.setattr(llm.subprocess, "Popen", fake_popen)
+    _codex(model="gpt-5-codex").complete("hi")
     argv = captured["argv"]
     assert "-m" in argv and argv[argv.index("-m") + 1] == "gpt-5-codex"
 
@@ -95,14 +130,18 @@ def test_codex_includes_model_flag_when_configured(monkeypatch):
 def test_codex_missing_cli_raises_unavailable(monkeypatch):
     monkeypatch.setattr(llm.shutil, "which", lambda b: None)
     with pytest.raises(llm.ProviderUnavailableError, match="Codex CLI"):
-        llm.CodexProvider().complete("hi")
+        _codex().complete("hi")
 
 
 def test_codex_nonzero_exit_raises_with_stderr(monkeypatch):
     monkeypatch.setattr(llm.shutil, "which", lambda b: "/usr/local/bin/codex")
-    monkeypatch.setattr(llm.subprocess, "run", lambda argv, **kw: _FakeProc(returncode=2, stderr="not signed in"))
+    monkeypatch.setattr(
+        llm.subprocess,
+        "Popen",
+        lambda argv, **kw: _FakeProc(returncode=2, stderr="not signed in"),
+    )
     with pytest.raises(RuntimeError, match="not signed in"):
-        llm.CodexProvider().complete("hi")
+        _codex().complete("hi")
 
 
 # --- offline guard -------------------------------------------------------
@@ -114,11 +153,13 @@ def test_is_offline_parsing(val, offline):
 
 def test_complete_blocks_egress_provider_when_offline(monkeypatch):
     monkeypatch.setattr(llm.shutil, "which", lambda b: "/usr/local/bin/codex")
+    policy = NetworkPolicy(offline=True)
     with pytest.raises(llm.OfflineError, match="offline"):
         llm.complete("hi", provider="codex", env={
             "SPOOL_OFFLINE": "1",
+            "SPOOL_LLM_PROVIDER": "codex",
             "SPOOL_LLM_EGRESS_CONSENT": "1",
-        })
+        }, network_policy=policy)
 
 
 def test_complete_blocks_egress_without_explicit_consent():
@@ -130,7 +171,12 @@ def test_complete_blocks_egress_without_explicit_consent():
     )
 
     with pytest.raises(llm.EgressConsentError, match="consent"):
-        llm.complete("hi", provider=remote, env={})
+        llm.complete(
+            "hi",
+            provider=remote,
+            env={"SPOOL_LLM_PROVIDER": "codex"},
+            network_policy=NetworkPolicy(),
+        )
 
     assert calls == []
 
@@ -146,7 +192,8 @@ def test_complete_allows_egress_with_explicit_consent():
     assert llm.complete(
         "hi",
         provider=remote,
-        env={"SPOOL_LLM_EGRESS_CONSENT": "1"},
+        env={"SPOOL_LLM_PROVIDER": "codex", "SPOOL_LLM_EGRESS_CONSENT": "1"},
+        network_policy=NetworkPolicy(),
     ) == "ok"
     assert calls == ["hi"]
 
@@ -168,3 +215,284 @@ def test_callable_provider_forwards_prompt_and_system():
     assert p.complete("the prompt", system="the system") == "done"
     assert seen == {"prompt": "the prompt", "system": "the system"}
     assert p.egress is False  # injected agent LLM: no engine-side egress
+
+
+# --- Phase 0 direct network boundary ------------------------------------
+
+def _privacy(*, offline=False, provider="codex", consent=True):
+    return {
+        "offline": offline,
+        "reasoning_provider": provider,
+        "reasoning_egress_consent": consent,
+    }
+
+
+@pytest.mark.parametrize(
+    ("state", "error_type", "error_category"),
+    [
+        (_privacy(offline=True), llm.OfflineError, "offline_network_disabled"),
+        (_privacy(provider="none"), llm.ReasoningDisabledError, "reasoning_provider_required"),
+        (_privacy(consent=False), llm.EgressConsentError, "egress_consent_required"),
+    ],
+)
+def test_direct_codex_boundary_rejects_live_privacy_state_before_cli_discovery(
+    monkeypatch, state, error_type, error_category,
+):
+    policy = NetworkPolicy(offline=state["offline"])
+    discoveries = []
+    monkeypatch.setattr(llm.shutil, "which", lambda _bin: discoveries.append(_bin))
+
+    provider = llm.CodexProvider(
+        network_policy=policy,
+        privacy_state=lambda: dict(state),
+    )
+    with pytest.raises(error_type) as denied:
+        provider.complete("transcript")
+
+    assert denied.value.error_category == error_category
+    assert discoveries == []
+    assert policy.active_leases == 0
+
+
+def test_arbitrary_egress_provider_runs_inside_explicit_reasoning_lease():
+    policy = NetworkPolicy()
+    calls = []
+
+    def remote(prompt, *, system=None):
+        calls.append((prompt, system, policy.active_leases))
+        return "ok"
+
+    provider = llm.CallableProvider(remote, name="remote-test", egress=True)
+    assert llm.complete(
+        "transcript",
+        system="producer",
+        provider=provider,
+        network_policy=policy,
+        privacy_state=lambda: _privacy(),
+    ) == "ok"
+    assert calls == [("transcript", "producer", 1)]
+    assert policy.active_leases == 0
+
+
+def test_codex_rechecks_live_consent_inside_lease_before_cli_discovery(monkeypatch):
+    policy = NetworkPolicy()
+    reads = []
+    discoveries = []
+
+    def privacy_state():
+        reads.append(policy.active_leases)
+        return _privacy(consent=len(reads) == 1)
+
+    monkeypatch.setattr(llm.shutil, "which", lambda _bin: discoveries.append(_bin))
+    provider = llm.CodexProvider(network_policy=policy, privacy_state=privacy_state)
+
+    with pytest.raises(llm.EgressConsentError) as denied:
+        provider.complete("transcript")
+
+    assert denied.value.error_category == "egress_consent_required"
+    assert reads == [0, 1]
+    assert discoveries == []
+    assert policy.active_leases == 0
+
+
+def test_codex_normalizes_a_live_environment_style_privacy_getter(monkeypatch):
+    policy = NetworkPolicy(offline=True)
+    live_env = {
+        "SPOOL_OFFLINE": "1",
+        "SPOOL_LLM_PROVIDER": "codex",
+        "SPOOL_LLM_EGRESS_CONSENT": "1",
+    }
+    discoveries = []
+    monkeypatch.setattr(llm.shutil, "which", lambda _bin: discoveries.append(_bin))
+
+    provider = llm.CodexProvider(
+        network_policy=policy,
+        privacy_state=lambda: live_env,
+    )
+    with pytest.raises(llm.OfflineError) as denied:
+        provider.complete("transcript")
+
+    assert denied.value.error_category == "offline_network_disabled"
+    assert discoveries == []
+
+
+def test_codex_holds_lease_until_owned_process_group_is_quiescent(monkeypatch):
+    policy = NetworkPolicy()
+    events = []
+
+    class CompletedProcess:
+        pid = 717171
+        returncode = 0
+
+        def __init__(self, argv, **kwargs):
+            events.append(("spawn", kwargs.get("start_new_session"), policy.active_leases))
+            self.argv = argv
+
+        def communicate(self, input=None, timeout=None):
+            events.append(("communicate", input, timeout, policy.active_leases))
+            _write_o(self.argv, "RESULT")
+            return "noise", ""
+
+        def poll(self):
+            return self.returncode
+
+    def group_probe(pgid, sig):
+        events.append(("group", pgid, sig, policy.active_leases))
+        raise ProcessLookupError
+
+    monkeypatch.setattr(llm.shutil, "which", lambda _bin: "/usr/local/bin/codex")
+    monkeypatch.setattr(llm.subprocess, "Popen", CompletedProcess)
+    monkeypatch.setattr(
+        llm.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("subprocess.run cannot own the Codex process tree")
+        ),
+    )
+    monkeypatch.setattr(llm.os, "killpg", group_probe)
+
+    assert _codex(policy=policy).complete("find clips") == "RESULT"
+    assert events[0] == ("spawn", True, 1)
+    assert events[1][0] == "communicate" and events[1][-1] == 1
+    assert events[-1] == ("group", CompletedProcess.pid, 0, 1)
+    assert policy.active_leases == 0
+
+
+def test_owned_process_kill_falls_back_when_session_group_was_never_created(monkeypatch):
+    calls = []
+
+    class SessionIgnoringShim:
+        pid = 727272
+
+        def kill(self):
+            calls.append("parent-kill")
+
+    owned = llm._OwnedReasoningProcess(SessionIgnoringShim(), owns_group=True)
+    monkeypatch.setattr(
+        llm.os,
+        "killpg",
+        lambda _pgid, _sig: (_ for _ in ()).throw(ProcessLookupError),
+    )
+
+    owned.kill()
+
+    assert calls == ["parent-kill"]
+
+
+def test_codex_rechecks_consent_after_local_setup_immediately_before_spawn(
+    tmp_path, monkeypatch,
+):
+    policy = NetworkPolicy()
+    state = _privacy()
+    output_paths = []
+    real_mkstemp = llm.tempfile.mkstemp
+
+    def revoke_after_output_created(*args, **kwargs):
+        fd, path = real_mkstemp(*args, **kwargs)
+        output_paths.append(path)
+        state["reasoning_egress_consent"] = False
+        return fd, path
+
+    spawns = []
+    monkeypatch.setattr(llm.shutil, "which", lambda _bin: "/usr/local/bin/codex")
+    monkeypatch.setattr(llm.tempfile, "mkstemp", revoke_after_output_created)
+    monkeypatch.setattr(llm.subprocess, "Popen", lambda *a, **k: spawns.append(a) or _FakeProc())
+
+    with pytest.raises(llm.EgressConsentError) as denied:
+        _codex(policy=policy, state=state, cwd=str(tmp_path)).complete("transcript")
+
+    assert denied.value.error_category == "egress_consent_required"
+    assert spawns == []
+    assert output_paths and all(not Path(path).exists() for path in output_paths)
+    assert policy.active_leases == 0
+
+
+@pytest.mark.parametrize("failure", ["spawn", "timeout", "nonzero"])
+def test_codex_removes_output_temp_on_every_failure(tmp_path, monkeypatch, failure):
+    policy = NetworkPolicy()
+    output_paths = []
+    real_mkstemp = llm.tempfile.mkstemp
+
+    def capture_output(*args, **kwargs):
+        fd, path = real_mkstemp(*args, **kwargs)
+        output_paths.append(path)
+        return fd, path
+
+    class FailureProcess(_FakeProc):
+        def __init__(self):
+            super().__init__(returncode=2 if failure == "nonzero" else 0, stderr="boom")
+            self._first = True
+
+        def communicate(self, input=None, timeout=None):
+            if failure == "timeout" and self._first:
+                self._first = False
+                raise llm.subprocess.TimeoutExpired(cmd="codex", timeout=timeout)
+            return "", self.stderr
+
+        def kill(self):
+            self.returncode = -9
+
+    def spawn(*args, **kwargs):
+        if failure == "spawn":
+            raise FileNotFoundError("vanished")
+        return FailureProcess()
+
+    monkeypatch.setattr(llm.shutil, "which", lambda _bin: "/usr/local/bin/codex")
+    monkeypatch.setattr(llm.tempfile, "mkstemp", capture_output)
+    monkeypatch.setattr(llm.subprocess, "Popen", spawn)
+
+    error = (
+        llm.ProviderUnavailableError
+        if failure == "spawn"
+        else llm.subprocess.TimeoutExpired
+        if failure == "timeout"
+        else RuntimeError
+    )
+    with pytest.raises(error):
+        _codex(policy=policy, cwd=str(tmp_path)).complete("transcript")
+
+    assert output_paths and all(not Path(path).exists() for path in output_paths)
+    assert policy.active_leases == 0
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group ownership")
+def test_codex_timeout_kills_real_descendant_before_releasing_lease(
+    tmp_path, monkeypatch,
+):
+    policy = NetworkPolicy()
+    child_pid_file = tmp_path / "child.pid"
+    bridge = tmp_path / "codex-bridge"
+    bridge.write_text(
+        f"#!{sys.executable}\n"
+        "import os, subprocess, sys, time\n"
+        "out = sys.argv[sys.argv.index('-o') + 1]\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "with open(os.environ['SPOOL_TEST_CHILD_PID'], 'w') as f:\n"
+        "    f.write(str(child.pid)); f.flush(); os.fsync(f.fileno())\n"
+        "sys.stdin.read()\n"
+        "time.sleep(60)\n"
+    )
+    bridge.chmod(0o755)
+    monkeypatch.setenv("SPOOL_TEST_CHILD_PID", str(child_pid_file))
+
+    child_pid = None
+    try:
+        with pytest.raises(llm.subprocess.TimeoutExpired):
+            _codex(policy=policy, bin=str(bridge), timeout=1.0).complete("transcript")
+        for _ in range(100):
+            if child_pid_file.exists():
+                child_pid = int(child_pid_file.read_text())
+                break
+            time.sleep(0.01)
+        assert child_pid is not None
+        with pytest.raises(ProcessLookupError):
+            os.kill(child_pid, 0)
+        assert policy.active_leases == 0
+    finally:
+        if child_pid is None and child_pid_file.exists():
+            child_pid = int(child_pid_file.read_text())
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass

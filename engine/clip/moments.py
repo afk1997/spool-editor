@@ -18,6 +18,7 @@ import json
 import re
 
 import transcript_io
+from network_policy import NetworkPolicy
 
 from . import llm
 
@@ -82,6 +83,8 @@ def find_moments(
     source_id: str | None = None,
     provider: "str | llm.LLMProvider | None" = None,
     env: dict | None = None,
+    network_policy: NetworkPolicy | None = None,
+    privacy_state: llm.PrivacyState | None = None,
 ) -> list[dict]:
     """Scan a transcript for ``count`` clip-worthy moments.
 
@@ -106,7 +109,14 @@ def find_moments(
     clamp_max = float(data.get("duration") or max(e for _, e, _ in lines))
     words = data.get("words") or []
     system, prompt = _build_prompt(lines, mode=mode, count=count)
-    reply = llm.complete(prompt, system=system, provider=provider, env=env)
+    reply = llm.complete(
+        prompt,
+        system=system,
+        provider=provider,
+        env=env,
+        network_policy=network_policy,
+        privacy_state=privacy_state,
+    )
 
     out: list[dict] = []
     for item in _parse_array(reply):

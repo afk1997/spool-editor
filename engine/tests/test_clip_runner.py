@@ -16,6 +16,7 @@ import pytest
 
 import clip_runner as cr
 from clip_jobs import ClipJob
+from network_policy import NetworkPolicy
 
 
 class _FakeJM:
@@ -127,6 +128,35 @@ def test_find_moments_target_records_candidates(runner, monkeypatch):
     assert seen["kw"]["mode"] == "insightful" and seen["kw"]["count"] == 3
     assert seen["kw"]["source_id"] == "src1"
     assert job.result["count"] == 1 and job.result["candidates"][0]["title"] == "x"
+
+
+def test_reasoning_targets_thread_one_policy_and_live_settings_getter(runner, monkeypatch):
+    _words_file(runner)
+    policy = NetworkPolicy()
+    settings = _FakeSettings(
+        offline=False,
+        reasoning_provider="codex",
+        reasoning_egress_consent=True,
+    )
+    runner.network_policy = policy
+    runner.settings_store = settings
+    calls = []
+
+    def fake_find(*args, **kwargs):
+        calls.append(kwargs)
+        return []
+
+    _patch(monkeypatch, "moments", "find_moments", fake_find)
+    runner.find_moments_target(source_id="src1", params={})(
+        _job("moments", source_id="src1")
+    )
+    runner.produce_target(source_id="src1", recipe={"count": 1})(
+        _job("produce", source_id="src1")
+    )
+
+    assert len(calls) == 2
+    assert all(call["network_policy"] is policy for call in calls)
+    assert all(call["privacy_state"] == settings.get for call in calls)
 
 
 def test_find_moments_target_ranks_candidates(runner, monkeypatch):

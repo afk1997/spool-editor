@@ -17,6 +17,8 @@ import re
 import subprocess
 import time
 
+from network_policy import NetworkPolicy
+
 from . import llm
 
 _ACTIONS = {"find_moments", "make_clip", "clarify", "reply"}
@@ -45,6 +47,8 @@ def plan(
     transcript_lines: "list[tuple[float, float, str]] | None" = None,
     provider: "str | llm.LLMProvider | None" = None,
     env: dict | None = None,
+    network_policy: NetworkPolicy | None = None,
+    privacy_state: llm.PrivacyState | None = None,
 ) -> dict:
     """Decide the next action for a user message. Returns a normalized action dict
     ``{action, reply, ...}``. Propagates :class:`~clip.llm.OfflineError` /
@@ -55,7 +59,14 @@ def plan(
         body = "\n".join(f"[{s:.2f}–{e:.2f}] {t}" for s, e, t in transcript_lines)
         parts.append("Transcript (each line is [start–end seconds] text):\n\n" + body)
     prompt = "\n\n".join(parts)
-    reply = llm.complete(prompt, system=_SYSTEM, provider=provider, env=env)
+    reply = llm.complete(
+        prompt,
+        system=_SYSTEM,
+        provider=provider,
+        env=env,
+        network_policy=network_policy,
+        privacy_state=privacy_state,
+    )
     return _normalize(_parse_obj(reply), fallback=reply)
 
 
@@ -167,7 +178,11 @@ _LOOP_SYSTEM = (
 )
 
 
-def _default_agent_provider(env: dict | None):
+def _default_agent_provider(
+    env: dict | None,
+    network_policy: NetworkPolicy | None,
+    privacy_state: llm.PrivacyState | None,
+):
     """The agent reasons OVER tool results (not just extracts), so it needs more reasoning effort
     than moment-finding's "low" default. Give the codex bridge a higher effort (``SPOOL_AGENT_REASONING``,
     default "medium"); for any non-codex configured provider, return None so ``llm.complete`` resolves
@@ -175,7 +190,14 @@ def _default_agent_provider(env: dict | None):
     e = env if env is not None else os.environ
     name = (e.get("SPOOL_LLM_PROVIDER") or llm.DEFAULT_PROVIDER).lower()
     if name == "codex":
-        return llm.CodexProvider(reasoning=(e.get("SPOOL_AGENT_REASONING") or "medium"))
+        if network_policy is None:
+            raise ValueError("network_policy is required for the Codex agent provider")
+        return llm.CodexProvider(
+            network_policy=network_policy,
+            privacy_state=privacy_state,
+            env=e,
+            reasoning=(e.get("SPOOL_AGENT_REASONING") or "medium"),
+        )
     return None
 
 
@@ -198,14 +220,30 @@ def _short_arg(args: dict) -> str:
     return "· " + " ".join(bits)
 
 
-def _complete_with_retry(prompt: str, *, system, provider, env, attempts: int = 2) -> str:
+def _complete_with_retry(
+    prompt: str,
+    *,
+    system,
+    provider,
+    env,
+    network_policy,
+    privacy_state,
+    attempts: int = 2,
+) -> str:
     """llm.complete with one retry for transient bridge failures (codex crash, timeout,
     broken pipe). OfflineError is policy, not weather — re-raised immediately."""
     last: Exception | None = None
     for attempt in range(attempts):
         try:
-            return llm.complete(prompt, system=system, provider=provider, env=env)
-        except llm.OfflineError:
+            return llm.complete(
+                prompt,
+                system=system,
+                provider=provider,
+                env=env,
+                network_policy=network_policy,
+                privacy_state=privacy_state,
+            )
+        except (llm.OfflineError, llm.ReasoningDisabledError):
             raise
         except (llm.ProviderUnavailableError, RuntimeError, OSError,
                 subprocess.TimeoutExpired) as e:
@@ -224,6 +262,8 @@ def run_agent(
     elapsed=None,
     provider: "str | llm.LLMProvider | None" = None,
     env: dict | None = None,
+    network_policy: NetworkPolicy | None = None,
+    privacy_state: llm.PrivacyState | None = None,
     max_steps: int = _MAX_STEPS,
     confirmed_tool: "str | None" = None,
 ) -> dict:
@@ -238,7 +278,7 @@ def run_agent(
     then degraded to a partial-result _finish instead of an unhandled exception."""
     clock = elapsed or (lambda: time.monotonic() * 1000.0)
     if provider is None:                              # default the in-app agent to higher reasoning
-        provider = _default_agent_provider(env)
+        provider = _default_agent_provider(env, network_policy, privacy_state)
 
     transcript = [f"User: {message.strip()}"]
     if transcript_lines:
@@ -251,8 +291,15 @@ def run_agent(
     for _ in range(max(1, max_steps)):
         prompt = "\n\n".join(transcript) + "\n\nYour next JSON:"
         try:
-            raw = _complete_with_retry(prompt, system=_LOOP_SYSTEM, provider=provider, env=env)
-        except llm.OfflineError:
+            raw = _complete_with_retry(
+                prompt,
+                system=_LOOP_SYSTEM,
+                provider=provider,
+                env=env,
+                network_policy=network_policy,
+                privacy_state=privacy_state,
+            )
+        except (llm.OfflineError, llm.ReasoningDisabledError):
             raise
         except Exception:
             if not tools_trace:
@@ -312,7 +359,16 @@ def run_agent(
     summary_prompt = ("\n\n".join(transcript) +
                       "\n\nStep budget reached. Reply now with {\"final\":{\"reply\":\"...\"}} summarizing for the user.")
     try:
-        raw = _complete_with_retry(summary_prompt, system=_LOOP_SYSTEM, provider=provider, env=env)
+        raw = _complete_with_retry(
+            summary_prompt,
+            system=_LOOP_SYSTEM,
+            provider=provider,
+            env=env,
+            network_policy=network_policy,
+            privacy_state=privacy_state,
+        )
+    except (llm.OfflineError, llm.ReasoningDisabledError):
+        raise
     except Exception:
         return _finish("Step budget reached and the provider dropped out — here's what I gathered.", tools_trace, jobs)
     fin = _parse_obj(raw) or {}

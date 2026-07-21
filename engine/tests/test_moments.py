@@ -12,6 +12,7 @@ import json
 import pytest
 
 from clip import llm, moments, signals
+from network_policy import NetworkPolicy
 
 
 @pytest.fixture()
@@ -163,8 +164,44 @@ def test_find_moments_empty_window_raises(words_json):
 def test_find_moments_offline_with_default_codex_raises(words_json):
     # No provider instance → resolves the egress codex bridge → offline guard fires
     # before any CLI is touched.
+    policy = NetworkPolicy(offline=True)
     with pytest.raises(llm.OfflineError):
-        moments.find_moments(words_json, provider="codex", env={"SPOOL_OFFLINE": "1"})
+        moments.find_moments(
+            words_json,
+            provider="codex",
+            env={
+                "SPOOL_OFFLINE": "1",
+                "SPOOL_LLM_PROVIDER": "codex",
+                "SPOOL_LLM_EGRESS_CONSENT": "1",
+            },
+            network_policy=policy,
+        )
+
+
+def test_find_moments_threads_explicit_policy_and_live_privacy_state(
+    words_json, monkeypatch,
+):
+    policy = NetworkPolicy()
+    state = lambda: {
+        "offline": False,
+        "reasoning_provider": "codex",
+        "reasoning_egress_consent": True,
+    }
+    captured = {}
+
+    def fake_complete(*args, **kwargs):
+        captured.update(kwargs)
+        return _TWO
+
+    monkeypatch.setattr(moments.llm, "complete", fake_complete)
+    moments.find_moments(
+        words_json,
+        network_policy=policy,
+        privacy_state=state,
+    )
+
+    assert captured["network_policy"] is policy
+    assert captured["privacy_state"] is state
 
 
 # ---- clip tightness: produced clips must land in the short-form sweet spot, not topic spans ----
