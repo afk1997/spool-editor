@@ -279,6 +279,30 @@ export interface JobView {
   human: HumanSummary;
 }
 
+export interface BulkSubmitSuccess {
+  url: string;
+  id: string;
+  title: string;
+  error?: never;
+  retry_after?: never;
+}
+
+export interface BulkSubmitFailure {
+  url: string;
+  error: string;
+  retry_after?: number;
+  id?: never;
+  title?: never;
+}
+
+export type BulkSubmitResult = BulkSubmitSuccess | BulkSubmitFailure;
+
+export interface BulkSubmitResponse {
+  submitted: number;
+  failed: number;
+  results: BulkSubmitResult[];
+}
+
 /** A transcribe job (`_tj_view`). */
 export interface TranscribeJobView {
   id: string;
@@ -434,6 +458,15 @@ export interface TranscriptWord {
   end: number | null;
   speaker?: string | null;
   deleted?: boolean;
+}
+
+export type WordEditRequest =
+  | { op: "set_text" | "insert_after"; w: string }
+  | { op: "delete" | "merge_next"; w?: never };
+
+export interface WordEditResponse {
+  tid: string;
+  word: TranscriptWord;
 }
 export interface TranscriptDocSegment {
   start: number;

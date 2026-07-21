@@ -8,6 +8,7 @@
  */
 import type {
   AgentResponse,
+  BulkSubmitResponse,
   Capabilities,
   ClipJobList,
   ClipJobView,
@@ -20,6 +21,8 @@ import type {
   TranscribeJobView,
   TranscriptDoc,
   TranscriptList,
+  WordEditRequest,
+  WordEditResponse,
 } from "@spool/types";
 
 export interface SpoolApiOptions {
@@ -328,7 +331,10 @@ export class SpoolApiClient {
     return this.post("/jobs", input);
   }
   /** Submit many downloads in one round-trip (POST /jobs/bulk). */
-  bulkSubmit(urls: string[], opts: { format?: "video" | "audio"; auto_transcribe?: boolean } = {}): Promise<{ jobs: JobView[] }> {
+  bulkSubmit(
+    urls: string[],
+    opts: { format?: "video" | "audio"; auto_transcribe?: boolean } = {},
+  ): Promise<BulkSubmitResponse> {
     return this.post("/jobs/bulk", { urls, ...opts });
   }
   pauseJob(id: string): Promise<JobView> {
@@ -371,7 +377,7 @@ export class SpoolApiClient {
   }
   /** Edit one transcript word in place (set_text / delete / insert_after / merge_next) —
    *  trove's transcript-editor behavior; drives caption re-burns + the transcript ripple cut. */
-  editWord(tid: string, idx: number, p: { op: string; w?: string }): Promise<{ tid: string; word: Record<string, unknown> }> {
+  editWord(tid: string, idx: number, p: WordEditRequest): Promise<WordEditResponse> {
     return this.post(`/transcripts/${encodeURIComponent(tid)}/words/${idx}`, p);
   }
 

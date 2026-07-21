@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { RankFactors } from "@spool/types";
+import type { RankFactors, WordEditRequest } from "@spool/types";
 import { useSpool, scoreFromFactors, ENGINE_DEFAULT_WEIGHTS, type Candidate, type TranscriptLine, type SpeakerInfo } from "./context";
 import { Btn, Chip, Empty, Icon, Thumb, fmtTC, parseTC } from "@spool/ui";
 import { formatActionError } from "@/lib/action-error";
@@ -357,7 +357,10 @@ export function TranscriptView({ lines, speakers, tid, sourceId, onEdited }: { l
   const inSel = (ti: number) => sel != null && ti >= lo && ti <= hi;
   const selWords = sel ? lines.flatMap((l) => l.tokens).filter((t) => inSel(t.ti)) : [];
 
-  const doOp = async (idx: number, op: string, w?: string) => {
+  const doOp = async (
+    idx: number,
+    request: WordEditRequest,
+  ) => {
     if (!tid || editInFlight.current || cutInFlight.current) return;
     const startedAtLocation = window.location.href;
     const operation = ++editOp.current;
@@ -365,7 +368,7 @@ export function TranscriptView({ lines, speakers, tid, sourceId, onEdited }: { l
     editInFlight.current = true;
     setEditPending(true);
     try {
-      await ctx.client.editWord(tid, idx, w !== undefined ? { op, w } : { op });
+      await ctx.client.editWord(tid, idx, request);
       if (!isCurrent()) return;
       setEditing(null);
       onEdited?.();
@@ -417,10 +420,10 @@ export function TranscriptView({ lines, speakers, tid, sourceId, onEdited }: { l
               return (
                 <span key={i} style={{ display: "inline-flex", gap: 4, alignItems: "center", verticalAlign: "middle", margin: "0 3px" }}>
                   <input autoFocus aria-label={`Edit transcript word ${tk.w}`} value={editing.text} disabled={editPending || cutPending} onChange={(e) => setEditing({ idx: tk.idx, text: e.target.value })}
-                    onKeyDown={(e) => { if (e.key === "Enter" && editing.text.trim()) doOp(tk.idx, "set_text", editing.text.trim()); if (e.key === "Escape") setEditing(null); }}
+                    onKeyDown={(e) => { if (e.key === "Enter" && editing.text.trim()) doOp(tk.idx, { op: "set_text", w: editing.text.trim() }); if (e.key === "Escape") setEditing(null); }}
                     style={{ font: "inherit", fontSize: 14, padding: "1px 6px", borderRadius: 5, border: "1px solid var(--accent)", background: "var(--bg-1)", color: "var(--text)", width: Math.max(64, editing.text.length * 9) }} />
-                  <button className="btn subtle sm" title="save" disabled={editPending || cutPending} style={{ padding: "2px 6px" }} onClick={() => editing.text.trim() && doOp(tk.idx, "set_text", editing.text.trim())}><Icon name="check" size={13} /></button>
-                  <button className="btn subtle sm" title="delete word" disabled={editPending || cutPending} style={{ padding: "2px 6px", color: "var(--err, #e5484d)" }} onClick={() => doOp(tk.idx, "delete")}><Icon name="trash" size={13} /></button>
+                  <button className="btn subtle sm" title="save" disabled={editPending || cutPending} style={{ padding: "2px 6px" }} onClick={() => editing.text.trim() && doOp(tk.idx, { op: "set_text", w: editing.text.trim() })}><Icon name="check" size={13} /></button>
+                  <button className="btn subtle sm" title="delete word" disabled={editPending || cutPending} style={{ padding: "2px 6px", color: "var(--err, #e5484d)" }} onClick={() => doOp(tk.idx, { op: "delete" })}><Icon name="trash" size={13} /></button>
                 </span>
               );
             }

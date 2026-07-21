@@ -1,5 +1,12 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, expectTypeOf, vi } from "vitest";
 import { SpoolApiClient, SpoolApiError } from "@spool/api-client";
+import type {
+  BulkSubmitResponse,
+  BulkSubmitResult,
+  WordEditRequest,
+  WordEditResponse,
+} from "@spool/types";
+import phase0Contract from "../../../contracts/v1/phase0-contract.json";
 
 /* The typed REST client mirrors the engine's api_v1. Here we inject a fake fetch and assert the
  * wire shape (path / method / body) — the contract the studio relies on. */
@@ -16,6 +23,28 @@ function clientWithSpy() {
     };
   }) as unknown as typeof globalThis.fetch;
   return { client: new SpoolApiClient({ baseUrl: "http://x", fetch: fakeFetch }), calls };
+}
+
+function clientReturning(body: unknown, status = 200) {
+  const calls: { url: string; method?: string; body?: unknown }[] = [];
+  const fakeFetch = vi.fn(async (url: unknown, init: RequestInit = {}) => {
+    calls.push({
+      url: String(url),
+      method: init.method,
+      body: typeof init.body === "string" ? JSON.parse(init.body) : undefined,
+    });
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+  return {
+    client: new SpoolApiClient({
+      baseUrl: "http://x",
+      fetch: fakeFetch as unknown as typeof globalThis.fetch,
+    }),
+    calls,
+  };
 }
 
 describe("SpoolApiClient.produce", () => {
@@ -59,6 +88,54 @@ describe("SpoolApiClient transcript lifecycle", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe("http://x/api/v1/transcripts/transcript%2Fwith%20space/dismiss");
     expect(calls[0]!.method).toBe("POST");
+  });
+});
+
+describe("Phase 0 canonical contract", () => {
+  it("sends canonical w word edits and returns the typed word response", async () => {
+    const { client, calls } = clientReturning(phase0Contract.word_edit.response_subset);
+    const request = phase0Contract.word_edit.request as WordEditRequest;
+
+    const response = await client.editWord("tx_1", 7, request);
+
+    expectTypeOf(client.editWord).parameter(2).toEqualTypeOf<WordEditRequest>();
+    expectTypeOf(response).toEqualTypeOf<WordEditResponse>();
+    expect(calls).toEqual([
+      {
+        url: "http://x/api/v1/transcripts/tx_1/words/7",
+        method: "POST",
+        body: phase0Contract.word_edit.request,
+      },
+    ]);
+    expect(response).toMatchObject(phase0Contract.word_edit.response_subset);
+  });
+
+  it("returns the exact discriminated bulk response", async () => {
+    const { client, calls } = clientReturning(phase0Contract.bulk_submit.response, 207);
+
+    const response = await client.bulkSubmit(phase0Contract.bulk_submit.request.urls);
+
+    expectTypeOf(response).toEqualTypeOf<BulkSubmitResponse>();
+    expectTypeOf<{
+      url: string;
+      id: string;
+      title: string;
+      error: string;
+    }>().not.toMatchTypeOf<BulkSubmitResult>();
+    expect(calls).toEqual([
+      {
+        url: "http://x/api/v1/jobs/bulk",
+        method: "POST",
+        body: phase0Contract.bulk_submit.request,
+      },
+    ]);
+    expect(response).toEqual(phase0Contract.bulk_submit.response);
+
+    const [submitted, failed] = response.results;
+    if (!submitted || "error" in submitted) throw new Error("expected success result");
+    if (!failed || !("error" in failed)) throw new Error("expected error result");
+    expect(submitted.id).toBe("job_1");
+    expect(failed.error).toBe("unsupported_url");
   });
 });
 
