@@ -429,6 +429,32 @@ def test_phase_zero_transcript_search_disables_index_backfill(monkeypatch):
     ]
 
 
+def test_phase_zero_list_models_mcp_read_has_zero_filesystem_delta(
+    tmp_path, monkeypatch
+):
+    import mcp_server
+    import models_store
+
+    models_dir = tmp_path / "mcp-models" / "models"
+    monkeypatch.setattr(models_store, "MODELS_DIR", models_dir)
+    before = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*"))
+
+    class LocalClient:
+        def list_models(self):
+            return {
+                "active": models_store.get_active(),
+                "installed": models_store.list_installed(),
+            }
+
+    monkeypatch.setattr(mcp_server, "_client", LocalClient())
+    server = mcp_server._build_server()
+
+    asyncio.run(server.call_tool("list_models", {}))
+
+    assert sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*")) == before
+    assert not models_dir.exists()
+
+
 def test_contract_fixture_mcp_word_edit_and_bulk_schemas_make_zero_client_calls(
     monkeypatch,
 ):

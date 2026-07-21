@@ -69,18 +69,20 @@ def _ensure_dir() -> None:
 
 def list_installed() -> list[str]:
     """Return names of installed model .bin files (sorted)."""
-    _ensure_dir()
-    return sorted(p.name for p in MODELS_DIR.iterdir()
-                  if p.suffix == ".bin" and p.name.startswith("ggml-"))
+    try:
+        return sorted(p.name for p in MODELS_DIR.iterdir()
+                      if p.suffix == ".bin" and p.name.startswith("ggml-"))
+    except OSError:
+        return []
 
 
 def get_active() -> str | None:
     """Return the name of the active model, or None."""
-    _ensure_dir()
     active_file = MODELS_DIR / "ACTIVE"
-    if not active_file.exists():
+    try:
+        name = active_file.read_text().strip()
+    except OSError:
         return None
-    name = active_file.read_text().strip()
     if not name or not (MODELS_DIR / name).exists():
         return None
     return name

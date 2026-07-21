@@ -1127,6 +1127,24 @@ def test_list_models_shape(client):
                for m in body["models"])
 
 
+def test_list_models_read_does_not_create_missing_models_directory(
+    client, tmp_path, monkeypatch
+):
+    import models_store
+
+    models_dir = tmp_path / "missing-models" / "models"
+    monkeypatch.setattr(models_store, "MODELS_DIR", models_dir)
+    before = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*"))
+    _, c = client
+
+    response = c.get("/api/v1/models")
+
+    assert response.status_code == 200
+    assert response.get_json()["active"] is None
+    assert sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*")) == before
+    assert not models_dir.exists()
+
+
 def test_use_model_unknown_400(client):
     _, c = client
     r = c.post("/api/v1/models/bogus/use")

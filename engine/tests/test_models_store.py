@@ -23,6 +23,29 @@ def test_list_installed_empty(tmp_models_dir):
     assert models_store.list_installed() == []
 
 
+def test_model_reads_do_not_create_a_missing_models_directory(tmp_path, monkeypatch):
+    models_dir = tmp_path / "missing" / "models"
+    monkeypatch.setattr(models_store, "MODELS_DIR", models_dir)
+    before = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*"))
+
+    assert models_store.get_active() is None
+    assert models_store.get_active_path() is None
+    assert models_store.list_installed() == []
+
+    assert sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*")) == before
+    assert not models_dir.exists()
+
+
+def test_model_mutation_still_ensures_a_missing_models_directory(tmp_path, monkeypatch):
+    models_dir = tmp_path / "missing" / "models"
+    monkeypatch.setattr(models_store, "MODELS_DIR", models_dir)
+
+    with pytest.raises(FileNotFoundError):
+        models_store.set_active("ggml-tiny.bin")
+
+    assert models_dir.is_dir()
+
+
 def test_list_installed_returns_only_ggml_bins(tmp_models_dir):
     (tmp_models_dir / "ggml-tiny.bin").write_bytes(b"x")
     (tmp_models_dir / "ggml-base.bin").write_bytes(b"x")

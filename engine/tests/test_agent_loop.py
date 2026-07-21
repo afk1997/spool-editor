@@ -242,6 +242,36 @@ def test_phase_zero_transcript_search_agent_read_disables_index_backfill():
     assert calls == [("hello", {"limit": 25, "backfill_index": False})]
 
 
+def test_phase_zero_list_models_agent_read_has_zero_filesystem_delta(
+    tmp_path, monkeypatch
+):
+    import models_store
+
+    models_dir = tmp_path / "agent-models" / "models"
+    monkeypatch.setattr(models_store, "MODELS_DIR", models_dir)
+    before = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*"))
+
+    class Client:
+        def list_models(self):
+            return {
+                "active": models_store.get_active(),
+                "installed": models_store.list_installed(),
+            }
+
+    out = agent.run_agent(
+        "list models",
+        client=Client(),
+        provider=_provider(
+            json.dumps({"tool": "list_models", "args": {}}),
+            json.dumps({"final": {"reply": "done"}}),
+        ),
+    )
+
+    assert out["reply"] == "done"
+    assert sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*")) == before
+    assert not models_dir.exists()
+
+
 @pytest.mark.parametrize(
     "tool_name",
     sorted(set(agent_tools.CATALOG) - READ_ONLY_TOOL_NAMES),
