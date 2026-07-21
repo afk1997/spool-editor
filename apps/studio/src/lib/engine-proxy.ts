@@ -75,9 +75,38 @@ function parseIncomingUrl(request: Request): URL | null {
   }
 }
 
+function effectiveIncomingOrigin(request: Request, requestUrl: URL): string | null {
+  const authority = request.headers.get("host");
+  if (authority === null) return requestUrl.origin;
+
+  if (!VISIBLE_ASCII.test(authority) || /[\\/?#@,]/u.test(authority)) return null;
+
+  try {
+    const authorityUrl = new URL(`${requestUrl.protocol}//${authority}`);
+    if (
+      !isHttpUrl(authorityUrl) ||
+      authorityUrl.username ||
+      authorityUrl.password ||
+      !isLoopbackHostname(authorityUrl.hostname) ||
+      authorityUrl.pathname !== "/" ||
+      authorityUrl.search ||
+      authorityUrl.hash ||
+      authorityUrl.host !== authority.toLowerCase()
+    ) {
+      return null;
+    }
+    return authorityUrl.origin;
+  } catch {
+    return null;
+  }
+}
+
 function hasAllowedOrigin(request: Request, requestUrl: URL): boolean {
   const fetchSite = request.headers.get("sec-fetch-site")?.trim().toLowerCase();
   if (fetchSite === "cross-site" || fetchSite === "same-site") return false;
+
+  const incomingOrigin = effectiveIncomingOrigin(request, requestUrl);
+  if (!incomingOrigin) return false;
 
   if (!request.headers.has("origin")) {
     return request.method === "GET" || request.method === "HEAD";
@@ -94,7 +123,7 @@ function hasAllowedOrigin(request: Request, requestUrl: URL): boolean {
       origin.pathname === "/" &&
       !origin.search &&
       !origin.hash &&
-      origin.origin === requestUrl.origin
+      origin.origin === incomingOrigin
     );
   } catch {
     return false;

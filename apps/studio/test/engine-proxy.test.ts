@@ -105,7 +105,7 @@ describe("engine proxy request boundary", () => {
           Accept: "application/json",
           Authorization: "Bearer browser-token",
           Cookie: "session=browser-cookie",
-          Host: "evil.example",
+          Host: "127.0.0.1:3000",
           Origin: "http://127.0.0.1:3000",
         },
       }),
@@ -328,6 +328,47 @@ describe("engine proxy origin policy", () => {
     );
     expect(response.status).toBe(200);
     expect(upstream.calls).toHaveLength(1);
+  });
+
+  it("uses a strict loopback Host authority when Next normalizes request.url", async () => {
+    const upstream = fetchReturning(new Response("ok"));
+    const response = await forwardEngineRequest(
+      request("http://localhost:3000/api/engine/api/v1/settings", {
+        method: "PATCH",
+        headers: {
+          Host: "127.0.0.1:3000",
+          Origin: "http://127.0.0.1:3000",
+          "Sec-Fetch-Site": "same-origin",
+        },
+      }),
+      ["api", "v1", "settings"],
+      { env: defaultEnv, fetchImpl: upstream.fetchImpl },
+    );
+
+    expect(response.status).toBe(200);
+    expect(upstream.calls).toHaveLength(1);
+  });
+
+  it.each([
+    ["evil.example", "http://localhost:3000"],
+    ["127.0.0.1:3000,evil.example", "http://localhost:3000"],
+    ["127.0.0.1:3000/path", "http://localhost:3000"],
+    ["user@127.0.0.1:3000", "http://localhost:3000"],
+    ["127.0.0.1:3001", "http://localhost:3000"],
+    ["127.0.0.1:3000", "http://localhost:3000"],
+  ])("rejects unsafe or mismatched Host authority %j", async (host, origin) => {
+    const upstream = vi.fn();
+    const response = await forwardEngineRequest(
+      request("http://localhost:3000/api/engine/api/v1/settings", {
+        method: "PATCH",
+        headers: { Host: host, Origin: origin, "Sec-Fetch-Site": "same-origin" },
+      }),
+      ["api", "v1", "settings"],
+      { env: defaultEnv, fetchImpl: upstream as unknown as typeof fetch },
+    );
+
+    await expectError(response, 403, "origin_forbidden");
+    expect(upstream).not.toHaveBeenCalled();
   });
 
   it.each(["cross-site", "same-site"])(
