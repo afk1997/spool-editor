@@ -20,6 +20,10 @@
     }
   },
   "queue_full": { "error": "queue_full", "retry_after": 1 },
+  "remote_reasoning_unavailable": {
+    "error": "remote_reasoning_unavailable",
+    "message": "Remote reasoning is unavailable in Phase 0 until a supported zero-tool transport ships."
+  },
   "agent_mutation_disabled": {
     "error": "agent_mutation_disabled",
     "message": "Agent changes are disabled until the Phase 4 approval and undo contract ships."

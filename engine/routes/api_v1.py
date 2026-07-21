@@ -489,7 +489,18 @@ def _validate_brand_kit(data, *, require_name: bool):
 # transport is Literal['stdio','sse','streamable-http']). stdio = the desktop-client default;
 # sse / streamable-http = headless / self-host.
 _MCP_TRANSPORTS = ("stdio", "sse", "streamable-http")
-_REASONING_PROVIDERS = ("none", "codex")
+_REASONING_PROVIDERS = ("none",)
+_REMOTE_REASONING_UNAVAILABLE = {
+    "error": "remote_reasoning_unavailable",
+    "message": (
+        "Remote reasoning is unavailable in Phase 0 until a supported "
+        "zero-tool transport ships."
+    ),
+}
+
+
+def _remote_reasoning_unavailable():
+    return jsonify(_REMOTE_REASONING_UNAVAILABLE), 409
 
 
 def _validate_settings(data):
@@ -500,6 +511,11 @@ def _validate_settings(data):
     bad = (jsonify({"error": "bad_settings"}), 400)
     if not isinstance(data, dict):
         return None, bad
+    if (
+        data.get("reasoning_provider") == "codex"
+        or data.get("reasoning_egress_consent") is True
+    ):
+        return None, _remote_reasoning_unavailable()
     clean: dict = {}
     for key, lo, hi in (("clip_workers", 1, 16), ("max_workers", 1, 16)):
         if data.get(key) is not None:
@@ -1669,15 +1685,11 @@ def _source_or_error(source_id):
 
 
 def _reasoning_preflight():
-    """Return a structured 409 before admitting work that requires remote reasoning."""
+    """Fail closed before admitting work that requires remote reasoning."""
     values = _settings().get()
     if values.get("offline") is True or _network_policy().offline:
         return jsonify({"error": "offline_network_disabled"}), 409
-    if values.get("reasoning_provider") != "codex":
-        return jsonify({"error": "reasoning_provider_required"}), 409
-    if values.get("reasoning_egress_consent") is not True:
-        return jsonify({"error": "egress_consent_required"}), 409
-    return None
+    return _remote_reasoning_unavailable()
 
 
 @api_v1_bp.post("/sources/<source_id>/moments")

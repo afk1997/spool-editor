@@ -2593,40 +2593,39 @@ def test_settings_clamps_numeric_and_rejects_bad_enums(client):
     # a non-bool for a bool field is a 400 (avoid bool("false") == True footguns)
     assert c.patch("/api/v1/settings", json={"fast_default": "yes"}).status_code == 400
     assert c.patch("/api/v1/settings", json={"reasoning_egress_consent": "yes"}).status_code == 400
-    assert c.patch("/api/v1/settings", json={"reasoning_egress_consent": True}).status_code == 400
+    unavailable = c.patch(
+        "/api/v1/settings", json={"reasoning_egress_consent": True}
+    )
+    assert unavailable.status_code == 409
+    assert unavailable.get_json() == PHASE0_CONTRACT["remote_reasoning_unavailable"]
     # the rejected writes left the store untouched
     assert c.get("/api/v1/settings").get_json()["default_preset"] == "tiktok"
 
 
-def test_reasoning_provider_and_consent_roundtrip_reset(client):
-    _, c = client
+def test_settings_reject_remote_reasoning_atomically(client):
+    app, c = client
+    store = app.extensions["trove.settings"]
+    before_values = store.get()
+    before_overrides = store.overrides()
 
-    enabled = c.patch("/api/v1/settings", json={
+    rejected = c.patch("/api/v1/settings", json={
         "reasoning_provider": "codex",
         "reasoning_egress_consent": True,
+        "fast_default": False,
     })
-    assert enabled.status_code == 200
-    assert enabled.get_json()["reasoning_egress_consent"] is True
-    assert os.environ["SPOOL_LLM_PROVIDER"] == "codex"
-    assert os.environ["SPOOL_LLM_EGRESS_CONSENT"] == "1"
-
-    disabled = c.patch("/api/v1/settings", json={"reasoning_provider": "none"})
-    assert disabled.get_json()["reasoning_egress_consent"] is False
+    assert rejected.status_code == 409
+    assert rejected.get_json() == PHASE0_CONTRACT["remote_reasoning_unavailable"]
+    assert store.get() == before_values
+    assert store.overrides() == before_overrides
     assert os.environ["SPOOL_LLM_PROVIDER"] == "none"
-    assert "SPOOL_LLM_EGRESS_CONSENT" not in os.environ
-
-    selected_again = c.patch("/api/v1/settings", json={"reasoning_provider": "codex"})
-    assert selected_again.get_json()["reasoning_egress_consent"] is False
-    assert os.environ["SPOOL_LLM_PROVIDER"] == "codex"
     assert "SPOOL_LLM_EGRESS_CONSENT" not in os.environ
 
 
 def test_failed_settings_persistence_does_not_change_runtime_state(client, monkeypatch):
     app, c = client
-    enabled = c.patch("/api/v1/settings", json={
-        "reasoning_provider": "codex",
-        "reasoning_egress_consent": True,
-    }).get_json()
+    enabled = c.patch(
+        "/api/v1/settings", json={"fast_default": False}
+    ).get_json()
     store = app.extensions["trove.settings"]
     policy = app.extensions["trove.network_policy"]
     settings_path = Path(store.path)
@@ -2647,8 +2646,8 @@ def test_failed_settings_persistence_does_not_change_runtime_state(client, monke
     assert Path(store.path).read_bytes() == before_file
     from settings import SettingsStore
     assert SettingsStore(store.path).get() == enabled
-    assert os.environ["SPOOL_LLM_PROVIDER"] == "codex"
-    assert os.environ["SPOOL_LLM_EGRESS_CONSENT"] == "1"
+    assert os.environ["SPOOL_LLM_PROVIDER"] == "none"
+    assert "SPOOL_LLM_EGRESS_CONSENT" not in os.environ
     assert "SPOOL_OFFLINE" not in os.environ
 
 
@@ -2961,19 +2960,17 @@ def test_source_signal_endpoints_forward_explicit_cache_policy(client, tmp_path,
 
 # ---- agent: NL → bounded ReAct tool-loop over the full /api/v1 surface ----
 
-def _enable_reasoning(c):
-    response = c.patch("/api/v1/settings", json={
-        "reasoning_provider": "codex",
-        "reasoning_egress_consent": True,
-    })
-    assert response.status_code == 200
+def _allow_reasoning_for_route_unit(monkeypatch):
+    """Exercise post-preflight response shaping without exposing a production path."""
+    import routes.api_v1 as api_v1
+
+    monkeypatch.setattr(api_v1, "_reasoning_preflight", lambda: None)
 
 
 @pytest.mark.parametrize(
     ("privacy_state", "expected_error"),
     [
-        ("provider-none", "reasoning_provider_required"),
-        ("consent-missing", "egress_consent_required"),
+        ("unavailable", "remote_reasoning_unavailable"),
         ("offline", "offline_network_disabled"),
     ],
 )
@@ -2984,12 +2981,7 @@ def test_agent_route_rejects_privacy_state_before_client_or_provider_work(
     import trove_client
 
     app, c = client
-    if privacy_state == "consent-missing":
-        assert c.patch(
-            "/api/v1/settings", json={"reasoning_provider": "codex"}
-        ).status_code == 200
-    elif privacy_state == "offline":
-        _enable_reasoning(c)
+    if privacy_state == "offline":
         assert c.patch("/api/v1/settings", json={"offline": True}).status_code == 200
 
     calls = []
@@ -3009,7 +3001,10 @@ def test_agent_route_rejects_privacy_state_before_client_or_provider_work(
     response = c.post("/api/v1/agent", json={"message": "what is queued?"})
 
     assert response.status_code == 409
-    assert response.get_json() == {"error": expected_error}
+    if expected_error == "remote_reasoning_unavailable":
+        assert response.get_json() == PHASE0_CONTRACT[expected_error]
+    else:
+        assert response.get_json() == {"error": expected_error}
     assert calls == []
     assert app.extensions["trove.network_policy"].active_leases == 0
 
@@ -3018,7 +3013,7 @@ def test_agent_route_threads_the_app_policy_and_live_settings_getter(client, mon
     import clip.agent as clip_agent
 
     app, c = client
-    _enable_reasoning(c)
+    _allow_reasoning_for_route_unit(monkeypatch)
     captured = {}
 
     def fake_run(message, **kwargs):
@@ -3049,7 +3044,7 @@ def test_agent_route_surfaces_last_moment_privacy_denials_as_exact_409(
     from clip import llm
 
     _, c = client
-    _enable_reasoning(c)
+    _allow_reasoning_for_route_unit(monkeypatch)
     monkeypatch.setattr(
         clip_agent,
         "run_agent",
@@ -3062,83 +3057,18 @@ def test_agent_route_surfaces_last_moment_privacy_denials_as_exact_409(
     assert response.get_json() == {"error": expected_code}
 
 
-def test_active_reasoning_lease_blocks_offline_persistence_until_completion(
-    client, tmp_path, monkeypatch,
-):
-    from clip import llm
-
+def test_rejected_reasoning_settings_never_acquire_a_network_lease(client):
     app, c = client
-    _enable_reasoning(c)
     policy = app.extensions["trove.network_policy"]
-    settings = app.extensions["trove.settings"]
-    entered = threading.Event()
-    release = threading.Event()
-    outcomes = []
-    auth_home = tmp_path / "codex-auth"
-    auth_home.mkdir()
-    (auth_home / "auth.json").write_text('{"auth_mode":"chatgpt"}')
-    monkeypatch.setenv("CODEX_HOME", str(auth_home))
 
-    def reviewed_probe(_binary, *, args, env):
-        if args == ("--version",):
-            return 0, f"{llm._CODEX_REVIEWED_VERSION}\n", ""
-        output = "\n".join(
-            (
-                f"{name} removed true"
-                if name == "tui_app_server"
-                else f"{name} stable false"
-            )
-            for name in llm._CODEX_DISABLED_FEATURES
-        )
-        return 0, f"{output}\n", ""
+    response = c.patch(
+        "/api/v1/settings",
+        json={"reasoning_provider": "codex", "reasoning_egress_consent": True},
+    )
 
-    class BlockingCodexProcess:
-        returncode = 0
-
-        def __init__(self, argv, **kwargs):
-            self.argv = argv
-
-        def communicate(self, input=None, timeout=None):
-            assert policy.active_leases == 1
-            entered.set()
-            assert release.wait(2), "reasoning completion was not released"
-            Path(self.argv[self.argv.index("-o") + 1]).write_text("ok")
-            return "", ""
-
-        def poll(self):
-            return self.returncode
-
-    monkeypatch.setattr(llm.shutil, "which", lambda _bin: "/usr/local/bin/codex")
-    monkeypatch.setattr(llm, "_run_codex_probe", reviewed_probe)
-    monkeypatch.setattr(llm.subprocess, "Popen", BlockingCodexProcess)
-
-    def complete():
-        try:
-            outcomes.append(llm.complete(
-                "transcript",
-                provider="codex",
-                network_policy=policy,
-                privacy_state=settings.get,
-            ))
-        except BaseException as exc:  # pragma: no cover - asserted below
-            outcomes.append(exc)
-
-    worker = threading.Thread(target=complete)
-    worker.start()
-    assert entered.wait(2), "reasoning lease was not acquired"
-
-    blocked = c.patch("/api/v1/settings", json={"offline": True})
-    assert blocked.status_code == 409
-    assert blocked.get_json() == {"error": "network_work_active"}
-    assert settings.get()["offline"] is False
-    assert "SPOOL_OFFLINE" not in os.environ
-
-    release.set()
-    worker.join(2)
-    assert not worker.is_alive()
-    assert outcomes == ["ok"]
+    assert response.status_code == 409
+    assert response.get_json() == PHASE0_CONTRACT["remote_reasoning_unavailable"]
     assert policy.active_leases == 0
-    assert c.patch("/api/v1/settings", json={"offline": True}).status_code == 200
 
 def test_agent_route_shapes_loop_result(client, monkeypatch):
     # The route drives clip.agent.run_agent and returns its reply + real tool trace + jobs.
@@ -3153,7 +3083,7 @@ def test_agent_route_shapes_loop_result(client, monkeypatch):
 
     monkeypatch.setattr(clip_agent, "run_agent", fake_run)
     _, c = client
-    _enable_reasoning(c)
+    _allow_reasoning_for_route_unit(monkeypatch)
     r = c.post("/api/v1/agent", json={"message": "what's in the queue?"})
     assert r.status_code == 200
     b = r.get_json()
@@ -3168,7 +3098,7 @@ def test_agent_route_clarify_carries_kind(client, monkeypatch):
         "action": "clarify", "reply": "Which one?", "question": "Which source?",
         "options": ["a", "b"], "kind": "enum", "tools": [], "jobs": []})
     _, c = client
-    _enable_reasoning(c)
+    _allow_reasoning_for_route_unit(monkeypatch)
     b = c.post("/api/v1/agent", json={"message": "clip it"}).get_json()
     assert b["action"] == "clarify" and b["question"] == "Which source?"
     assert b["options"] == ["a", "b"] and b["kind"] == "enum"
@@ -3184,7 +3114,7 @@ def test_agent_route_returns_exact_mutation_disabled_envelope(client, monkeypatc
 
     monkeypatch.setattr(clip_agent, "run_agent", disabled)
     _, c = client
-    _enable_reasoning(c)
+    _allow_reasoning_for_route_unit(monkeypatch)
     r = c.post("/api/v1/agent", json={
         "message": "delete my recipe",
         "confirm_tool": "delete_recipe",
@@ -3205,7 +3135,7 @@ def test_agent_route_returns_exact_remote_tools_disabled_envelope(client, monkey
         lambda *_args, **_kwargs: {"error": "remote_agent_tools_disabled"},
     )
     _, c = client
-    _enable_reasoning(c)
+    _allow_reasoning_for_route_unit(monkeypatch)
 
     response = c.post("/api/v1/agent", json={"message": "inspect my queue"})
 
@@ -3227,7 +3157,7 @@ def test_agent_route_does_not_append_source_id_when_remote_transcript_is_missing
 
     monkeypatch.setattr(clip_agent, "run_agent", fake_run)
     _, c = client
-    _enable_reasoning(c)
+    _allow_reasoning_for_route_unit(monkeypatch)
 
     response = c.post(
         "/api/v1/agent",
@@ -3253,7 +3183,7 @@ def test_agent_route_llm_unavailable_503(client, monkeypatch):
         raise llm.ProviderUnavailableError("missing")
     monkeypatch.setattr(clip_agent, "run_agent", boom)
     _, c = client
-    _enable_reasoning(c)
+    _allow_reasoning_for_route_unit(monkeypatch)
     assert c.post("/api/v1/agent", json={"message": "hi"}).status_code == 503
 
 
@@ -3320,10 +3250,7 @@ def test_pipeline_unknown_recipe_404(client, tmp_path):
 def test_produce_endpoint_submits_a_produce_job(client, tmp_path, monkeypatch):
     monkeypatch.setattr("clip.moments.find_moments", lambda *a, **k: [])
     app, c = client
-    assert c.patch("/api/v1/settings", json={
-        "reasoning_provider": "codex",
-        "reasoning_egress_consent": True,
-    }).status_code == 200
+    _allow_reasoning_for_route_unit(monkeypatch)
     _seed_done_transcript(app, tmp_path, words_data=_editable_words())   # source "abc"
     rid = c.post("/api/v1/recipes", json={"name": "R", "content_mode": "funny", "count": 3}).get_json()["id"]
     r = c.post("/api/v1/sources/abc/produce", json={"recipe_id": rid})
@@ -3361,10 +3288,7 @@ def test_produce_inline_recipe_whitelists_keys_into_recipe(client, tmp_path, mon
     # whitelisted (valid) keys reach produce_target and a junk key is dropped.
     monkeypatch.setattr("clip.moments.find_moments", lambda *a, **k: [])
     app, c = client
-    assert c.patch("/api/v1/settings", json={
-        "reasoning_provider": "codex",
-        "reasoning_egress_consent": True,
-    }).status_code == 200
+    _allow_reasoning_for_route_unit(monkeypatch)
     _seed_done_transcript(app, tmp_path, words_data=_editable_words())   # source "abc"
     captured = {}
     real = app.extensions["trove.clip_runner"].produce_target
