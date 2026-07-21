@@ -2383,17 +2383,17 @@ def patch_settings():
 @api_v1_bp.post("/agent")
 @token_required
 def agent_message():
-    """The studio Agent panel's turn: a NL message (+ optional source context) driven through a
-    bounded ReAct TOOL-LOOP (clip.agent.run_agent) over the SAME /api/v1 tool catalog the UI, MCP,
-    and CLI use (the golden rule). Phase 0 exposes only the explicit read-only inspection allowlist;
-    manual Studio, direct REST, and CLI mutations remain available.
+    """The studio Agent panel's remote turn: a NL message plus optional transcript text.
+    Codex receives no local tool catalog and cannot inspect application state. The
+    read-only tool loop remains available only to explicitly non-egress injected
+    providers outside this production Codex route; manual Studio, direct REST, CLI,
+    and MCP behavior is unchanged.
 
     Body: ``{message, source_id?, confirm_tool?}``. Returns ``{reply, action, jobs[], tools[],
-    question?, options?, kind?}`` — ``tools`` is the real per-step tool trace, ``jobs`` any jobs
-    observed this turn, and a ``clarify`` action carries the question/options/kind for the studio's
-    elicitation card. ``confirm_tool`` remains accepted as inert compatibility baggage and cannot
-    enable a write. Blocks while the loop runs (each step is an LLM call), so the client shows a
-    thinking state."""
+    question?, options?, kind?}`` — remote turns always return empty ``tools`` and
+    ``jobs``. A ``clarify`` action carries question/options/kind for the studio's
+    elicitation card. ``confirm_tool`` remains accepted as inert compatibility baggage
+    and cannot enable a write."""
     from clip import agent as clip_agent, llm as clip_llm, moments as clip_moments
     from trove_client import TroveClient
 
@@ -2417,11 +2417,9 @@ def agent_message():
                 lines = clip_moments._transcript_lines(transcript_io.load(words_path), None)
             except (OSError, ValueError):
                 lines = None
-        if lines is None:
-            message = f"{message}\n\n(Context: source_id={source_id})"
 
-    # A TroveClient pointed at THIS engine (env TROVE_URL/TROVE_TOKEN, else the local default) — the
-    # agent's tools drive the same HTTP surface as every other client, so nothing can diverge.
+    # Retained for the explicitly non-egress injection path: its allowed reads use the
+    # same HTTP surface as every other client. Production Codex never invokes it.
     client = TroveClient()
     try:
         result = clip_agent.run_agent(
@@ -2446,6 +2444,12 @@ def agent_message():
             "error": "agent_mutation_disabled",
             "message": result.get("message")
             or "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
+        }), 409
+    if result.get("error") == "remote_agent_tools_disabled":
+        return jsonify({
+            "error": "remote_agent_tools_disabled",
+            "message": result.get("message")
+            or clip_agent.REMOTE_AGENT_TOOLS_DISABLED_ERROR["message"],
         }), 409
 
     resp = {"reply": result.get("reply", ""), "action": result.get("action", "reply"),

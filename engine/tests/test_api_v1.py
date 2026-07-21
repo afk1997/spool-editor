@@ -3195,6 +3195,52 @@ def test_agent_route_returns_exact_mutation_disabled_envelope(client, monkeypatc
     assert captured["confirmed_tool"] == "delete_recipe"
 
 
+def test_agent_route_returns_exact_remote_tools_disabled_envelope(client, monkeypatch):
+    import clip.agent as clip_agent
+
+    expected = PHASE0_CONTRACT["remote_agent_tools_disabled"]
+    monkeypatch.setattr(
+        clip_agent,
+        "run_agent",
+        lambda *_args, **_kwargs: {"error": "remote_agent_tools_disabled"},
+    )
+    _, c = client
+    _enable_reasoning(c)
+
+    response = c.post("/api/v1/agent", json={"message": "inspect my queue"})
+
+    assert response.status_code == 409
+    assert response.get_json() == expected
+
+
+def test_agent_route_does_not_append_source_id_when_remote_transcript_is_missing(
+    client, monkeypatch,
+):
+    import clip.agent as clip_agent
+
+    captured = {}
+
+    def fake_run(message, *, transcript_lines=None, **kwargs):
+        captured["message"] = message
+        captured["transcript_lines"] = transcript_lines
+        return {"action": "reply", "reply": "ok", "tools": [], "jobs": []}
+
+    monkeypatch.setattr(clip_agent, "run_agent", fake_run)
+    _, c = client
+    _enable_reasoning(c)
+
+    response = c.post(
+        "/api/v1/agent",
+        json={"message": "summarize it", "source_id": "private-local-source-id"},
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "message": "summarize it",
+        "transcript_lines": None,
+    }
+
+
 def test_agent_route_missing_message_400(client):
     _, c = client
     assert c.post("/api/v1/agent", json={}).status_code == 400

@@ -1,13 +1,13 @@
 """Natural-language clip assistant — the studio Agent panel's brain (spec §2 agent mode).
 
-Maps a user chat message (+ the source transcript) to ONE structured action via the
-pluggable LLM provider (default: the codex bridge), which the engine then executes with
-the very same clip tools the UI uses (the golden rule). A ``clarify`` action is the spec's
-**elicitation** — surfaced in the studio as an inline card rather than a blocking prompt.
+Maps a user chat message (+ optional transcript text) through the pluggable LLM layer.
+Remote providers such as Codex are strictly text-only: they receive no local tool catalog
+and can never dispatch or observe a local tool. Explicitly non-egress injected providers
+retain the Phase 0 read-only inspection loop over the same API surface the UI uses.
 
-This module only *plans* (LLM call + parse → action dict); the api_v1 ``/agent`` route
-*executes* (submits clip jobs via the ClipJobManager). Pure + provider-injectable, so it's
-unit-testable with the LLM mocked — no codex needed in tests.
+The legacy :func:`plan` helper only parses a single structured action. :func:`run_agent`
+owns the text-only remote path and the separately gated local inspection loop. Both are
+provider-injectable, so they are unit-testable with the LLM mocked — no Codex required.
 """
 from __future__ import annotations
 
@@ -141,14 +141,13 @@ def _normalize(data: dict | None, *, fallback: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Tool-using agent (the studio Agent panel's real brain) — a bounded ReAct loop
+# Tool-using agent for explicitly non-egress providers — a bounded ReAct loop
 # ---------------------------------------------------------------------------
-# The single-shot `plan` above only knows 4 actions. `run_agent` instead drives the FULL shared
-# tool catalog (clip.agent_tools → the same /api/v1 surface the UI/MCP/CLI use, the golden rule):
-# each step the model emits ONE JSON object — a tool call, a clarify, or a final reply — the engine
-# executes the tool against the real API, feeds the (truncated) result back, and loops until the
-# model finishes or the step budget runs out. The LLM bridge is stateless single-shot, so we
-# re-send the accumulated step transcript each call.
+# The single-shot `plan` above only knows 4 actions. For an explicitly non-egress provider,
+# `run_agent` drives the shared read-only catalog (clip.agent_tools → the same /api/v1 surface
+# the UI/MCP/CLI use). Each step emits one tool/clarify/final JSON object; the engine executes
+# an allowed read, feeds back a bounded observation, and loops. Egress providers branch away
+# before this protocol and never receive the catalog or an observation.
 
 from . import agent_tools  # noqa: E402  (kept next to run_agent for locality)
 
@@ -177,16 +176,32 @@ _LOOP_SYSTEM = (
     "TOOLS:\n" + agent_tools.catalog_prompt()
 )
 
+_REMOTE_SYSTEM = (
+    "You are Spool's text-only clip assistant. Answer using only the user's message and "
+    "any transcript context included in the prompt. You have no access to local files, "
+    "sources, queues, watches, models, storage, application state, or local tools. Never "
+    "claim that you inspected local state. If the requested fact is not present in the "
+    "provided text, explain that you cannot inspect it. Reply in plain text and do not "
+    "emit a tool call or a JSON tool request."
+)
+
+REMOTE_AGENT_TOOLS_DISABLED_ERROR = {
+    "error": "remote_agent_tools_disabled",
+    "message": (
+        "Remote Agent tools are disabled. Codex receives only your message and "
+        "attached transcript text; it cannot inspect local app state."
+    ),
+}
+
 
 def _default_agent_provider(
     env: dict | None,
     network_policy: NetworkPolicy | None,
     privacy_state: llm.PrivacyState | None,
 ):
-    """The agent reasons OVER tool results (not just extracts), so it needs more reasoning effort
-    than moment-finding's "low" default. Give the codex bridge a higher effort (``SPOOL_AGENT_REASONING``,
-    default "medium"); for any non-codex configured provider, return None so ``llm.complete`` resolves
-    it normally. Returns an LLMProvider instance or None."""
+    """Give the text-only Codex assistant more conversational reasoning effort than
+    moment extraction (``SPOOL_AGENT_REASONING``, default ``medium``). For any
+    non-Codex configured provider, return None so the normal resolver handles it."""
     e = env if env is not None else os.environ
     name = (e.get("SPOOL_LLM_PROVIDER") or llm.DEFAULT_PROVIDER).lower()
     if name == "codex":
@@ -218,6 +233,68 @@ def _short_arg(args: dict) -> str:
         sv = json.dumps(v, default=str) if not isinstance(v, str) else v
         bits.append(f"{k}={sv[:24]}")
     return "· " + " ".join(bits)
+
+
+def _provider_is_explicitly_non_egress(provider) -> bool:
+    """Only the literal singleton False grants access to the local tool loop."""
+    try:
+        return getattr(provider, "egress", True) is False
+    except Exception:
+        return False
+
+
+def _json_requests_tool(value) -> bool:
+    if isinstance(value, dict):
+        if "tool" in value:
+            return True
+        return any(_json_requests_tool(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_json_requests_tool(item) for item in value)
+    return False
+
+
+def _remote_result(raw: str) -> dict:
+    parsed = _parse_obj(raw)
+    if _json_requests_tool(parsed):
+        return dict(REMOTE_AGENT_TOOLS_DISABLED_ERROR)
+
+    if isinstance(parsed, dict) and isinstance(parsed.get("final"), dict):
+        reply = str(parsed["final"].get("reply") or "").strip()
+        return _finish(reply or "Done.", [], [])
+    if isinstance(parsed, dict) and parsed.get("action") == "reply":
+        return _finish(str(parsed.get("reply") or "Done.").strip(), [], [])
+    if isinstance(parsed, dict) and (
+        "clarify" in parsed or parsed.get("action") == "clarify"
+    ):
+        clarification = (
+            parsed.get("clarify")
+            if isinstance(parsed.get("clarify"), dict)
+            else parsed
+        )
+        options = clarification.get("options") or []
+        question = str(
+            clarification.get("question")
+            or clarification.get("reply")
+            or "Could you clarify?"
+        )
+        return {
+            "action": "clarify",
+            "reply": str(clarification.get("reply") or question),
+            "question": question,
+            "options": (
+                [str(option) for option in options if str(option).strip()]
+                if isinstance(options, list)
+                else []
+            ),
+            "kind": (
+                clarification.get("kind")
+                if clarification.get("kind") in ("enum", "confirm", "multiselect")
+                else "enum"
+            ),
+            "tools": [],
+            "jobs": [],
+        }
+    return _finish((raw or "").strip()[:800] or "Done.", [], [])
 
 
 def _complete_with_retry(
@@ -267,11 +344,11 @@ def run_agent(
     max_steps: int = _MAX_STEPS,
     confirmed_tool: "str | None" = None,
 ) -> dict:
-    """Run a bounded ReAct tool-loop for one user message. ``client`` is a TroveClient pointed at
-    the engine (so tools hit the SAME /api/v1 surface as the UI). ``elapsed`` is an optional
-    ``() -> float`` ms clock for trace timing (injectable for tests). ``confirmed_tool`` remains an
-    accepted compatibility argument, but Phase 0 treats it as inert: no confirmation can bypass the
-    read-only mutation fuse. Returns
+    """Run one text-only completion for an egress provider or a bounded read-only
+    ReAct loop for an explicitly non-egress provider. ``client`` is used only by the
+    latter. ``elapsed`` is an optional ``() -> float`` ms clock for trace timing.
+    ``confirmed_tool`` remains accepted compatibility baggage, but Phase 0 treats it
+    as inert: no confirmation can bypass the read-only mutation fuse. Returns
     ``{reply, action, jobs[], tools[], question?, options?, kind?, pending?}``. Propagates
     OfflineError always, and ProviderUnavailableError / RuntimeError when no tools have run yet
     (a setup problem); mid-loop transient failures after at least one tool ran are retried once
@@ -279,11 +356,29 @@ def run_agent(
     clock = elapsed or (lambda: time.monotonic() * 1000.0)
     if provider is None:                              # default the in-app agent to higher reasoning
         provider = _default_agent_provider(env, network_policy, privacy_state)
+    provider = llm.get_provider(
+        provider,
+        env=env,
+        network_policy=network_policy,
+        privacy_state=privacy_state,
+    )
 
     transcript = [f"User: {message.strip()}"]
     if transcript_lines:
         body = "\n".join(f"[{s:.2f}–{e:.2f}] {t}" for s, e, t in transcript_lines)
         transcript.append("Transcript context (each line [start–end seconds] text):\n\n" + body)
+
+    if not _provider_is_explicitly_non_egress(provider):
+        prompt = "\n\n".join(transcript)
+        raw = _complete_with_retry(
+            prompt,
+            system=_REMOTE_SYSTEM,
+            provider=provider,
+            env=env,
+            network_policy=network_policy,
+            privacy_state=privacy_state,
+        )
+        return _remote_result(raw)
 
     tools_trace: list[dict] = []
     jobs: list[dict] = []
@@ -340,6 +435,8 @@ def run_agent(
         args = step.get("args") if isinstance(step.get("args"), dict) else {}
         t0 = clock()
         try:
+            if not _provider_is_explicitly_non_egress(provider):
+                return dict(REMOTE_AGENT_TOOLS_DISABLED_ERROR)
             result = tool.run(client, args)
             ok = True
         except Exception as e:                               # surface tool errors to the model, keep going

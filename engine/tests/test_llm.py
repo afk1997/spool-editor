@@ -728,6 +728,46 @@ def test_complete_allows_local_provider_when_offline():
     assert llm.complete("hi", provider=local, env={"SPOOL_OFFLINE": "1"}) == "ok"
 
 
+@pytest.mark.parametrize(
+    "egress_metadata",
+    ["missing", None, 0, "false", "property-error"],
+)
+def test_complete_rejects_invalid_egress_metadata_before_provider_call_offline(
+    egress_metadata,
+):
+    calls = []
+
+    class Provider:
+        name = "opaque"
+
+        def complete(self, prompt, *, system=None):
+            calls.append((prompt, system))
+            return "unsafe"
+
+    if egress_metadata == "property-error":
+        class ProviderWithBrokenMetadata(Provider):
+            @property
+            def egress(self):
+                raise RuntimeError("metadata unavailable")
+
+        provider = ProviderWithBrokenMetadata()
+    else:
+        provider = Provider()
+        if egress_metadata != "missing":
+            provider.egress = egress_metadata
+
+    with pytest.raises(llm.ProviderUnavailableError, match="egress metadata"):
+        llm.complete(
+            "private transcript",
+            provider=provider,
+            env={"SPOOL_OFFLINE": "1"},
+            network_policy=NetworkPolicy(offline=True),
+            privacy_state=lambda: _privacy(offline=True),
+        )
+
+    assert calls == []
+
+
 def test_callable_provider_forwards_prompt_and_system():
     seen = {}
 

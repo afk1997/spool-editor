@@ -150,6 +150,256 @@ def test_loop_step_budget_forces_a_final(monkeypatch):
     assert out["action"] == "reply"
 
 
+# ---- egress providers are text-only and can never observe local tools ----
+
+REMOTE_TOOLS_DISABLED = {
+    "error": "remote_agent_tools_disabled",
+    "message": (
+        "Remote Agent tools are disabled. Codex receives only your message and "
+        "attached transcript text; it cannot inspect local app state."
+    ),
+}
+
+
+def test_egress_provider_cannot_run_list_watches_or_receive_private_targets(
+    monkeypatch,
+):
+    private_path = "/Users/alice/Private/Unreleased"
+    completions = []
+
+    class EgressProvider:
+        name = "remote-spy"
+        egress = True
+
+    class PrivateClient:
+        def __init__(self):
+            self.calls = []
+
+        def list_watches(self):
+            self.calls.append("list_watches")
+            return {"watches": [{"id": "w1", "target": private_path}]}
+
+    def complete(prompt, **kwargs):
+        completions.append((prompt, kwargs["system"]))
+        return json.dumps({"tool": "list_watches", "args": {}})
+
+    client = PrivateClient()
+    monkeypatch.setattr(agent, "_complete_with_retry", complete)
+
+    out = agent.run_agent(
+        "what am I watching?",
+        client=client,
+        transcript_lines=[(1.0, 2.0, "private transcript words")],
+        provider=EgressProvider(),
+        max_steps=1,
+    )
+
+    assert out == REMOTE_TOOLS_DISABLED
+    assert client.calls == []
+    assert len(completions) == 1
+    prompt, system = completions[0]
+    assert prompt == (
+        "User: what am I watching?\n\n"
+        "Transcript context (each line [start–end seconds] text):\n\n"
+        "[1.00–2.00] private transcript words"
+    )
+    assert private_path not in prompt
+    assert "TOOLS:" not in system
+    assert not any(f"- {name}(" in system for name in agent_tools.READ_ONLY_TOOLS)
+    assert "Tool result" not in prompt
+
+
+@pytest.mark.parametrize("tool_name", ["list_jobs", "hallucinated_local_tool"])
+def test_egress_provider_known_or_unknown_tool_json_returns_stable_error(
+    monkeypatch, tool_name,
+):
+    calls = []
+
+    class EgressProvider:
+        name = "remote"
+        egress = True
+
+    monkeypatch.setattr(
+        agent,
+        "_complete_with_retry",
+        lambda *_args, **_kwargs: json.dumps({"tool": tool_name, "args": {}}),
+    )
+
+    out = agent.run_agent(
+        "inspect local state",
+        client=type("Client", (), {"list_jobs": lambda self, **kwargs: calls.append(kwargs)})(),
+        provider=EgressProvider(),
+        max_steps=1,
+    )
+
+    assert out == REMOTE_TOOLS_DISABLED
+    assert calls == []
+
+
+def test_egress_provider_nested_tool_json_returns_stable_error(monkeypatch):
+    provider = llm.CallableProvider(
+        lambda *_args, **_kwargs: "unused",
+        name="remote",
+        egress=True,
+    )
+    monkeypatch.setattr(
+        agent,
+        "_complete_with_retry",
+        lambda *_args, **_kwargs: '{"final":{"tool":"list_jobs","args":{}}}',
+    )
+
+    assert agent.run_agent("inspect", client=_FakeClient(), provider=provider) == (
+        REMOTE_TOOLS_DISABLED
+    )
+
+
+@pytest.mark.parametrize("egress_value", [None, 0, "false", object()])
+def test_missing_or_invalid_egress_metadata_fails_closed_to_no_tools(
+    monkeypatch, egress_value,
+):
+    class Provider:
+        name = "untrusted-provider"
+
+    provider = Provider()
+    if egress_value is not None:
+        provider.egress = egress_value
+    client = _FakeClient()
+    completions = []
+
+    def complete(prompt, **kwargs):
+        completions.append(prompt)
+        return '{"tool":"list_jobs","args":{}}'
+
+    monkeypatch.setattr(agent, "_complete_with_retry", complete)
+
+    out = agent.run_agent("list sources", client=client, provider=provider)
+
+    assert out == REMOTE_TOOLS_DISABLED
+    assert client.calls == []
+    assert len(completions) == 1
+
+
+def test_egress_metadata_flip_is_guarded_immediately_before_tool_run(monkeypatch):
+    class FlippingProvider:
+        name = "local-until-completion"
+        egress = False
+
+    provider = FlippingProvider()
+    client = _FakeClient()
+
+    def complete(*_args, **_kwargs):
+        provider.egress = True
+        return '{"tool":"list_jobs","args":{}}'
+
+    monkeypatch.setattr(agent, "_complete_with_retry", complete)
+
+    out = agent.run_agent("list sources", client=client, provider=provider)
+
+    assert out == REMOTE_TOOLS_DISABLED
+    assert client.calls == []
+
+
+def test_egress_property_failure_fails_closed_to_text_only(monkeypatch):
+    class BrokenMetadataProvider:
+        name = "broken-metadata"
+
+        @property
+        def egress(self):
+            raise RuntimeError("metadata unavailable")
+
+    client = _FakeClient()
+    monkeypatch.setattr(
+        agent,
+        "_complete_with_retry",
+        lambda *_args, **_kwargs: '{"tool":"list_jobs","args":{}}',
+    )
+
+    out = agent.run_agent(
+        "list sources",
+        client=client,
+        provider=BrokenMetadataProvider(),
+    )
+
+    assert out == REMOTE_TOOLS_DISABLED
+    assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            '{"final":{"reply":"Only the supplied transcript is available."}}',
+            {
+                "action": "reply",
+                "reply": "Only the supplied transcript is available.",
+                "tools": [],
+                "jobs": [],
+            },
+        ),
+        (
+            '{"clarify":{"question":"Which passage?","options":["intro","outro"],"kind":"enum"}}',
+            {
+                "action": "clarify",
+                "reply": "Which passage?",
+                "question": "Which passage?",
+                "options": ["intro", "outro"],
+                "kind": "enum",
+                "tools": [],
+                "jobs": [],
+            },
+        ),
+    ],
+)
+def test_egress_provider_supports_final_and_clarify_without_a_second_call(
+    monkeypatch, raw, expected,
+):
+    calls = []
+    provider = llm.CallableProvider(
+        lambda *_args, **_kwargs: "unused",
+        name="remote-test",
+        egress=True,
+    )
+
+    def complete(*_args, **_kwargs):
+        calls.append(1)
+        return raw
+
+    monkeypatch.setattr(agent, "_complete_with_retry", complete)
+
+    assert agent.run_agent("help", client=_FakeClient(), provider=provider) == expected
+    assert calls == [1]
+
+
+def test_egress_provider_transient_retry_reuses_the_same_text_only_payload(monkeypatch):
+    provider = llm.CallableProvider(
+        lambda *_args, **_kwargs: "unused",
+        name="remote-test",
+        egress=True,
+    )
+    payloads = []
+
+    def flaky_complete(prompt, **kwargs):
+        payloads.append((prompt, kwargs["system"]))
+        if len(payloads) == 1:
+            raise RuntimeError("temporary")
+        return "A text-only answer."
+
+    monkeypatch.setattr(agent.llm, "complete", flaky_complete)
+    monkeypatch.setattr(agent.time, "sleep", lambda _seconds: None)
+
+    out = agent.run_agent("hello", client=_FakeClient(), provider=provider)
+
+    assert out == {
+        "action": "reply",
+        "reply": "A text-only answer.",
+        "tools": [],
+        "jobs": [],
+    }
+    assert len(payloads) == 2
+    assert payloads[0] == payloads[1]
+    assert "TOOLS:" not in payloads[0][1]
+
+
 # ---- catalog parity: the agent can do everything the MCP/CLI client can ----
 
 def test_catalog_tools_map_to_real_troveclient_methods():

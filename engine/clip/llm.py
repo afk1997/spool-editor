@@ -1264,8 +1264,18 @@ def complete(
         network_policy=network_policy,
         privacy_state=privacy_state,
     )
-    if not getattr(p, "egress", False):
+    try:
+        egress = p.egress
+    except Exception as exc:
+        raise ProviderUnavailableError(
+            "LLM provider egress metadata must be the literal bool True or False"
+        ) from exc
+    if egress is False:
         return p.complete(prompt, system=system)
+    if egress is not True:
+        raise ProviderUnavailableError(
+            "LLM provider egress metadata must be the literal bool True or False"
+        )
 
     # Codex owns the direct boundary itself so even callers that invoke the provider
     # instance directly cannot bypass the live checks or the shared lease.
