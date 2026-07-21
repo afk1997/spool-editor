@@ -124,11 +124,11 @@ class JobManager:
         self.pending_capacity = pending_capacity(max_workers)
         self.ttl_seconds = ttl_seconds
         self._jobs: dict[str, Job] = {}
-        # Lock order is persistence mutex -> state lock. Lifecycle callers always
-        # release the state lock before entering _persist(), so concurrent writes
-        # cannot deadlock or replace a newer snapshot with an older one.
+        # Lock order is persistence mutex -> state lock. Lifecycle callers either
+        # release the state lock before entering _persist(), or acquire both in
+        # that order when a failed write must roll back an in-memory transaction.
         self._lock = threading.RLock()
-        self._persist_lock = threading.Lock()
+        self._persist_lock = threading.RLock()
         self._persist_dirty = False
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._pending_count = 0
@@ -491,29 +491,32 @@ class JobManager:
             return list(self._jobs.values())
 
     def cancel(self, job_id: str) -> bool:
-        cleanup_root = None
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                return False
-            if job.status in _TERMINAL_STATUSES:
-                return False
-            proc = job.process
-            self._ensure_download_staging_locked(job)
-            job._attempt += 1
-            job._was_paused = False
-            job.status = JobStatus.CANCELLED
-            if not job._worker_active:
-                cleanup_root = job._staging_root
-        if not self._persist():
-            raise RuntimeError("failed to persist download cancellation")
+        with self._persist_lock:
+            with self._lock:
+                job = self._jobs.get(job_id)
+                if job is None:
+                    return False
+                if job.status in _TERMINAL_STATUSES:
+                    return False
+                proc = job.process
+                cleanup_needed = not job._worker_active
+                before = (job.status, job._attempt, job._was_paused)
+                job._attempt += 1
+                job._was_paused = False
+                job.status = JobStatus.CANCELLED
+                if not self._persist():
+                    job.status, job._attempt, job._was_paused = before
+                    raise RuntimeError("failed to persist download cancellation")
         if proc is not None and hasattr(proc, "kill"):
             try:
                 proc.kill()
             except Exception:
                 pass
-        if cleanup_root is not None:
+        if cleanup_needed:
             try:
+                with self._lock:
+                    self._ensure_download_staging_locked(job)
+                    cleanup_root = job._staging_root
                 cleanup_attempt(cleanup_root)
             except Exception:
                 logging.getLogger(__name__).warning(

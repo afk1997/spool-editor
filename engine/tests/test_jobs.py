@@ -430,25 +430,38 @@ def test_cancel_paused_persists_before_best_effort_cleanup(tmp_path, monkeypatch
 
 
 def test_cancel_paused_persist_failure_raises_without_cleanup(tmp_path, monkeypatch):
-    """An undurable cancellation is an error and preserves resumable bytes."""
+    """An undurable cancellation rolls back and preserves a retryable pause."""
     import jobs
     import jobs_store
 
     store = tmp_path / "jobs.json"
+    legacy_root = tmp_path / "legacy"
+    legacy_root.mkdir()
     manager = JobManager(max_workers=1, ttl_seconds=60, store_path=store)
     paused = Job(
         id="paused-persist-failure",
         url="https://x",
         title="paused",
         status=JobStatus.PAUSED,
+        out_template=str(legacy_root / "paused.%(ext)s"),
     )
+    paused._attempt = 7
     paused._was_paused = True
     with manager._lock:
-        manager._ensure_download_staging_locked(paused)
         manager._jobs[paused.id] = paused
     partial = Path(paused.out_template.replace("%(ext)s", "mp4.part"))
     partial.write_bytes(b"resume-bytes")
     assert manager._persist() is True
+    before = {
+        name: getattr(paused, name)
+        for name in (
+            "status",
+            "_attempt",
+            "_was_paused",
+            "_staging_root",
+            "out_template",
+        )
+    }
 
     cleanup_calls = []
 
@@ -466,12 +479,88 @@ def test_cancel_paused_persist_failure_raises_without_cleanup(tmp_path, monkeypa
             manager.cancel(paused.id)
 
     assert cleanup_calls == []
+    assert {
+        name: getattr(manager.get(paused.id), name)
+        for name in before
+    } == before
     assert partial.read_bytes() == b"resume-bytes"
+
+    before_retry = JobManager(max_workers=1, ttl_seconds=60, store_path=store)
+    try:
+        assert before_retry.get(paused.id).status is JobStatus.PAUSED
+    finally:
+        before_retry.shutdown(wait=True)
+
+    assert manager.cancel(paused.id) is True
+    assert manager.get(paused.id).status is JobStatus.CANCELLED
+    assert not partial.exists()
+    manager.shutdown(wait=True)
+
+    after_retry = JobManager(max_workers=1, ttl_seconds=60, store_path=store)
+    try:
+        assert after_retry.get(paused.id).status is JobStatus.CANCELLED
+    finally:
+        after_retry.shutdown(wait=True)
+
+
+def test_cancel_active_persist_failure_restores_killable_state_and_retries(
+    tmp_path, monkeypatch,
+):
+    import jobs_store
+
+    store = tmp_path / "jobs.json"
+    manager = JobManager(max_workers=1, ttl_seconds=60, store_path=store)
+    killed = []
+
+    class Process:
+        def kill(self):
+            killed.append(True)
+
+    process = Process()
+    active = Job(
+        id="active-persist-failure",
+        url="https://x",
+        title="active",
+        status=JobStatus.DOWNLOADING,
+        process=process,
+    )
+    active._attempt = 11
+    active._worker_active = True
+    with manager._lock:
+        manager._ensure_download_staging_locked(active)
+        manager._jobs[active.id] = active
+    assert manager._persist() is True
+    before = {
+        name: getattr(active, name)
+        for name in ("status", "_attempt", "_was_paused", "process")
+    }
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            jobs_store,
+            "persist_atomic",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("forced persist failure")
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="persist download cancellation"):
+            manager.cancel(active.id)
+
+    assert {
+        name: getattr(manager.get(active.id), name)
+        for name in before
+    } == before
+    assert killed == []
+
+    assert manager.cancel(active.id) is True
+    assert manager.get(active.id).status is JobStatus.CANCELLED
+    assert killed == [True]
     manager.shutdown(wait=True)
 
     restarted = JobManager(max_workers=1, ttl_seconds=60, store_path=store)
     try:
-        assert restarted.get(paused.id).status is JobStatus.PAUSED
+        assert restarted.get(active.id).status is JobStatus.CANCELLED
     finally:
         restarted.shutdown(wait=True)
 
