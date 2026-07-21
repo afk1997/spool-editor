@@ -13,6 +13,7 @@ import signal
 import subprocess
 import time
 
+from job_capacity import QueueFullError
 from network_policy import NetworkPolicy, NetworkPolicyError
 
 _VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi")
@@ -222,6 +223,14 @@ _MAX_PRODUCE_ATTEMPTS = 3
 _MAX_INGEST_ATTEMPTS = 3
 
 
+class WatchReconcileQueueFull(QueueFullError):
+    """Capacity rejection carrying state for work admitted earlier this tick."""
+
+    def __init__(self, cause: QueueFullError, result: dict):
+        super().__init__(str(cause))
+        self.result = result
+
+
 def reconcile_watch(watch: dict, *, list_items, ingest, transcript_done, produce, produce_status) -> dict:
     """Advance ``watch`` one tick. Returns the new ``seen``/``pending``/``produced``/``producing``
     state plus this tick's ``ingested`` + ``produced_now`` source ids (for persistence + reporting).
@@ -262,6 +271,26 @@ def reconcile_watch(watch: dict, *, list_items, ingest, transcript_done, produce
     ingesting = dict(watch.get("ingesting") or {})
     ingested, produced_now = [], []
 
+    def result() -> dict:
+        return {
+            "seen": list(seen),
+            "pending": dict(pending),
+            "produced": list(produced),
+            "producing": {sid: dict(state) for sid, state in producing.items()},
+            "ingesting": dict(ingesting),
+            "ingested": list(ingested),
+            "produced_now": list(produced_now),
+        }
+
+    def admit(operation, *args):
+        try:
+            return operation(*args)
+        except QueueFullError as exc:
+            # Earlier admissions in this tick are already real side effects.
+            # Carry their matching state to the app so it can commit that state
+            # before preserving the typed 429 for the rejected admission.
+            raise WatchReconcileQueueFull(exc, result()) from exc
+
     # 1) detect + ingest new items. Only a SUCCESSFUL ingest (truthy sid) marks the item seen and
     #    moves it to ``pending``; a transient failure accrues in ``ingesting`` and is retried on
     #    later ticks instead of being dropped forever — bounded by _MAX_INGEST_ATTEMPTS so a
@@ -270,7 +299,7 @@ def reconcile_watch(watch: dict, *, list_items, ingest, transcript_done, produce
     for key in list_items(watch):
         if key in seen:
             continue
-        sid = ingest(watch, key)
+        sid = admit(ingest, watch, key)
         if sid:
             seen.append(key)                                  # successful ingest → never re-ingest
             pending[key] = sid
@@ -289,7 +318,7 @@ def reconcile_watch(watch: dict, *, list_items, ingest, transcript_done, produce
             pending.pop(key, None)
             continue
         if transcript_done(sid):
-            jid = produce(watch, sid)
+            jid = admit(produce, watch, sid)
             producing[sid] = {"job": jid, "attempts": 1}
             pending.pop(key, None)
 
@@ -302,7 +331,7 @@ def reconcile_watch(watch: dict, *, list_items, ingest, transcript_done, produce
             producing.pop(sid, None)
         elif status == "error":
             if int(st.get("attempts", 1)) < _MAX_PRODUCE_ATTEMPTS:
-                jid = produce(watch, sid)                    # retry: re-enqueue, bump the attempt count
+                jid = admit(produce, watch, sid)             # retry: re-enqueue, bump the attempt count
                 producing[sid] = {"job": jid, "attempts": int(st.get("attempts", 1)) + 1}
             else:
                 producing.pop(sid, None)                     # exhausted retries → give up (logged by caller)
@@ -310,5 +339,4 @@ def reconcile_watch(watch: dict, *, list_items, ingest, transcript_done, produce
             producing.pop(sid, None)                         # user cancelled → don't auto-retry
         # else queued / running / None (not yet visible) → still in flight; leave it for next tick.
 
-    return {"seen": seen, "pending": pending, "produced": produced, "producing": producing,
-            "ingesting": ingesting, "ingested": ingested, "produced_now": produced_now}
+    return result()

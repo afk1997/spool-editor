@@ -886,9 +886,29 @@ def create_app() -> Flask:
                 # Otherwise that poll can repopulate the cache between invalidation and
                 # lock acquisition, making "Scan now" consume the just-warmed entry.
                 watcher.invalidate_listing(fresh.get("target"))
-            r = watcher.reconcile_watch(fresh, list_items=_watch_items, ingest=_watch_ingest,
-                                        transcript_done=_watch_transcript_done, produce=_watch_produce,
-                                        produce_status=_watch_produce_status)
+            try:
+                r = watcher.reconcile_watch(
+                    fresh,
+                    list_items=_watch_items,
+                    ingest=_watch_ingest,
+                    transcript_done=_watch_transcript_done,
+                    produce=_watch_produce,
+                    produce_status=_watch_produce_status,
+                )
+            except watcher.WatchReconcileQueueFull as exc:
+                # An earlier item in this same scan may already have admitted
+                # real work. Persist its matching transition before preserving
+                # the exact typed 429 for the item that could not be admitted.
+                r = exc.result
+                watch_store.set_state(
+                    fresh["id"],
+                    seen=r["seen"],
+                    pending=r["pending"],
+                    produced=r["produced"],
+                    producing=r["producing"],
+                    ingesting=r["ingesting"],
+                )
+                raise
             watch_store.set_state(fresh["id"], seen=r["seen"], pending=r["pending"],
                                   produced=r["produced"], producing=r["producing"],
                                   ingesting=r["ingesting"])
