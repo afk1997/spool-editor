@@ -115,10 +115,11 @@ class ClipJobManager:
         self.pending_capacity = pending_capacity(max_workers)
         self.ttl_seconds = ttl_seconds
         self._jobs: dict[str, ClipJob] = {}
-        # _persist() takes the persistence mutex before this state lock.
-        # Lifecycle callers release the state lock before entering persistence.
+        # Lock order is persistence mutex -> state lock. Lifecycle callers either
+        # release the state lock before entering _persist(), or acquire both in
+        # that order when a failed write must roll back an in-memory transaction.
         self._lock = threading.RLock()
-        self._persist_lock = threading.Lock()
+        self._persist_lock = threading.RLock()
         self._persist_dirty = False
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._pending_count = 0
@@ -608,24 +609,40 @@ class ClipJobManager:
         return child_ids
 
     def cancel(self, jid: str) -> bool:
-        with self._lock:
-            j = self._jobs.get(jid)
-            if j is None:
-                return False
-            if j.status in {ClipStatus.DONE, ClipStatus.ERROR, ClipStatus.CANCELLED}:
-                return False
-            j._cancel_flag = True
-            j._attempt += 1
-            j.status = ClipStatus.CANCELLED
-            proc = j.process_handle
-            if not j._worker_active and j._staging_root:
-                cleanup_attempt(j._staging_root)
+        with self._persist_lock:
+            with self._lock:
+                j = self._jobs.get(jid)
+                if j is None:
+                    return False
+                if j.status in {
+                    ClipStatus.DONE,
+                    ClipStatus.ERROR,
+                    ClipStatus.CANCELLED,
+                }:
+                    return False
+                proc = j.process_handle
+                cleanup_root = j._staging_root if not j._worker_active else None
+                before = (j.status, j._attempt, j._cancel_flag)
+                j._cancel_flag = True
+                j._attempt += 1
+                j.status = ClipStatus.CANCELLED
+                if not self._persist():
+                    j.status, j._attempt, j._cancel_flag = before
+                    raise RuntimeError("failed to persist clip cancellation")
         if proc is not None and hasattr(proc, "kill"):
             try:
                 proc.kill()
             except Exception:
                 pass
-        self._persist()
+        if cleanup_root:
+            try:
+                cleanup_attempt(cleanup_root)
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "failed to clean cancelled clip %s",
+                    jid,
+                    exc_info=True,
+                )
         return True
 
     def dismiss(self, jid: str) -> bool:
