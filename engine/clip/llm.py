@@ -189,7 +189,12 @@ class _OwnedReasoningProcess:
         with self._tree_lock:
             return self._tree_exited
 
-    def wait_for_group_exit(self, *, timeout: float = 0.25) -> None:
+    def wait_for_group_exit(
+        self,
+        *,
+        timeout: float = 0.25,
+        forced_timeout: float | None = None,
+    ) -> None:
         """Keep the lease until the group is gone; kill a detached lingering child."""
         with self._tree_lock:
             if self._pgid is None:
@@ -213,15 +218,16 @@ class _OwnedReasoningProcess:
                 return False
 
             def wait_phase(seconds: float) -> bool:
-                deadline = time.monotonic() + seconds
+                deadline = time.monotonic() + max(0.0, seconds)
                 while not group_is_gone():
-                    if time.monotonic() >= deadline:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
                         return False
-                    time.sleep(0.01)
+                    time.sleep(min(0.01, remaining))
                 return True
 
             try:
-                if wait_phase(timeout):
+                if wait_phase(max(0.0, timeout)):
                     return
                 try:
                     os.killpg(self._pgid, getattr(signal, "SIGKILL", signal.SIGTERM))
@@ -234,12 +240,14 @@ class _OwnedReasoningProcess:
                         self._process.kill()
                     except (ProcessLookupError, OSError):
                         pass
-                forced_timeout = max(2.0, timeout)
-                if wait_phase(forced_timeout):
+                forced_budget = (
+                    2.0 if forced_timeout is None else max(0.0, forced_timeout)
+                )
+                if wait_phase(forced_budget):
                     return
                 raise RuntimeError(
                     "Codex process group did not exit after SIGKILL within "
-                    f"{forced_timeout:g}s"
+                    f"{forced_budget:g}s"
                 )
             finally:
                 if self._pgid is None:
@@ -247,15 +255,21 @@ class _OwnedReasoningProcess:
 
     def terminate_and_wait(self, *, timeout: float) -> None:
         """Stop a live tree during engine shutdown and reap its direct parent."""
+        deadline = time.monotonic() + max(0.0, timeout)
         self.kill()
         try:
-            self._process.wait(timeout=max(0.0, timeout))
+            self._process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired as exc:
             self.kill()
             raise RuntimeError(
                 "Codex parent process did not exit within the shutdown timeout"
             ) from exc
-        self.wait_for_group_exit(timeout=min(0.25, max(0.0, timeout)))
+        # ``shutdown(timeout=...)`` owns one deadline across parent reaping and
+        # descendant confirmation. Never introduce a new per-tree grace period.
+        self.wait_for_group_exit(
+            timeout=max(0.0, deadline - time.monotonic()),
+            forced_timeout=0.0,
+        )
 
 
 class ReasoningProcessRegistry:
@@ -285,47 +299,60 @@ class ReasoningProcessRegistry:
         lease=None,
     ) -> _OwnedReasoningProcess:
         """Linearize process creation/registration against shutdown."""
-        with self._lock:
-            if self._closing:
-                raise ProviderUnavailableError("remote reasoning is shutting down")
-            retained = lease is not None
-            if lease is not None:
-                # Called while launch_admission owns the policy lock. Retaining
-                # here makes process registration + lease ownership one boundary.
-                lease.retain_for_process()
-            process = None
-            registered = False
-            try:
-                process = factory()
-                self._active.add(process)
-                registered = True
-                if lease is not None:
-                    self._leases[process] = lease
-                return process
-            except BaseException:
-                if registered:
-                    self._active.discard(process)
-                    self._leases.pop(process, None)
-                if process is not None:
-                    try:
-                        process.terminate_and_wait(timeout=2.0)
-                    except BaseException as cleanup_error:
-                        # Keep the retained policy reference: an unconfirmed live
-                        # process must continue blocking Offline even if registration
-                        # itself failed. The identity-based fallback also keeps it
-                        # available to every later shutdown retry.
-                        self._fallback.append((process, lease))
-                        raise ReasoningDrainError(
-                            "could not drain Codex process after registration failed"
-                        ) from cleanup_error
-                    if not process.tree_exited:
-                        self._fallback.append((process, lease))
-                        raise ReasoningDrainError(
-                            "Codex process exit remained unconfirmed after registration failed"
-                        )
-                if retained:
-                    lease.release()
-                raise
+        retained = lease is not None
+        ownership_transferred = False
+        if lease is not None:
+            # Callers normally already own the policy lock through launch_admission.
+            # Retain before taking the registry lock to preserve policy -> registry
+            # ordering even for direct registry users.
+            lease.retain_for_process()
+        try:
+            with self._lock:
+                if self._closing:
+                    raise ProviderUnavailableError("remote reasoning is shutting down")
+                process = None
+                registered = False
+                try:
+                    # Keep creation + registration under one registry boundary so
+                    # shutdown can never miss a process created concurrently.
+                    process = factory()
+                    self._active.add(process)
+                    registered = True
+                    if lease is not None:
+                        self._leases[process] = lease
+                    ownership_transferred = retained
+                    return process
+                except BaseException:
+                    if registered:
+                        self._active.discard(process)
+                        self._leases.pop(process, None)
+                    if process is not None:
+                        try:
+                            process.terminate_and_wait(timeout=2.0)
+                        except BaseException as cleanup_error:
+                            # Keep the retained policy reference: an unconfirmed live
+                            # process must continue blocking Offline even if registration
+                            # itself failed. The identity-based fallback also keeps it
+                            # available to every later shutdown retry.
+                            self._fallback.append((process, lease))
+                            ownership_transferred = retained
+                            raise ReasoningDrainError(
+                                "could not drain Codex process after registration failed"
+                            ) from cleanup_error
+                        if not process.tree_exited:
+                            self._fallback.append((process, lease))
+                            ownership_transferred = retained
+                            raise ReasoningDrainError(
+                                "Codex process exit remained unconfirmed after registration failed"
+                            )
+                    raise
+        except BaseException:
+            # Never acquire the policy lock while the registry lock is held.
+            # Closing/factory/registration failures return the speculative retain;
+            # fallback ownership keeps it until a later confirmed drain.
+            if retained and not ownership_transferred:
+                lease.release()
+            raise
 
     def release(self, process: _OwnedReasoningProcess) -> None:
         with self._lock:
@@ -423,7 +450,8 @@ def _communicate_reasoning_process(
             )
         else:
             process.wait_for_group_exit(
-                timeout=min(0.25, max(0.0, deadline - time.monotonic()))
+                timeout=max(0.0, deadline - time.monotonic()),
+                forced_timeout=0.0,
             )
 
     try:

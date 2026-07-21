@@ -1077,6 +1077,36 @@ def test_owned_process_wait_never_becomes_unbounded_after_timeout():
     assert all(timeout is not None for timeout in process.wait_timeouts)
 
 
+def test_registry_zero_timeout_does_not_add_a_forced_group_wait(monkeypatch):
+    class ReapedParent:
+        pid = 4242
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    def group_stays_alive(_pgid, sig):
+        # Both the liveness probe and SIGKILL appear to succeed while the
+        # synthetic group remains visible.
+        return None
+
+    monkeypatch.setattr(llm.os, "killpg", group_stays_alive)
+    registry = llm.ReasoningProcessRegistry()
+    registry.spawn(
+        lambda: llm._OwnedReasoningProcess(ReapedParent(), owns_group=True)
+    )
+
+    started = time.monotonic()
+    with pytest.raises(llm.ReasoningDrainError):
+        registry.shutdown(timeout=0)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.25
+    assert registry.active_count == 1
+
+
 @pytest.mark.parametrize(
     "first_error",
     [
@@ -1251,6 +1281,74 @@ def test_failed_registration_cleanup_remains_owned_for_shutdown_retry():
         registry.shutdown(timeout=0)
         assert process.attempts == 2
         assert registry.active_count == 0
+        assert policy.active_leases == 1
+
+    assert policy.active_leases == 0
+
+
+def test_spawn_never_holds_registry_lock_while_retaining_policy_lease():
+    registry = llm.ReasoningProcessRegistry()
+    retain_entered = threading.Event()
+    release_retain = threading.Event()
+    probe_done = threading.Event()
+    outcome = []
+
+    class BlockingLease:
+        def retain_for_process(self):
+            retain_entered.set()
+            assert release_retain.wait(1)
+
+        def release(self):
+            pass
+
+    class Process:
+        tree_exited = True
+
+    process = Process()
+
+    def spawn():
+        try:
+            outcome.append(
+                registry.spawn(lambda: process, lease=BlockingLease())
+            )
+        except BaseException as exc:
+            outcome.append(exc)
+
+    spawn_thread = threading.Thread(target=spawn)
+    probe_thread = threading.Thread(
+        target=lambda: (registry.closing, probe_done.set())
+    )
+    spawn_thread.start()
+    try:
+        assert retain_entered.wait(1)
+        probe_thread.start()
+        assert probe_done.wait(0.2), "lease retain held the registry lock"
+    finally:
+        release_retain.set()
+        spawn_thread.join(1)
+        probe_thread.join(1)
+
+    assert outcome == [process]
+    registry.release(process)
+
+
+@pytest.mark.parametrize("failure", ["closing", "factory"])
+def test_spawn_rolls_back_prelock_lease_retain_on_early_failure(failure):
+    policy = NetworkPolicy()
+    registry = llm.ReasoningProcessRegistry()
+    if failure == "closing":
+        registry.shutdown(timeout=0)
+
+    def factory():
+        if failure == "factory":
+            raise ValueError("factory failed")
+        raise AssertionError("a closing registry must reject before creation")
+
+    expected = llm.ProviderUnavailableError if failure == "closing" else ValueError
+    with policy.egress("codex_reasoning") as lease:
+        with pytest.raises(expected):
+            registry.spawn(factory, lease=lease)
+        # Only the context's original reference remains.
         assert policy.active_leases == 1
 
     assert policy.active_leases == 0
