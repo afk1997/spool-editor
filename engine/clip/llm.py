@@ -165,8 +165,20 @@ class _OwnedReasoningProcess:
     def __getattr__(self, name):
         return getattr(self._process, name)
 
-    def kill(self) -> None:
-        with self._tree_lock:
+    def _acquire_tree_lock(self, *, deadline: float | None = None) -> None:
+        if deadline is None:
+            self._tree_lock.acquire()
+            return
+        if not self._tree_lock.acquire(
+            timeout=max(0.0, deadline - time.monotonic())
+        ):
+            raise RuntimeError(
+                "Codex process ownership lock remained busy at the shutdown deadline"
+            )
+
+    def kill(self, *, deadline: float | None = None) -> None:
+        self._acquire_tree_lock(deadline=deadline)
+        try:
             if self._tree_exited:
                 return
             if self._pgid is not None:
@@ -183,6 +195,8 @@ class _OwnedReasoningProcess:
                 self._process.kill()
             except ProcessLookupError:
                 self._tree_exited = True
+        finally:
+            self._tree_lock.release()
 
     @property
     def tree_exited(self) -> bool:
@@ -194,9 +208,11 @@ class _OwnedReasoningProcess:
         *,
         timeout: float = 0.25,
         forced_timeout: float | None = None,
+        deadline: float | None = None,
     ) -> None:
         """Keep the lease until the group is gone; kill a detached lingering child."""
-        with self._tree_lock:
+        self._acquire_tree_lock(deadline=deadline)
+        try:
             if self._pgid is None:
                 self._tree_exited = True
                 return
@@ -218,9 +234,11 @@ class _OwnedReasoningProcess:
                 return False
 
             def wait_phase(seconds: float) -> bool:
-                deadline = time.monotonic() + max(0.0, seconds)
+                phase_deadline = time.monotonic() + max(0.0, seconds)
+                if deadline is not None:
+                    phase_deadline = min(phase_deadline, deadline)
                 while not group_is_gone():
-                    remaining = deadline - time.monotonic()
+                    remaining = phase_deadline - time.monotonic()
                     if remaining <= 0:
                         return False
                     time.sleep(min(0.01, remaining))
@@ -252,15 +270,24 @@ class _OwnedReasoningProcess:
             finally:
                 if self._pgid is None:
                     self._tree_exited = True
+        finally:
+            self._tree_lock.release()
 
     def terminate_and_wait(self, *, timeout: float) -> None:
         """Stop a live tree during engine shutdown and reap its direct parent."""
         deadline = time.monotonic() + max(0.0, timeout)
-        self.kill()
+        self.terminate_and_wait_until(deadline=deadline)
+
+    def terminate_and_wait_until(self, *, deadline: float) -> None:
+        """Stop and reap this tree without extending an owner's absolute deadline."""
+        self.kill(deadline=deadline)
         try:
             self._process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired as exc:
-            self.kill()
+            try:
+                self.kill(deadline=deadline)
+            except (OSError, RuntimeError):
+                pass
             raise RuntimeError(
                 "Codex parent process did not exit within the shutdown timeout"
             ) from exc
@@ -269,6 +296,7 @@ class _OwnedReasoningProcess:
         self.wait_for_group_exit(
             timeout=max(0.0, deadline - time.monotonic()),
             forced_timeout=0.0,
+            deadline=deadline,
         )
 
 
@@ -373,25 +401,39 @@ class ReasoningProcessRegistry:
 
     def shutdown(self, *, timeout: float = 5.0) -> None:
         """Reject new launches, kill all registered trees, and reap their parents."""
-        with self._lock:
+        deadline = time.monotonic() + max(0.0, timeout)
+        if not self._lock.acquire(
+            timeout=max(0.0, deadline - time.monotonic())
+        ):
+            raise ReasoningDrainError(
+                "could not acquire the reasoning registry before the shutdown deadline"
+            )
+        try:
             self._closing = True
             active = tuple(self._active) + tuple(
                 process for process, _lease in self._fallback
             )
+        finally:
+            self._lock.release()
         for process in active:
             try:
-                process.kill()
-            except OSError as exc:
+                if isinstance(process, _OwnedReasoningProcess):
+                    process.kill(deadline=deadline)
+                else:
+                    process.kill()
+            except (OSError, RuntimeError) as exc:
                 _log.warning("could not signal Codex process during shutdown: %s", exc)
-        deadline = time.monotonic() + max(0.0, timeout)
         for process in active:
             try:
-                process.terminate_and_wait(
-                    timeout=max(0.0, deadline - time.monotonic())
-                )
+                if isinstance(process, _OwnedReasoningProcess):
+                    process.terminate_and_wait_until(deadline=deadline)
+                else:
+                    process.terminate_and_wait(
+                        timeout=max(0.0, deadline - time.monotonic())
+                    )
             except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
                 _log.warning("could not drain Codex process during shutdown: %s", exc)
-            finally:
+            else:
                 # A failed wait must not make a live tree disappear from ownership.
                 # A later shutdown call can retry every entry that remains tracked.
                 if process.tree_exited:

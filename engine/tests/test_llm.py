@@ -1107,6 +1107,51 @@ def test_registry_zero_timeout_does_not_add_a_forced_group_wait(monkeypatch):
     assert registry.active_count == 1
 
 
+def test_registry_deadline_bounds_contended_tree_lock(monkeypatch):
+    class ReapedParent:
+        pid = 4242
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    polling_started = threading.Event()
+
+    def group_stays_alive(_pgid, sig):
+        if sig == 0:
+            polling_started.set()
+        return None
+
+    monkeypatch.setattr(llm.os, "killpg", group_stays_alive)
+    process = llm._OwnedReasoningProcess(ReapedParent(), owns_group=True)
+    registry = llm.ReasoningProcessRegistry()
+    registry.spawn(lambda: process)
+    waiter_errors = []
+
+    def hold_tree_lock_while_polling():
+        try:
+            process.wait_for_group_exit(timeout=0.2, forced_timeout=0.2)
+        except RuntimeError as exc:
+            waiter_errors.append(exc)
+
+    waiter = threading.Thread(target=hold_tree_lock_while_polling)
+    waiter.start()
+    try:
+        assert polling_started.wait(1)
+        started = time.monotonic()
+        with pytest.raises(llm.ReasoningDrainError):
+            registry.shutdown(timeout=0)
+        elapsed = time.monotonic() - started
+    finally:
+        waiter.join(1)
+
+    assert elapsed < 0.1
+    assert waiter_errors
+    assert registry.active_count == 1
+
+
 @pytest.mark.parametrize(
     "first_error",
     [
