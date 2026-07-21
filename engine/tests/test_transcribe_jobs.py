@@ -213,6 +213,133 @@ def test_cancel_with_live_process_handle_still_persists(tmp_path):
     mgr.shutdown(wait=True)
 
 
+def test_cancel_persist_failure_restores_transcribe_state_and_preserves_staging(
+    tmp_path, monkeypatch,
+):
+    import transcribe_jobs as module
+
+    store = tmp_path / "tj.json"
+    manager = TranscribeJobManager(max_workers=1, store_path=store)
+    job = TranscribeJob(
+        id="queued-persist-failure",
+        parent_job_id="source",
+        model_used="model.bin",
+        status=TranscribeStatus.QUEUED,
+    )
+    job._attempt = 7
+    root = tmp_path / ".attempts" / "transcribe" / job.id
+    root.mkdir(parents=True)
+    candidate = root / "source.words.json"
+    candidate.write_bytes(b"candidate")
+    job._staging_root = str(root)
+    with manager._lock:
+        manager._jobs[job.id] = job
+    assert manager._persist() is True
+    before = (job.status, job._attempt, job._cancel_flag)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            module.os,
+            "replace",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("forced persist failure")
+            ),
+        )
+        with pytest.raises(RuntimeError, match="persist transcribe cancellation"):
+            manager.cancel(job.id)
+
+    assert (job.status, job._attempt, job._cancel_flag) == before
+    assert candidate.read_bytes() == b"candidate"
+    assert json.loads(store.read_text())["jobs"][job.id]["status"] == "queued"
+
+    before_retry = TranscribeJobManager(max_workers=1, store_path=store)
+    try:
+        assert before_retry.get(job.id).status is TranscribeStatus.ERROR
+    finally:
+        before_retry.shutdown(wait=True)
+
+    cleanup_states = []
+
+    def fail_cleanup(path):
+        cleanup_states.append(
+            (path, json.loads(store.read_text())["jobs"][job.id]["status"])
+        )
+        raise OSError("forced cleanup failure")
+
+    monkeypatch.setattr(module, "cleanup_attempt", fail_cleanup)
+    assert manager.cancel(job.id) is True
+    assert (job.status, job._attempt, job._cancel_flag) == (
+        TranscribeStatus.CANCELLED,
+        before[1] + 1,
+        True,
+    )
+    assert cleanup_states == [(str(root), "cancelled")]
+    assert candidate.read_bytes() == b"candidate"
+    manager.shutdown(wait=True)
+
+    after_retry = TranscribeJobManager(max_workers=1, store_path=store)
+    try:
+        assert after_retry.get(job.id).status is TranscribeStatus.CANCELLED
+    finally:
+        after_retry.shutdown(wait=True)
+
+
+def test_cancel_active_persist_failure_does_not_kill_transcribe_process(
+    tmp_path, monkeypatch,
+):
+    import transcribe_jobs as module
+
+    store = tmp_path / "tj.json"
+    manager = TranscribeJobManager(max_workers=1, store_path=store)
+    killed_after_status = []
+
+    class Process:
+        def kill(self):
+            killed_after_status.append(
+                json.loads(store.read_text())["jobs"][job.id]["status"]
+            )
+
+    process = Process()
+    job = TranscribeJob(
+        id="active-persist-failure",
+        parent_job_id="source",
+        model_used="model.bin",
+        status=TranscribeStatus.RUNNING,
+        process_handle=process,
+    )
+    job._attempt = 11
+    job._worker_active = True
+    with manager._lock:
+        manager._jobs[job.id] = job
+    assert manager._persist() is True
+    before = (job.status, job._attempt, job._cancel_flag)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            module.os,
+            "replace",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("forced persist failure")
+            ),
+        )
+        with pytest.raises(RuntimeError, match="persist transcribe cancellation"):
+            manager.cancel(job.id)
+
+    assert (job.status, job._attempt, job._cancel_flag) == before
+    assert manager.get(job.id).process_handle is process
+    assert killed_after_status == []
+
+    assert manager.cancel(job.id) is True
+    assert killed_after_status == ["cancelled"]
+    manager.shutdown(wait=True)
+
+    restarted = TranscribeJobManager(max_workers=1, store_path=store)
+    try:
+        assert restarted.get(job.id).status is TranscribeStatus.CANCELLED
+    finally:
+        restarted.shutdown(wait=True)
+
+
 def _wait_tj(mgr, jid, timeout=5.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
