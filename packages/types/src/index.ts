@@ -202,6 +202,8 @@ export interface PublishPost {
 
 // ───────────────────────── Server ─────────────────────────
 
+export type ReasoningProvider = "none" | "codex";
+
 export interface ServerCapabilities {
   version: string;
   encoders: string[];

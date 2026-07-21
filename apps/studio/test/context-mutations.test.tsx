@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, act, waitFor } from "@testing-library/react";
 import type { EventsSnapshot } from "@spool/types";
+import type { EngineSettings } from "@spool/api-client";
 
 /* Mutation-chain failure surfacing (the "fire-and-forget" finding): a dependent render chain
  * (reframe → caption → export) must AWAIT each submit, surface a submit/validation failure as a
@@ -17,12 +18,30 @@ const router = { push: vi.fn(), replace: vi.fn(), back: vi.fn(), forward: vi.fn(
 
 // A per-test mutable client: each test assigns the method stubs it needs before mounting.
 let client: Record<string, ReturnType<typeof vi.fn>>;
+let settingsQuery: { data?: EngineSettings; error?: string; loading: boolean; reload: ReturnType<typeof vi.fn> };
+
+const engineSettings = (overrides: Partial<EngineSettings> = {}): EngineSettings => ({
+  fast_default: true,
+  default_preset: "tiktok",
+  offline: false,
+  reasoning_provider: "none",
+  reasoning_egress_consent: false,
+  clip_workers: 2,
+  max_workers: 4,
+  mcp_transport: "stdio",
+  ...overrides,
+});
 
 vi.mock("next/navigation", () => ({ useRouter: () => router }));
 vi.mock("@/lib/engine-context", () => ({
   useEngine: () => client,
   useLive: () => ({ snapshot: FIXED_SNAPSHOT, connection: "online" }),
-  useEngineQuery: () => ({ data: undefined, loading: false, reload: () => {} }),
+  useEngineQuery: (query: (candidate: Record<string, () => string>) => unknown) => {
+    const method = query(new Proxy({}, { get: (_target, key) => () => String(key) }));
+    return method === "getSettings"
+      ? settingsQuery
+      : { data: undefined, loading: false, reload: () => {} };
+  },
 }));
 
 // Imported AFTER the mocks are registered (vi.mock is hoisted, but keep the order explicit).
@@ -48,6 +67,7 @@ function mountCtx(): { get: () => Ctx } {
 beforeEach(() => {
   router.push.mockClear();
   window.history.replaceState({}, "", "/");
+  settingsQuery = { data: engineSettings(), loading: false, reload: vi.fn() };
 });
 
 describe("makeClipsFrom surfaces mutation-chain failures (no silent fire-and-forget)", () => {
@@ -196,8 +216,8 @@ describe("makeClipsFrom surfaces mutation-chain failures (no silent fire-and-for
 describe("offline setting mutation", () => {
   it("single-flights repeated toggles and exposes a pending state until persistence settles", async () => {
     let release!: () => void;
-    const delayed = new Promise<Record<string, unknown>>((resolve) => {
-      release = () => resolve({ offline: true });
+    const delayed = new Promise<EngineSettings>((resolve) => {
+      release = () => resolve(engineSettings({ offline: true }));
     });
     client = { updateSettings: vi.fn().mockReturnValue(delayed) };
     const ctx = mountCtx();

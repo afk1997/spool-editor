@@ -16,6 +16,7 @@ import type {
   Health,
   JobList,
   JobView,
+  ReasoningProvider,
   TranscribeJobView,
   TranscriptDoc,
   TranscriptList,
@@ -156,6 +157,8 @@ export interface EngineSettings {
   default_preset: string;
   /** Block LLM egress (SPOOL_OFFLINE). Applies immediately. */
   offline: boolean;
+  reasoning_provider: ReasoningProvider;
+  reasoning_egress_consent: boolean;
   clip_workers: number;
   max_workers: number;
   mcp_transport: string;

@@ -2,8 +2,8 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { SpoolApiError, type SpoolApiClient } from "@spool/api-client";
-import type { ClipJobView, EventsSnapshot, RankFactors, TranscriptWord } from "@spool/types";
+import { SpoolApiError, type EngineSettings, type SpoolApiClient } from "@spool/api-client";
+import type { ClipJobView, EventsSnapshot, RankFactors, ReasoningProvider, TranscriptWord } from "@spool/types";
 import { useEngine, useEngineQuery, useLive } from "@/lib/engine-context";
 import { formatActionError } from "@/lib/action-error";
 
@@ -338,6 +338,14 @@ interface SpoolCtx {
   /** Poll a clip job to a terminal state — pages sequence dependent jobs with it. */
   awaitClipJob: (id?: string) => Promise<void>;
   toasts: Toast[]; pushToast: (t: Omit<Toast, "id">) => void;
+  settings: EngineSettings | null;
+  settingsReady: boolean;
+  settingsLoading: boolean;
+  settingsError: string | null;
+  reasoningProvider: ReasoningProvider | null;
+  reasoningEgressConsent: boolean;
+  settingsPending: boolean;
+  updateSettings: (patch: Partial<EngineSettings>) => Promise<EngineSettings>;
   offline: boolean; offlinePending: boolean; toggleOffline: () => void;
 }
 
@@ -360,11 +368,46 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [agentMessages, setAgentMessages] = useState<AgentMessage[]>(INITIAL_AGENT);
   const [working, setWorking] = useState(false);
-  // Offline mode is the persisted engine setting (drives SPOOL_OFFLINE), NOT local state —
-  // the toggle has to actually gate egress, and the badge must show engine-truth. Honest
-  // default is false (the Codex bridge IS egress) until the user opts in.
+  // One confirmed settings record owns every privacy projection. Until GET /settings succeeds,
+  // the context is intentionally fail-closed: callers see no provider/consent and Offline=true.
   const settingsQ = useEngineQuery((c) => c.getSettings());
-  const offline = settingsQ.data?.offline ?? false;
+  const [settings, setSettings] = useState<EngineSettings | null>(null);
+  const settingsRef = useRef<EngineSettings | null>(null);
+  // PATCH is immediate truth. Ignore only GET generations that had already started when
+  // that PATCH resolved; a later reload/reconnect must be allowed to refresh canonical state.
+  // The fallbacks keep older test doubles compatible while the real query always supplies ids.
+  const settingsRequestGeneration = settingsQ.requestGeneration ?? 0;
+  const settingsDataGeneration = settingsQ.dataGeneration ?? settingsRequestGeneration;
+  const settingsRequestGenerationReader = typeof settingsQ.getRequestGeneration === "function"
+    ? settingsQ.getRequestGeneration
+    : () => settingsRequestGeneration;
+  const settingsRequestGenerationReaderRef = useRef(settingsRequestGenerationReader);
+  settingsRequestGenerationReaderRef.current = settingsRequestGenerationReader;
+  const ignoreSettingsQueriesThrough = useRef(-1);
+  useEffect(() => {
+    if (
+      !settingsQ.data
+      || settingsDataGeneration <= ignoreSettingsQueriesThrough.current
+      || settingsRef.current === settingsQ.data
+    ) return;
+    settingsRef.current = settingsQ.data;
+    setSettings(settingsQ.data);
+  }, [settingsDataGeneration, settingsQ.data]);
+
+  const settingsReady = settings !== null;
+  const settingsLoading = !settingsReady && settingsQ.loading;
+  const settingsError = !settingsReady ? settingsQ.error ?? null : null;
+  const reasoningProvider = settings?.reasoning_provider ?? null;
+  const reasoningEgressConsent = settings?.reasoning_egress_consent ?? false;
+  const offline = settings?.offline ?? true;
+  const [settingsPendingCount, setSettingsPendingCount] = useState(0);
+  const settingsPending = settingsPendingCount > 0;
+  const settingsQueue = useRef<{
+    patch: Partial<EngineSettings>;
+    resolve: (value: EngineSettings) => void;
+    reject: (reason: unknown) => void;
+  }[]>([]);
+  const settingsWriteActive = useRef(false);
   const [offlinePending, setOfflinePending] = useState(false);
   const offlineInFlight = useRef(false);
   const providerMounted = useRef(false);
@@ -372,11 +415,6 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
     providerMounted.current = true;
     return () => { providerMounted.current = false; };
   }, []);
-  // useEngineQuery returns a fresh `reload` each render; hold the latest in a ref (written in
-  // an effect, not in render) so toggleOffline stays referentially stable — only `offline`
-  // should churn the context value, not reload's identity.
-  const reloadSettingsRef = useRef(settingsQ.reload);
-  useEffect(() => { reloadSettingsRef.current = settingsQ.reload; });
   const elicitSeq = useRef(0); // monotonic, collision-free ids for elicitation cards
   const agentInFlight = useRef(false);
 
@@ -386,13 +424,60 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
     setTimeout(() => setToasts((ts) => ts.filter((x) => x.id !== id)), 4200);
   }, []);
 
+  const drainSettingsQueue = useCallback(function drainSettingsQueue(): void {
+    if (settingsWriteActive.current) return;
+    const task = settingsQueue.current.shift();
+    if (!task) return;
+    settingsWriteActive.current = true;
+
+    let request: Promise<EngineSettings>;
+    try {
+      request = client.updateSettings(task.patch);
+    } catch (error) {
+      request = Promise.reject(error);
+    }
+
+    const finish = (settle: () => void) => {
+      settingsWriteActive.current = false;
+      if (providerMounted.current) setSettingsPendingCount((count) => Math.max(0, count - 1));
+      drainSettingsQueue();
+      settle();
+    };
+
+    void request.then(
+      (next) => {
+        ignoreSettingsQueriesThrough.current = Math.max(
+          ignoreSettingsQueriesThrough.current,
+          settingsRequestGenerationReaderRef.current(),
+        );
+        settingsRef.current = next;
+        if (providerMounted.current) setSettings(next);
+        finish(() => task.resolve(next));
+      },
+      (error: unknown) => finish(() => task.reject(error)),
+    );
+  }, [client]);
+
+  const updateSettings = useCallback((patch: Partial<EngineSettings>): Promise<EngineSettings> => {
+    if (!settingsRef.current) {
+      return Promise.reject(new SpoolApiError(
+        409,
+        settingsQ.error ?? "settings_not_ready",
+        "Settings are not ready yet.",
+      ));
+    }
+    return new Promise<EngineSettings>((resolve, reject) => {
+      settingsQueue.current.push({ patch, resolve, reject });
+      if (providerMounted.current) setSettingsPendingCount((count) => count + 1);
+      drainSettingsQueue();
+    });
+  }, [drainSettingsQueue, settingsQ.error]);
+
   const toggleOffline = useCallback(() => {
-    if (offlineInFlight.current) return;
+    if (!settingsReady || offlineInFlight.current) return;
     offlineInFlight.current = true;
     setOfflinePending(true);
-    void client
-      .updateSettings({ offline: !offline })
-      .then(() => reloadSettingsRef.current())
+    void updateSettings({ offline: !offline })
       .catch((error: unknown) => pushToast({
         icon: "alert",
         tone: "warn",
@@ -403,7 +488,7 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
         offlineInFlight.current = false;
         if (providerMounted.current) setOfflinePending(false);
       });
-  }, [client, offline, pushToast]);
+  }, [offline, pushToast, settingsReady, updateSettings]);
 
   const nav = useCallback((screen: string, params: { id?: string; tab?: string } = {}) => {
     const id = params.id;
@@ -552,12 +637,18 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
       paletteOpen, openPalette: () => setPaletteOpen(true), closePalette: () => setPaletteOpen(false),
       shortcutsOpen, openShortcuts: () => setShortcutsOpen(true), closeShortcuts: () => setShortcutsOpen(false),
       agentMessages, working, askAgent, answerElicit, makeClipsFrom, awaitClipJob,
-      toasts, pushToast, offline, offlinePending, toggleOffline,
+      toasts, pushToast,
+      settings, settingsReady, settingsLoading, settingsError,
+      reasoningProvider, reasoningEgressConsent, settingsPending, updateSettings,
+      offline, offlinePending, toggleOffline,
     }),
     [
       client, sources, clips, jobs, downloads, deps, snapshot, nav, agentOpen, paletteOpen,
       shortcutsOpen, agentMessages, working, askAgent, answerElicit, makeClipsFrom, awaitClipJob,
-      toasts, pushToast, offline, offlinePending, toggleOffline,
+      toasts, pushToast,
+      settings, settingsReady, settingsLoading, settingsError,
+      reasoningProvider, reasoningEgressConsent, settingsPending, updateSettings,
+      offline, offlinePending, toggleOffline,
     ],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

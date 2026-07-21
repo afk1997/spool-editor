@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { SpoolApiClient, SpoolApiError } from "@spool/api-client";
 import type { EventsSnapshot } from "@spool/types";
 import { engine } from "./engine";
@@ -98,6 +98,12 @@ export interface QueryState<T> {
   error?: string;
   loading: boolean;
   reload: () => void;
+  /** Monotonic id of the newest request that has started, including one still in flight. */
+  requestGeneration: number;
+  /** Generation that produced `data`; older data may remain visible while a reload runs. */
+  dataGeneration: number;
+  /** Reads the live request id without waiting for React to publish the next render. */
+  getRequestGeneration: () => number;
 }
 
 /** One-shot read against the engine, with loading/error/data + manual reload. */
@@ -106,15 +112,40 @@ export function useEngineQuery<T>(
   deps: unknown[] = [],
 ): QueryState<T> {
   const { client, onlineEpoch } = useEngineContext();
-  const [state, setState] = useState<{ data?: T; error?: string; loading: boolean }>({ loading: true });
+  const requestGeneration = useRef(0);
+  const getRequestGeneration = useCallback(() => requestGeneration.current, []);
+  const [state, setState] = useState<{
+    data?: T;
+    error?: string;
+    loading: boolean;
+    requestGeneration: number;
+    dataGeneration: number;
+  }>({ loading: true, requestGeneration: 0, dataGeneration: 0 });
   const [tick, setTick] = useState(0);
 
   useEffect(() => {
     let active = true;
+    const generation = ++requestGeneration.current;
+    setState((current) => ({
+      ...current,
+      error: undefined,
+      loading: true,
+      requestGeneration: generation,
+    }));
     fn(client)
-      .then((data) => active && setState({ data, loading: false }))
+      .then((data) => active && setState({
+        data,
+        loading: false,
+        requestGeneration: generation,
+        dataGeneration: generation,
+      }))
       .catch((e) =>
-        active && setState({ error: e instanceof SpoolApiError ? e.code : "unreachable", loading: false }),
+        active && setState({
+          error: e instanceof SpoolApiError ? e.code : "unreachable",
+          loading: false,
+          requestGeneration: generation,
+          dataGeneration: 0,
+        }),
       );
     return () => {
       active = false;
@@ -126,5 +157,5 @@ export function useEngineQuery<T>(
     setState((s) => ({ ...s, loading: true, error: undefined }));
     setTick((t) => t + 1);
   };
-  return { ...state, reload };
+  return { ...state, reload, getRequestGeneration };
 }
