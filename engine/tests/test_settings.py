@@ -7,6 +7,7 @@ what was explicitly written (so ``create_app`` can prefer a UI-set value over th
 without confusing "user set 2" with "default 2")."""
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -196,5 +197,70 @@ def test_failed_runtime_apply_rolls_back_store_environment_and_policy(
         )
         with pytest.raises(llm.ReasoningDisabledError):
             provider.complete("transcript")
+    finally:
+        application.extensions["trove.shutdown"](wait=True)
+
+
+def test_failed_publish_after_runtime_apply_rolls_back_every_state(
+    tmp_path, monkeypatch,
+):
+    import app as app_module
+    import settings as settings_module
+
+    monkeypatch.setattr(app_module, "DOWNLOAD_DIR", tmp_path)
+    monkeypatch.delenv("SPOOL_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("SPOOL_LLM_EGRESS_CONSENT", raising=False)
+    monkeypatch.delenv("SPOOL_OFFLINE", raising=False)
+    application = app_module.create_app()
+    try:
+        store = application.extensions["trove.settings"]
+        store.update({"fast_default": False})
+        path = tmp_path / "settings.json"
+        before_values = store.get()
+        before_overrides = store.overrides()
+        before_bytes = path.read_bytes()
+        before_env = {
+            key: os.environ.get(key)
+            for key in (
+                "SPOOL_OFFLINE",
+                "SPOOL_LLM_PROVIDER",
+                "SPOOL_LLM_EGRESS_CONSENT",
+            )
+        }
+        policy = application.extensions["trove.network_policy"]
+        observed_at_publish = {}
+
+        def fail_replace(_source, _destination):
+            observed_at_publish.update(
+                offline=os.environ.get("SPOOL_OFFLINE"),
+                provider=os.environ.get("SPOOL_LLM_PROVIDER"),
+                consent=os.environ.get("SPOOL_LLM_EGRESS_CONSENT"),
+                policy_offline=policy.offline,
+            )
+            raise OSError("injected atomic publish failure")
+
+        monkeypatch.setattr(settings_module.os, "replace", fail_replace)
+        with pytest.raises(OSError, match="injected atomic publish failure"):
+            application.extensions["trove.commit_settings"]({
+                "offline": True,
+                "reasoning_provider": "codex",
+                "reasoning_egress_consent": True,
+            })
+
+        assert observed_at_publish == {
+            "offline": "1",
+            "provider": "codex",
+            "consent": "1",
+            "policy_offline": True,
+        }
+        assert policy.offline is False
+        assert store.get() == before_values
+        assert store.overrides() == before_overrides
+        assert path.read_bytes() == before_bytes
+        assert SettingsStore(path).get() == before_values
+        assert {
+            key: os.environ.get(key)
+            for key in before_env
+        } == before_env
     finally:
         application.extensions["trove.shutdown"](wait=True)
