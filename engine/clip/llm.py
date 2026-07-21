@@ -472,15 +472,6 @@ def complete(
         raise ValueError("network_policy is required for an egress provider")
     state = _privacy_getter(privacy_state, env)
     _require_remote_reasoning(state(), provider_name=p.name)
-    try:
-        with network_policy.egress("codex_reasoning") as lease:
-            # Arbitrary egress providers expose no process-launch seam. Hold the
-            # admission lock across their complete call so consent/provider changes
-            # cannot land between the final check and opaque network execution.
-            with lease.launch_admission():
-                _require_remote_reasoning(state(), provider_name=p.name)
-                return p.complete(prompt, system=system)
-    except NetworkPolicyError as exc:
-        raise OfflineError(
-            f"LLM provider {p.name!r} needs network egress, but offline mode is on."
-        ) from exc
+    raise ProviderUnavailableError(
+        f"egress provider {p.name!r} is disabled until it exposes an atomic launch boundary"
+    )

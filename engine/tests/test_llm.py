@@ -186,7 +186,7 @@ def test_complete_blocks_egress_without_explicit_consent():
     assert calls == []
 
 
-def test_complete_allows_egress_with_explicit_consent():
+def test_complete_fails_closed_for_opaque_egress_with_explicit_consent():
     calls = []
     remote = llm.CallableProvider(
         lambda prompt, system=None: calls.append(prompt) or "ok",
@@ -194,13 +194,14 @@ def test_complete_allows_egress_with_explicit_consent():
         egress=True,
     )
 
-    assert llm.complete(
-        "hi",
-        provider=remote,
-        env={"SPOOL_LLM_PROVIDER": "codex", "SPOOL_LLM_EGRESS_CONSENT": "1"},
-        network_policy=NetworkPolicy(),
-    ) == "ok"
-    assert calls == ["hi"]
+    with pytest.raises(llm.ProviderUnavailableError, match="atomic launch boundary"):
+        llm.complete(
+            "hi",
+            provider=remote,
+            env={"SPOOL_LLM_PROVIDER": "codex", "SPOOL_LLM_EGRESS_CONSENT": "1"},
+            network_policy=NetworkPolicy(),
+        )
+    assert calls == []
 
 
 def test_complete_allows_local_provider_when_offline():
@@ -259,7 +260,7 @@ def test_direct_codex_boundary_rejects_live_privacy_state_before_cli_discovery(
     assert policy.active_leases == 0
 
 
-def test_arbitrary_egress_provider_runs_inside_explicit_reasoning_lease():
+def test_arbitrary_egress_provider_never_enters_an_opaque_completion():
     policy = NetworkPolicy()
     calls = []
 
@@ -268,14 +269,15 @@ def test_arbitrary_egress_provider_runs_inside_explicit_reasoning_lease():
         return "ok"
 
     provider = llm.CallableProvider(remote, name="remote-test", egress=True)
-    assert llm.complete(
-        "transcript",
-        system="producer",
-        provider=provider,
-        network_policy=policy,
-        privacy_state=lambda: _privacy(),
-    ) == "ok"
-    assert calls == [("transcript", "producer", 1)]
+    with pytest.raises(llm.ProviderUnavailableError, match="atomic launch boundary"):
+        llm.complete(
+            "transcript",
+            system="producer",
+            provider=provider,
+            network_policy=policy,
+            privacy_state=lambda: _privacy(),
+        )
+    assert calls == []
     assert policy.active_leases == 0
 
 
@@ -554,63 +556,71 @@ def test_launch_guard_wins_before_revocation_without_deadlock(tmp_path, monkeypa
     assert policy.active_leases == 0
 
 
-def test_generic_egress_completion_is_atomic_with_privacy_revocation(monkeypatch):
+def test_opaque_egress_fails_closed_without_blocking_privacy_transition():
     policy = NetworkPolicy()
     state = _privacy()
     provider_entered = threading.Event()
     release_provider = threading.Event()
-    patch_attempted = threading.Event()
-    patch_acquired = threading.Event()
-    patch_done = threading.Event()
+    invocation_started = threading.Event()
+    invocation_done = threading.Event()
+    transition_done = threading.Event()
+    calls = []
     outcome = []
 
     def remote(_prompt, *, system=None):
+        calls.append((_prompt, system))
         provider_entered.set()
-        assert release_provider.wait(2), "generic provider was not released"
-        return "ok"
+        assert release_provider.wait(2), "opaque provider was not released"
+        return "unsafe"
 
-    real_transition = policy.transition
+    def invoke():
+        invocation_started.set()
+        try:
+            outcome.append(llm.complete(
+                "transcript",
+                provider=llm.CallableProvider(remote, name="opaque", egress=True),
+                network_policy=policy,
+                privacy_state=lambda: dict(state),
+            ))
+        except Exception as exc:  # noqa: BLE001 - capture the exact boundary error
+            outcome.append(exc)
+        finally:
+            invocation_done.set()
 
-    @contextmanager
-    def observed_transition(offline):
-        patch_attempted.set()
-        with real_transition(offline):
-            patch_acquired.set()
-            yield
+    def revoke():
+        with policy.transition(None):
+            state["reasoning_egress_consent"] = False
+        transition_done.set()
 
-    monkeypatch.setattr(policy, "transition", observed_transition)
-
-    completion_thread = threading.Thread(
-        target=lambda: outcome.append(llm.complete(
-            "transcript",
-            provider=llm.CallableProvider(remote, name="remote", egress=True),
-            network_policy=policy,
-            privacy_state=lambda: dict(state),
-        ))
-    )
-    completion_thread.start()
-    patch_thread = None
+    invocation_thread = threading.Thread(target=invoke)
+    transition_thread = threading.Thread(target=revoke)
+    invocation_thread.start()
     try:
-        assert provider_entered.wait(2), "generic provider never entered complete"
+        assert invocation_started.wait(1), "invocation thread never started"
+        deadline = time.monotonic() + 1
+        while (
+            not provider_entered.is_set()
+            and not invocation_done.is_set()
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.001)
 
-        def revoke():
-            with policy.transition(None):
-                state["reasoning_egress_consent"] = False
-            patch_done.set()
-
-        patch_thread = threading.Thread(target=revoke)
-        patch_thread.start()
-        assert patch_attempted.wait(2), "revocation never attempted the policy lock"
-        assert patch_acquired.wait(0.1) is False
+        transition_thread.start()
+        invocation_returned_promptly = invocation_done.wait(0.5)
+        transition_returned_promptly = transition_done.wait(0.5)
     finally:
         release_provider.set()
-        completion_thread.join(2)
-        if patch_thread is not None:
-            patch_thread.join(2)
+        invocation_thread.join(2)
+        if transition_thread.ident is not None:
+            transition_thread.join(2)
 
-    assert not completion_thread.is_alive() and not patch_thread.is_alive()
-    assert outcome == ["ok"]
-    assert patch_acquired.is_set() and patch_done.is_set()
+    assert invocation_returned_promptly
+    assert transition_returned_promptly
+    assert not invocation_thread.is_alive() and not transition_thread.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], llm.ProviderUnavailableError)
+    assert "atomic launch boundary" in str(outcome[0])
+    assert calls == []
     assert state["reasoning_egress_consent"] is False
     assert policy.active_leases == 0
 
