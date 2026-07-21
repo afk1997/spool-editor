@@ -148,6 +148,12 @@ class ClipJobManager:
     def _reserve_locked(self) -> _AdmissionLease:
         return self._reserve_many_locked(1)[0]
 
+    def _allocate_job_id_locked(self) -> str:
+        while True:
+            jid = uuid.uuid4().hex[:10]
+            if jid not in self._jobs:
+                return jid
+
     # ----- persistence ---------------------------------------------------
 
     def _load_from_store(self) -> None:
@@ -378,8 +384,9 @@ class ClipJobManager:
         source_id: str | None,
         clip_id: str | None,
         params: dict | None,
+        owned_children: list[ClipJob] | None = None,
     ) -> tuple[ClipJob, int, Callable[[ClipJob], object]]:
-        jid = uuid.uuid4().hex[:10]
+        jid = self._allocate_job_id_locked()
         job = ClipJob(
             id=jid, kind=kind, source_id=source_id, clip_id=clip_id,
             params=params or {},
@@ -387,6 +394,8 @@ class ClipJobManager:
         try:
             attempt, _root = self._prepare_attempt_locked(job)
             self._jobs[jid] = job
+            if owned_children is not None:
+                owned_children.append(job)
             return job, attempt, target
         except Exception:
             # A staging/setup failure can happen after the lease/root exists.
@@ -511,7 +520,7 @@ class ClipJobManager:
                 child_ids = []
             else:
                 original_result = current.result
-                initial_job_ids = set(self._jobs)
+                owned_children: list[ClipJob] = []
                 submissions: list[
                     tuple[
                         ClipJob,
@@ -531,6 +540,7 @@ class ClipJobManager:
                             source_id=source_id,
                             clip_id=clip_id,
                             params=params,
+                            owned_children=owned_children,
                         )
                         submissions.append((
                             child,
@@ -579,12 +589,9 @@ class ClipJobManager:
                         if id(reservation) not in submitted_reservations:
                             reservation.release()
 
-                    new_children = [
-                        child for jid, child in self._jobs.items()
-                        if jid not in initial_job_ids
-                    ]
-                    for child in new_children:
-                        self._jobs.pop(child.id, None)
+                    for child in owned_children:
+                        if self._jobs.get(child.id) is child:
+                            self._jobs.pop(child.id, None)
                         child.process_handle = None
                         child._worker_active = False
                         if child._staging_root:

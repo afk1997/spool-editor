@@ -976,6 +976,64 @@ def test_atomic_fanout_children_observe_complete_parent_child_list():
     assert manager.pending_count == 0
 
 
+class _DeterministicUUID:
+    def __init__(self, hex_value):
+        self.hex = hex_value
+
+
+_COLLIDING_UUID_HEX = "deadbeef00" + ("1" * 22)
+_FIRST_CHILD_UUID_HEX = "cafebabe01" + ("2" * 22)
+_SECOND_CHILD_UUID_HEX = "feedface02" + ("3" * 22)
+
+
+def _force_clip_job_uuid_sequence(monkeypatch, values):
+    generated = iter(values)
+    monkeypatch.setattr(
+        "clip_jobs.uuid.uuid4",
+        lambda: _DeterministicUUID(next(generated)),
+    )
+
+
+def test_atomic_fanout_retries_job_id_collisions_without_overwriting_incumbent(
+    monkeypatch,
+):
+    manager = ClipJobManager(max_workers=2)
+    parent = _seed_running_produce_parent(manager)
+    incumbent = ClipJob(
+        id="deadbeef00",
+        kind="export",
+        status=ClipStatus.DONE,
+        result={"incumbent": True},
+    )
+    with manager._lock:
+        manager._jobs[incumbent.id] = incumbent
+    _force_clip_job_uuid_sequence(
+        monkeypatch,
+        [
+            _COLLIDING_UUID_HEX,
+            _FIRST_CHILD_UUID_HEX,
+            _FIRST_CHILD_UUID_HEX,
+            _SECOND_CHILD_UUID_HEX,
+        ],
+    )
+    ran = []
+
+    try:
+        child_ids = manager.submit_children_if_current(parent, parent._attempt, [
+            {"kind": "cut", "target": lambda _child: ran.append("first")},
+            {"kind": "cut", "target": lambda _child: ran.append("second")},
+        ])
+
+        assert child_ids == ["cafebabe01", "feedface02"]
+        assert _wait_clip_pending(manager, 0)
+        assert sorted(ran) == ["first", "second"]
+        assert manager.get(incumbent.id) is incumbent
+        assert [manager.get(child_id).id for child_id in child_ids] == child_ids
+        assert parent.result["clip_jobs"] == child_ids
+    finally:
+        manager.shutdown(wait=True)
+
+
 class _MixedFanoutFuture:
     def __init__(self, cancel_result):
         self.cancel_result = cancel_result
@@ -1008,6 +1066,66 @@ class _MixedFanoutExecutor:
         if wait:
             for thread in self.threads:
                 thread.join(5)
+
+
+class _FailSecondFanoutExecutor:
+    def __init__(self):
+        self.calls = 0
+
+    def submit(self, *_args, **_kwargs):
+        self.calls += 1
+        if self.calls == 2:
+            raise RuntimeError("second submit failed")
+        return Future()
+
+    def shutdown(self, wait=False, **_kwargs):
+        return None
+
+
+def test_atomic_fanout_collision_mid_submit_restores_incumbent_without_hidden_child(
+    tmp_path, monkeypatch,
+):
+    store = tmp_path / "clip.json"
+    manager = ClipJobManager(max_workers=1, store_path=store)
+    parent = _seed_running_produce_parent(manager)
+    original_result = parent.result
+    incumbent = ClipJob(
+        id="deadbeef00",
+        kind="export",
+        status=ClipStatus.DONE,
+        result={"incumbent": True},
+    )
+    with manager._lock:
+        manager._jobs[incumbent.id] = incumbent
+    manager._persist()
+    manager._executor.shutdown(wait=True)
+    manager._executor = _FailSecondFanoutExecutor()
+    _force_clip_job_uuid_sequence(
+        monkeypatch,
+        [
+            _COLLIDING_UUID_HEX,
+            _FIRST_CHILD_UUID_HEX,
+            _FIRST_CHILD_UUID_HEX,
+            _SECOND_CHILD_UUID_HEX,
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="second submit failed"):
+        manager.submit_children_if_current(parent, parent._attempt, [
+            {"kind": "cut", "target": lambda _child: None},
+            {"kind": "cut", "target": lambda _child: None},
+        ])
+
+    assert manager.pending_count == 0
+    assert manager.get(incumbent.id) is incumbent
+    assert [job.id for job in manager.snapshot_jobs()] == [parent.id, incumbent.id]
+    assert parent.result is original_result
+    stored = json.loads(store.read_text())["jobs"]
+    assert set(stored) == {parent.id, incumbent.id}
+    assert stored[incumbent.id]["result"] == {"incumbent": True}
+    attempts = tmp_path / ".attempts" / "clip"
+    assert not attempts.exists() or list(attempts.iterdir()) == []
+    manager.shutdown(wait=True)
 
 
 def test_atomic_fanout_midbatch_failure_releases_each_reservation_exactly_once(tmp_path):
