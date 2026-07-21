@@ -633,11 +633,11 @@ def _build_server():
         return _safe("update_settings", lambda: _client.update_settings(changes))
 
     @mcp.tool()
-    def edit_word(transcript_id: str, word_index: int, op: str, text: str = "") -> dict:
-        """Edit ONE transcript word in place — op = set_text|delete|insert_after|merge_next (``text``
+    def edit_word(transcript_id: str, word_index: int, op: str, w: str = "") -> dict:
+        """Edit ONE transcript word in place — op = set_text|delete|insert_after|merge_next (``w``
         required for set_text/insert_after). Re-renders srt/vtt/txt + re-indexes. Fix a misheard word
         before captioning."""
-        return _safe("edit_word", lambda: _client.edit_word(transcript_id, word_index, op, text=text or None))
+        return _safe("edit_word", lambda: _client.edit_word(transcript_id, word_index, op, w=w or None))
 
     @mcp.tool()
     def dismiss_transcribe(transcript_id: str) -> dict:

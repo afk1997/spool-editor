@@ -1267,7 +1267,12 @@ def edit_transcript_word(tid, idx):
         return jsonify({"error": "word_not_found"}), 404
     body = request.get_json(silent=True) or {}
     op = str(body.get("op") or "")
-    kw = {"w": body["w"]} if isinstance(body.get("w"), str) else {}
+    canonical_w = body.get("w")
+    legacy_text = body.get("text")
+    if "w" in body and "text" in body and canonical_w != legacy_text:
+        return jsonify({"error": "conflicting_word_text"}), 400
+    replacement = canonical_w if isinstance(canonical_w, str) else legacy_text
+    kw = {"w": replacement} if isinstance(replacement, str) else {}
     try:
         word = transcript_io.apply_word_op(data, pos, op, **kw)
     except transcript_io.WordOpError as e:
@@ -1280,7 +1285,10 @@ def edit_transcript_word(tid, idx):
     if idx is not None:
         flat, _ = transcript_io.flat_text(data.get("words") or [], data.get("segments") or [])
         idx.index(tid, flat)
-    return jsonify({"tid": tid, "word": word})
+    response = jsonify({"tid": tid, "word": word})
+    if isinstance(legacy_text, str):
+        response.headers["Warning"] = '299 Spool "text is deprecated; use w"'
+    return response
 
 
 @api_v1_bp.get("/transcripts/<tid>/chunk")
@@ -2426,6 +2434,179 @@ def agent_message():
 
 # ----- OpenAPI schema -------------------------------------------------
 
+_WORD_EDIT_RESPONSE_SCHEMA = {
+    "type": "object",
+    "required": ["tid", "word"],
+    "properties": {
+        "tid": {"type": "string"},
+        "word": {
+            "type": "object",
+            "required": ["idx", "w"],
+            "properties": {
+                "idx": {"type": "integer"},
+                "w": {"type": "string"},
+            },
+            "additionalProperties": True,
+        },
+    },
+}
+
+_BULK_SUBMIT_RESPONSE_SCHEMA = {
+    "type": "object",
+    "required": ["submitted", "failed", "results"],
+    "properties": {
+        "submitted": {"type": "integer"},
+        "failed": {"type": "integer"},
+        "results": {
+            "type": "array",
+            "items": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "required": ["url", "id", "title"],
+                        "properties": {
+                            "url": {"type": "string"},
+                            "id": {"type": "string"},
+                            "title": {"type": "string"},
+                        },
+                    },
+                    {
+                        "type": "object",
+                        "required": ["url", "error"],
+                        "properties": {
+                            "url": {"type": "string"},
+                            "error": {"type": "string"},
+                            "retry_after": {"type": "integer"},
+                        },
+                    },
+                ],
+            },
+        },
+    },
+}
+
+_WORD_EDIT_OPERATION = {
+    "summary": "Edit a transcript word (set_text/delete/insert_after/merge_next)",
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "required": ["op"],
+                    "description": (
+                        "Use canonical `w` for set_text/insert_after. The deprecated "
+                        "`text` field remains accepted with a Warning header; supplying "
+                        "both fields with different values returns conflicting_word_text."
+                    ),
+                    "properties": {
+                        "op": {
+                            "type": "string",
+                            "enum": ["set_text", "delete", "insert_after", "merge_next"],
+                        },
+                        "w": {"type": "string"},
+                        "text": {"type": "string", "deprecated": True},
+                    },
+                    "oneOf": [
+                        {
+                            "required": ["op"],
+                            "properties": {
+                                "op": {
+                                    "type": "string",
+                                    "enum": ["set_text", "insert_after"],
+                                },
+                            },
+                            "anyOf": [
+                                {"required": ["w"]},
+                                {"required": ["text"]},
+                            ],
+                        },
+                        {
+                            "required": ["op"],
+                            "properties": {
+                                "op": {
+                                    "type": "string",
+                                    "enum": ["delete", "merge_next"],
+                                },
+                            },
+                            "not": {
+                                "anyOf": [
+                                    {"required": ["w"]},
+                                    {"required": ["text"]},
+                                ],
+                            },
+                        },
+                    ],
+                },
+            },
+        },
+    },
+    "responses": {
+        "200": {
+            "description": "Edited transcript word",
+            "content": {"application/json": {"schema": _WORD_EDIT_RESPONSE_SCHEMA}},
+            "headers": {
+                "Warning": {
+                    "description": "Present when deprecated `text` was supplied.",
+                    "schema": {
+                        "type": "string",
+                        "enum": ['299 Spool "text is deprecated; use w"'],
+                    },
+                },
+            },
+        },
+        "400": {
+            "description": "Invalid word operation or conflicting replacement fields",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["error"],
+                        "properties": {
+                            "error": {
+                                "type": "string",
+                                "enum": ["bad_word_op", "conflicting_word_text"],
+                            },
+                            "detail": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
+
+_BULK_SUBMIT_OPERATION = {
+    "summary": "Submit many downloads",
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "required": ["urls"],
+                    "properties": {
+                        "urls": {"type": "array", "items": {"type": "string"}},
+                        "format": {"type": "string", "enum": ["video", "audio"]},
+                        "format_id": {"type": "string"},
+                        "auto_transcribe": {"type": "boolean"},
+                    },
+                },
+            },
+        },
+    },
+    "responses": {
+        status: {
+            "description": description,
+            "content": {"application/json": {"schema": _BULK_SUBMIT_RESPONSE_SCHEMA}},
+        }
+        for status, description in (
+            ("201", "All downloads submitted"),
+            ("207", "Partial submission result"),
+        )
+    },
+}
+
 # Hand-rolled because pulling in flask-openapi3 / apispec for ~25
 # routes is overkill, and we want the doc to read like prose, not
 # auto-generated noise. Keep this in sync with the actual handlers
@@ -2468,7 +2649,7 @@ _OPENAPI_DOC = {
                            "description": "Opaque key; same key returns same job for 24h."},
                       ]},
         },
-        "/jobs/bulk":          {"post": {"summary": "Submit many downloads"}},
+        "/jobs/bulk":          {"post": _BULK_SUBMIT_OPERATION},
         "/jobs/{job_id}":          {"get":  {"summary": "Get one job"}},
         "/jobs/{job_id}/pause":    {"post": {"summary": "Pause a running job"}},
         "/jobs/{job_id}/resume":   {"post": {"summary": "Resume a paused job"}},
@@ -2489,7 +2670,7 @@ _OPENAPI_DOC = {
         "/transcripts/{tid}":           {"get":  {"summary": "Get one transcript"}},
         "/transcripts/{tid}/cancel":    {"post": {"summary": "Cancel a transcribe"}},
         "/transcripts/{tid}/dismiss":   {"post": {"summary": "Drop a finished transcribe"}},
-        "/transcripts/{tid}/words/{idx}": {"post": {"summary": "Edit a transcript word (set_text/delete/insert_after/merge_next)"}},
+        "/transcripts/{tid}/words/{idx}": {"post": _WORD_EDIT_OPERATION},
         "/transcripts/{tid}/export.{fmt}": {"get": {"summary": "Export txt/srt/vtt/json"}},
         "/transcripts/{tid}/chunk": {"get": {
             "summary": "Paginated read of a transcript (for MCP / context-bounded clients)",

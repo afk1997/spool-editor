@@ -4,10 +4,17 @@ discipline as test_trove_client_clips.py: no network, just assert the request th
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 from trove_client import TroveClient
+
+
+PHASE0_CONTRACT = json.loads(
+    (Path(__file__).resolve().parents[2] / "contracts/v1/phase0-contract.json")
+    .read_text(encoding="utf-8")
+)
 
 
 class _FakeResp:
@@ -112,14 +119,20 @@ def test_settings_get_and_patch(c, captured):
     assert captured[-1]["method"] == "PATCH" and _body(captured) == {"fast": True}
 
 
-def test_edit_word_and_dismiss_transcribe(c, captured):
-    c.edit_word("t1", 3, "set_text", text="hello")
+def test_contract_fixture_edit_word_and_dismiss_transcribe(c, captured):
+    request = PHASE0_CONTRACT["word_edit"]["request"]
+    c.edit_word("t1", 3, request["op"], w=request["w"])
     assert captured[-1]["method"] == "POST" and captured[-1]["url"].endswith("/api/v1/transcripts/t1/words/3")
-    assert _body(captured) == {"op": "set_text", "text": "hello"}
+    assert _body(captured) == request
     c.edit_word("t1", 4, "delete")
-    assert _body(captured) == {"op": "delete"}                       # no text key when not given
+    assert _body(captured) == {"op": "delete"}                       # no w key when not given
     c.dismiss_transcribe("t1")
     assert captured[-1]["method"] == "POST" and captured[-1]["url"].endswith("/api/v1/transcripts/t1/dismiss")
+
+
+def test_edit_word_legacy_python_keyword_still_sends_canonical_w(c, captured):
+    c.edit_word("t1", 3, "set_text", text="legacy caller")
+    assert _body(captured) == {"op": "set_text", "w": "legacy caller"}
 
 
 def test_source_signals_windowed(c, captured):

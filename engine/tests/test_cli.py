@@ -10,8 +10,15 @@ import io
 import sys
 import json
 import subprocess
+from pathlib import Path
 import pytest
 import cli
+
+
+PHASE0_CONTRACT = json.loads(
+    (Path(__file__).resolve().parents[2] / "contracts/v1/phase0-contract.json")
+    .read_text(encoding="utf-8")
+)
 
 
 def test_banner_only_prints_to_tty(monkeypatch, capsys):
@@ -83,6 +90,28 @@ def test_cmd_produce_with_recipe_id(monkeypatch, capsys):
     assert rc == 0
     assert captured["path"] == "/api/v1/sources/src1/produce"
     assert captured["body"] == {"recipe_id": "r1"}
+
+
+def test_contract_fixture_cli_word_edit_sends_canonical_w(monkeypatch, capsys):
+    captured = {}
+    contract = PHASE0_CONTRACT["word_edit"]
+
+    def fake_post(path, body=None, **_kwargs):
+        captured["path"], captured["body"] = path, body
+        return contract["response_subset"]
+
+    monkeypatch.setattr(cli, "post", fake_post)
+    assert cli.main([
+        "word-edit",
+        contract["response_subset"]["tid"],
+        str(contract["response_subset"]["word"]["idx"]),
+        contract["request"]["op"],
+        "--text",
+        contract["request"]["w"],
+    ]) == 0
+
+    assert captured["path"] == "/api/v1/transcripts/tx_1/words/7"
+    assert captured["body"] == contract["request"]
 
 
 def test_cmd_produce_recipe_id_and_body_are_mutually_exclusive():

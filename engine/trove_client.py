@@ -286,12 +286,16 @@ class TroveClient:
     def dismiss_transcribe(self, tid: str):
         return self.post(f"/api/v1/transcripts/{tid}/dismiss")
 
-    def edit_word(self, tid: str, idx: int, op: str, *, text: str | None = None) -> dict:
+    def edit_word(self, tid: str, idx: int, op: str, *, w: str | None = None,
+                  text: str | None = None) -> dict:
         """Edit one transcript word in place (``set_text``/``delete``/``insert_after``/``merge_next``);
-        the server re-renders srt/vtt/txt and re-indexes. ``text`` is required for set_text/insert_after."""
+        the server re-renders srt/vtt/txt and re-indexes. ``w`` is required for set_text/insert_after.
+        The deprecated Python ``text=`` keyword remains an additive source-compatibility alias;
+        both forms emit canonical ``w`` on the wire."""
+        replacement = w if w is not None else text
         body: dict = {"op": op}
-        if text is not None:
-            body["text"] = text
+        if replacement is not None:
+            body["w"] = replacement
         return self.post(f"/api/v1/transcripts/{tid}/words/{int(idx)}", body=body)
 
     def export_transcript(self, tid: str, fmt: str = "txt", *,

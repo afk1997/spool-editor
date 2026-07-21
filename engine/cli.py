@@ -968,7 +968,7 @@ def cmd_transcribe_rm(args) -> int: post(f"/api/v1/transcripts/{args.id}/dismiss
 def cmd_word_edit(args) -> int:
     body = {"op": args.op}
     if args.text is not None:
-        body["text"] = args.text
+        body["w"] = args.text
     _print_json(post(f"/api/v1/transcripts/{args.id}/words/{args.index}", body))
     return 0
 

@@ -21,12 +21,19 @@ import os
 import socket
 import threading
 import time
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
 from trove_client import TroveClient, TroveError, _page_qs, _parse_sse
+
+
+PHASE0_CONTRACT = json.loads(
+    (Path(__file__).resolve().parents[2] / "contracts/v1/phase0-contract.json")
+    .read_text(encoding="utf-8")
+)
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +225,33 @@ def test_http_error_raises_trove_error_with_parsed_body(monkeypatch):
         TroveClient().get_job("zzz")
     assert exc.value.status == 404
     assert exc.value.body == {"error": "not_found"}
+
+
+@pytest.mark.parametrize(
+    ("status", "fixture_key"),
+    [(429, "queue_full"), (409, "agent_mutation_disabled")],
+)
+def test_contract_fixture_structured_error_envelopes_survive_client_mapping(
+    monkeypatch, status, fixture_key,
+):
+    import urllib.error
+    expected = PHASE0_CONTRACT[fixture_key]
+
+    def boom(req, timeout=None):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            status,
+            "contract error",
+            hdrs=None,
+            fp=io.BytesIO(json.dumps(expected).encode()),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    with pytest.raises(TroveError) as exc:
+        TroveClient(base_url="http://x", token="").get_job("contract")
+
+    assert exc.value.status == status
+    assert exc.value.body == expected
 
 
 def test_unreachable_server_raises_systemexit_with_hint(monkeypatch):

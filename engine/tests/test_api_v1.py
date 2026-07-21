@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import copy
 import inspect
+import json
 import threading
 import time
 from pathlib import Path
@@ -19,6 +20,12 @@ from jobs import Job, JobStatus
 import transcribe_jobs
 import safety
 import watcher
+
+
+PHASE0_CONTRACT = json.loads(
+    (Path(__file__).resolve().parents[2] / "contracts/v1/phase0-contract.json")
+    .read_text(encoding="utf-8")
+)
 
 
 @pytest.fixture()
@@ -286,7 +293,7 @@ def test_submit_job_busy_returns_503(client, monkeypatch):
 
 def _assert_queue_full_response(response):
     assert response.status_code == 429
-    assert response.get_json() == {"error": "queue_full", "retry_after": 1}
+    assert response.get_json() == PHASE0_CONTRACT["queue_full"]
     assert response.headers["Retry-After"] == "1"
 
 
@@ -1616,6 +1623,21 @@ def test_list_transcripts_pagination(client):
 
 # ---- bulk submit ----------------------------------------------------
 
+def test_contract_fixture_bulk_submit_uses_real_route_validation(client):
+    app, c = client
+    contract = PHASE0_CONTRACT["bulk_submit"]
+
+    def deterministic_enqueue(url, _fmt, _fmt_id, title, _thumbnail="", **_kwargs):
+        job = Job(id="job_1", url=url, title=title, status=JobStatus.QUEUED)
+        app.extensions["trove.jobs"]._jobs[job.id] = job
+        return job.id
+
+    app.extensions["trove.actions"]["enqueue_download"] = deterministic_enqueue
+    response = c.post("/api/v1/jobs/bulk", json=contract["request"])
+
+    assert response.status_code == 207
+    assert response.get_json() == contract["response"]
+
 def test_submit_bulk_partial_failure(client):
     # After the bulk-no-probe fix, _submit_one is called with probe=False so
     # run_info is NOT invoked on the request thread — no monkeypatch needed.
@@ -1938,6 +1960,79 @@ def _seed_done_transcript(app, tmp_path, *, body_text: str | None = None,
 
 # ---- transcript word editing (drives caption re-burn + the ripple cut) ----
 
+def test_contract_fixture_word_edit_supports_canonical_and_legacy_wire_shapes(
+    client, tmp_path,
+):
+    app, c = client
+    contract = PHASE0_CONTRACT["word_edit"]
+    expected = contract["response_subset"]
+    _seed_done_transcript(app, tmp_path, words_data={
+        "schema_version": 2,
+        "duration": 1.0,
+        "words": [{
+            "idx": expected["word"]["idx"],
+            "w": "uncorrected",
+            "original_w": "uncorrected",
+            "start": 0.0,
+            "end": 1.0,
+            "edited": False,
+            "deleted": False,
+        }],
+        "segments": [],
+    })
+    tm = app.extensions["trove.transcribe"]
+    transcript = tm._jobs.pop("t1")
+    transcript.id = expected["tid"]
+    tm._jobs[transcript.id] = transcript
+    endpoint = (
+        f"/api/v1/transcripts/{expected['tid']}/words/"
+        f"{expected['word']['idx']}"
+    )
+
+    canonical = c.post(endpoint, json=contract["request"])
+    assert canonical.status_code == 200
+    assert canonical.get_json()["tid"] == expected["tid"]
+    assert {
+        key: canonical.get_json()["word"][key]
+        for key in expected["word"]
+    } == expected["word"]
+    assert "Warning" not in canonical.headers
+
+    legacy = c.post(endpoint, json=contract["legacy_request"])
+    assert legacy.status_code == 200
+    assert legacy.headers["Warning"] == '299 Spool "text is deprecated; use w"'
+    assert {
+        key: legacy.get_json()["word"][key]
+        for key in expected["word"]
+    } == expected["word"]
+
+
+@pytest.mark.parametrize(
+    ("canonical_w", "legacy_text"),
+    [
+        ("corrected", "different"),
+        ("corrected", 123),
+        (123, "corrected"),
+        ("corrected", None),
+        (None, "corrected"),
+    ],
+)
+def test_contract_fixture_word_edit_rejects_conflicting_w_and_text(
+    client, tmp_path, canonical_w, legacy_text,
+):
+    app, c = client
+    request_body = {
+        "op": PHASE0_CONTRACT["word_edit"]["request"]["op"],
+        "w": canonical_w,
+        "text": legacy_text,
+    }
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())
+
+    response = c.post("/api/v1/transcripts/t1/words/1", json=request_body)
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "conflicting_word_text"}
+
 def _editable_words():
     return {"schema_version": 2, "duration": 2.1,
             "segments": [{"start": 0.0, "end": 2.1, "word_idxs": [0, 1, 2], "speaker": None}],
@@ -2179,6 +2274,63 @@ def test_openapi_documents_every_v1_route(client):
 
     missing = actual - documented
     assert not missing, f"undocumented v1 routes: {sorted(missing)}"
+
+
+def test_contract_fixture_openapi_documents_word_edit_and_bulk_submit(client):
+    _, c = client
+    paths = c.get("/api/v1/openapi.json").get_json()["paths"]
+
+    word = paths["/transcripts/{tid}/words/{idx}"]["post"]
+    word_request = word["requestBody"]["content"]["application/json"]["schema"]
+    assert set(PHASE0_CONTRACT["word_edit"]["request"]) <= set(
+        word_request["properties"]
+    )
+    replacement_variant, structural_variant = word_request["oneOf"]
+    assert replacement_variant["properties"]["op"]["enum"] == [
+        "set_text", "insert_after",
+    ]
+    assert replacement_variant["required"] == ["op"]
+    assert replacement_variant["anyOf"] == [
+        {"required": ["w"]},
+        {"required": ["text"]},
+    ]
+    assert structural_variant["properties"]["op"]["enum"] == [
+        "delete", "merge_next",
+    ]
+    assert structural_variant["not"] == {
+        "anyOf": [{"required": ["w"]}, {"required": ["text"]}],
+    }
+    word_response = word["responses"]["200"]["content"]["application/json"]["schema"]
+    assert set(PHASE0_CONTRACT["word_edit"]["response_subset"]) <= set(
+        word_response["properties"]
+    )
+    assert set(PHASE0_CONTRACT["word_edit"]["response_subset"]["word"]) <= set(
+        word_response["properties"]["word"]["properties"]
+    )
+    assert word["responses"]["200"]["headers"]["Warning"]["schema"] == {
+        "type": "string",
+        "enum": ['299 Spool "text is deprecated; use w"'],
+    }
+    conflict_schema = word["responses"]["400"]["content"]["application/json"]["schema"]
+    assert "conflicting_word_text" in conflict_schema["properties"]["error"]["enum"]
+
+    bulk = paths["/jobs/bulk"]["post"]
+    bulk_request = bulk["requestBody"]["content"]["application/json"]["schema"]
+    assert set(PHASE0_CONTRACT["bulk_submit"]["request"]) <= set(
+        bulk_request["properties"]
+    )
+    bulk_response = bulk["responses"]["207"]["content"]["application/json"]["schema"]
+    assert set(PHASE0_CONTRACT["bulk_submit"]["response"]) <= set(
+        bulk_response["properties"]
+    )
+    row_variants = bulk_response["properties"]["results"]["items"]["oneOf"]
+    for row in PHASE0_CONTRACT["bulk_submit"]["response"]["results"]:
+        matching_variants = [
+            variant
+            for variant in row_variants
+            if set(variant["required"]) <= set(row) <= set(variant["properties"])
+        ]
+        assert len(matching_variants) == 1, row
 
 
 # ---- SSE events -----------------------------------------------------
@@ -2922,10 +3074,7 @@ def test_agent_route_returns_exact_mutation_disabled_envelope(client, monkeypatc
 
     def disabled(message, **kwargs):
         captured.update(kwargs)
-        return {
-            "error": "agent_mutation_disabled",
-            "message": "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
-        }
+        return dict(PHASE0_CONTRACT["agent_mutation_disabled"])
 
     monkeypatch.setattr(clip_agent, "run_agent", disabled)
     _, c = client
@@ -2936,10 +3085,7 @@ def test_agent_route_returns_exact_mutation_disabled_envelope(client, monkeypatc
     })
 
     assert r.status_code == 409
-    assert r.get_json() == {
-        "error": "agent_mutation_disabled",
-        "message": "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
-    }
+    assert r.get_json() == PHASE0_CONTRACT["agent_mutation_disabled"]
     assert captured["confirmed_tool"] == "delete_recipe"
 
 

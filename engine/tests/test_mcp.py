@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -93,10 +94,11 @@ MUTATING_TOOL_ARGS = {
     "update_watch": {"watch_id": "watch-1", "changes": {}},
 }
 
-MUTATION_DISABLED = {
-    "error": "agent_mutation_disabled",
-    "message": "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
-}
+PHASE0_CONTRACT = json.loads(
+    (Path(__file__).resolve().parents[2] / "contracts/v1/phase0-contract.json")
+    .read_text(encoding="utf-8")
+)
+MUTATION_DISABLED = PHASE0_CONTRACT["agent_mutation_disabled"]
 
 
 def _free_port() -> int:
@@ -366,3 +368,51 @@ def test_every_mutating_mcp_tool_is_disabled_before_client_access(monkeypatch):
             assert json.loads(parts[0].text) == MUTATION_DISABLED, tool_name
 
     asyncio.run(_call_all())
+
+
+def test_contract_fixture_mcp_word_edit_and_bulk_schemas_make_zero_client_calls(
+    monkeypatch,
+):
+    import mcp_server
+
+    calls = []
+
+    class CountingClient:
+        def __getattr__(self, name):
+            def call(*args, **kwargs):
+                calls.append((name, args, kwargs))
+                return {"unexpected": True}
+            return call
+
+    monkeypatch.setattr(mcp_server, "_client", CountingClient())
+    server = mcp_server._build_server()
+
+    async def _inspect_and_call():
+        tools = {tool.name: tool for tool in await server.list_tools()}
+        edit_schema = tools["edit_word"].inputSchema
+        bulk_schema = tools["bulk_download"].inputSchema
+        assert set(PHASE0_CONTRACT["word_edit"]["request"]) <= set(
+            edit_schema["properties"]
+        )
+        assert "text" not in edit_schema["properties"]
+        assert set(PHASE0_CONTRACT["bulk_submit"]["request"]) <= set(
+            bulk_schema["properties"]
+        )
+
+        edit_args = {
+            "transcript_id": PHASE0_CONTRACT["word_edit"]["response_subset"]["tid"],
+            "word_index": PHASE0_CONTRACT["word_edit"]["response_subset"]["word"]["idx"],
+            **PHASE0_CONTRACT["word_edit"]["request"],
+        }
+        results = []
+        for tool_name, args in (
+            ("edit_word", edit_args),
+            ("bulk_download", PHASE0_CONTRACT["bulk_submit"]["request"]),
+        ):
+            result = await server.call_tool(tool_name, args)
+            parts = result[0] if isinstance(result, tuple) else result
+            results.append(json.loads(parts[0].text))
+        return results
+
+    assert asyncio.run(_inspect_and_call()) == [MUTATION_DISABLED, MUTATION_DISABLED]
+    assert calls == []

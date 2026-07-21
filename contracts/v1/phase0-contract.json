@@ -1,0 +1,27 @@
+{
+  "word_edit": {
+    "request": { "op": "set_text", "w": "corrected" },
+    "legacy_request": { "op": "set_text", "text": "corrected" },
+    "response_subset": { "tid": "tx_1", "word": { "idx": 7, "w": "corrected" } }
+  },
+  "bulk_submit": {
+    "request": { "urls": ["https://8.8.8.8/video-a", "--exec=evil"] },
+    "response": {
+      "submitted": 1,
+      "failed": 1,
+      "results": [
+        {
+          "url": "https://8.8.8.8/video-a",
+          "id": "job_1",
+          "title": "https://8.8.8.8/video-a"
+        },
+        { "url": "--exec=evil", "error": "unsupported_url" }
+      ]
+    }
+  },
+  "queue_full": { "error": "queue_full", "retry_after": 1 },
+  "agent_mutation_disabled": {
+    "error": "agent_mutation_disabled",
+    "message": "Agent changes are disabled until the Phase 4 approval and undo contract ships."
+  }
+}
