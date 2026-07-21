@@ -122,6 +122,15 @@ def test_cmd_produce_recipe_id_and_body_are_mutually_exclusive():
         p.parse_args(["produce", "src1", "--recipe-id", "r1", "--body", '{"count":3}'])
 
 
+def test_dismiss_help_marks_history_hidden_without_promising_file_deletion():
+    help_text = " ".join(cli.build_parser().format_help().split())
+
+    assert "dismiss a terminal download from history; managed media remains" in help_text
+    assert "dismiss a finished clip/render job from history; managed media remains" in help_text
+    assert "dismiss a finished transcribe job from history; managed files remain" in help_text
+    assert "delete its file" not in help_text
+
+
 def test_cmd_recipe_crud_verbs_and_paths(monkeypatch, capsys):
     calls = []
 

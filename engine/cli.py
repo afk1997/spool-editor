@@ -1021,9 +1021,8 @@ def build_parser() -> argparse.ArgumentParser:
         return sub.add_parser(name, parents=[json_parent], **kw)
 
     s = _sub("serve", help="run the Trove web/API server")
-    # Defaults come from config.py — env-var overrides honored. Binding to
-    # 0.0.0.0 without TROVE_TOKEN (or TROVE_ALLOW_UNAUTH_PUBLIC=1) is
-    # rejected at runtime by config.assert_safe_bind.
+    # Defaults come from config.py — env-var overrides honored. Public binds
+    # without TROVE_TOKEN are rejected at runtime by config.assert_safe_bind.
     from config import DEFAULT_HOST, DEFAULT_PORT
     s.add_argument("--host", default=DEFAULT_HOST)
     s.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -1066,7 +1065,7 @@ def build_parser() -> argparse.ArgumentParser:
         s = _sub(action, help=f"{action} a download job by id")
         s.add_argument("id")
         s.set_defaults(func=lambda a, action=action: cmd_job_action(a, action))
-    s = _sub("rm", help="dismiss a terminal job + delete its file")
+    s = _sub("rm", help="dismiss a terminal download from history; managed media remains")
     s.add_argument("id")
     s.set_defaults(func=lambda a: cmd_job_action(a, "dismiss"))
 
@@ -1214,7 +1213,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id")
     s.set_defaults(func=lambda a: cmd_clip_action(a, "cancel"))
 
-    s = _sub("clip-rm", help="drop a finished clip/render job")
+    s = _sub(
+        "clip-rm",
+        help="dismiss a finished clip/render job from history; managed media remains",
+    )
     s.add_argument("id")
     s.set_defaults(func=lambda a: cmd_clip_action(a, "dismiss"))
 
@@ -1289,7 +1291,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("op", choices=["set_text", "delete", "insert_after", "merge_next"])
     s.add_argument("--text", default=None, help="new text (for set_text/insert_after)")
     s.set_defaults(func=cmd_word_edit)
-    s = _sub("transcribe-rm", help="dismiss a finished transcribe job")
+    s = _sub(
+        "transcribe-rm",
+        help="dismiss a finished transcribe job from history; managed files remain",
+    )
     s.add_argument("id")
     s.set_defaults(func=cmd_transcribe_rm)
 

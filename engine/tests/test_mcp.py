@@ -416,3 +416,35 @@ def test_contract_fixture_mcp_word_edit_and_bulk_schemas_make_zero_client_calls(
 
     assert asyncio.run(_inspect_and_call()) == [MUTATION_DISABLED, MUTATION_DISABLED]
     assert calls == []
+
+
+def test_dismiss_tool_descriptions_mark_history_hidden_and_preserve_managed_files():
+    import mcp_server
+
+    server = mcp_server._build_server()
+
+    async def _descriptions():
+        return {
+            tool.name: tool.description
+            for tool in await server.list_tools()
+            if tool.name in {
+                "dismiss_download",
+                "dismiss_clip_job",
+                "dismiss_transcribe",
+            }
+        }
+
+    descriptions = asyncio.run(_descriptions())
+    assert descriptions == {
+        "dismiss_download": (
+            "Mark a terminal download hidden in history. Managed media remains on disk."
+        ),
+        "dismiss_clip_job": (
+            "Mark a finished clip/render job hidden in history. "
+            "Managed media remains on disk."
+        ),
+        "dismiss_transcribe": (
+            "Mark a finished transcribe job hidden in history. "
+            "Managed files remain on disk."
+        ),
+    }

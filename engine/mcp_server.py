@@ -232,7 +232,7 @@ def _build_server():
 
     @mcp.tool()
     def dismiss_download(job_id: str) -> dict:
-        """Dismiss a terminal job (done/error/cancelled) and delete its file."""
+        """Mark a terminal download hidden in history. Managed media remains on disk."""
         r = _safe("dismiss_download", lambda: _client.dismiss_job(job_id))
         return {"ok": True, "job_id": job_id} if r is None else r
 
@@ -511,7 +511,7 @@ def _build_server():
 
     @mcp.tool()
     def dismiss_clip_job(job_id: str) -> dict:
-        """Drop a finished (done/error/cancelled) clip job from the queue."""
+        """Mark a finished clip/render job hidden in history. Managed media remains on disk."""
         r = _safe("dismiss_clip_job", lambda: _client.dismiss_clip_job(job_id))
         return {"ok": True, "job_id": job_id} if r is None else r
 
@@ -641,7 +641,7 @@ def _build_server():
 
     @mcp.tool()
     def dismiss_transcribe(transcript_id: str) -> dict:
-        """Drop a finished transcribe job from the list."""
+        """Mark a finished transcribe job hidden in history. Managed files remain on disk."""
         r = _safe("dismiss_transcribe", lambda: _client.dismiss_transcribe(transcript_id))
         return {"ok": True, "transcript_id": transcript_id} if r is None else r
 
