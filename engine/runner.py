@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import json
+import signal
 import shutil
 import subprocess
 import sys
@@ -198,6 +199,52 @@ class DownloadResult:
     error_raw: str = ""
 
 
+class _OwnedDownloadProcess:
+    """Proxy a download parent while owning its POSIX descendant process group."""
+
+    def __init__(self, process, *, owns_group: bool):
+        self._process = process
+        self._pgid = process.pid if owns_group and hasattr(process, "pid") else None
+
+    def __getattr__(self, name):
+        return getattr(self._process, name)
+
+    def _signal_tree(self, sig, fallback) -> None:
+        if self._pgid is not None:
+            try:
+                os.killpg(self._pgid, sig)
+                return
+            except ProcessLookupError:
+                return
+            except (AttributeError, OSError):
+                pass
+        fallback()
+
+    def kill(self) -> None:
+        if self._pgid is None:
+            self._process.kill()
+            return
+        self._signal_tree(getattr(signal, "SIGKILL", signal.SIGTERM), self._process.kill)
+
+    def terminate(self) -> None:
+        if self._pgid is None:
+            self._process.terminate()
+            return
+        self._signal_tree(signal.SIGTERM, self._process.terminate)
+
+
+def _spawn_download_process(argv, **kwargs) -> _OwnedDownloadProcess:
+    """Spawn a download in an isolated POSIX session, with a fake-safe fallback."""
+    owns_group = os.name == "posix"
+    try:
+        process = subprocess.Popen(argv, start_new_session=owns_group, **kwargs)
+    except TypeError:
+        # Some platform shims and lightweight test fakes do not accept the POSIX kwarg.
+        process = subprocess.Popen(argv, **kwargs)
+        owns_group = False
+    return _OwnedDownloadProcess(process, owns_group=owns_group)
+
+
 def _cleanup_glob(out_template: str) -> None:
     base = out_template.replace("%(ext)s", "*")
     for f in glob.glob(base):
@@ -347,8 +394,7 @@ def _run_download_leased(
     """Run yt-dlp to download a media file.
 
     When `progress_cb` and `register_process` are both None, uses a blocking
-    subprocess.run() — this is the path the unit tests exercise. When either
-    is provided, switches to a streaming Popen() path that emits progress
+    communicate() path. When either is provided, switches to a streaming path that emits progress
     events parsed from yt-dlp's --progress-template output.
 
     progress_cb signature:
@@ -369,19 +415,30 @@ def _run_download_leased(
         embed=embed,
     )
 
-    # Legacy blocking path: tests monkeypatch subprocess.run, so keep it intact
-    # when nothing wants progress streaming.
+    # Blocking path still owns a process group so timeout cleanup cannot strand
+    # yt-dlp-spawned ffmpeg/external-downloader descendants.
     if progress_cb is None and register_process is None:
+        proc = _spawn_download_process(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
         try:
-            proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+            stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
+            proc.kill()
+            _wait_until_reaped(proc)
             _cleanup_glob(out_template)
             return DownloadResult(error_category="timeout", error_raw="download timed out")
+        except BaseException:
+            _reap_if_running(proc)
+            raise
         if proc.returncode != 0:
             _cleanup_glob(out_template)
-            stripped = (proc.stderr or "").strip()
+            stripped = (stderr or "").strip()
             return DownloadResult(
-                error_category=classify_error(proc.stderr),
+                error_category=classify_error(stderr),
                 error_raw=stripped.splitlines()[-1] if stripped else "",
             )
         return _resolve_output(out_template, format_choice)
@@ -404,7 +461,7 @@ def _run_download_leased(
     streamed_argv = argv[:1] + progress_argv + argv[1:]
 
     try:
-        proc = subprocess.Popen(
+        proc = _spawn_download_process(
             streamed_argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
