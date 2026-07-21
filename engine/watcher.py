@@ -109,7 +109,9 @@ def _signal_listing_tree(process, pgid: int | None) -> None:
             os.killpg(pgid, getattr(signal, "SIGKILL", signal.SIGTERM))
             return
         except ProcessLookupError:
-            return
+            # A shim may accept start_new_session but ignore it. ESRCH then means
+            # only that the expected group is absent, not that the parent exited.
+            pass
         except (AttributeError, OSError):
             pass
     try:

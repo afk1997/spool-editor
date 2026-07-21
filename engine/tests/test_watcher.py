@@ -444,6 +444,18 @@ def test_listing_process_spawn_falls_back_for_popen_fakes_without_session_kwarg(
     assert "start_new_session" not in calls[1]
 
 
+def test_listing_tree_signal_falls_back_to_parent_when_group_is_missing(monkeypatch):
+    kills = []
+    process = types.SimpleNamespace(kill=lambda: kills.append("parent"))
+    monkeypatch.setattr(
+        watcher.os, "killpg", lambda *_args: (_ for _ in ()).throw(ProcessLookupError()),
+    )
+
+    watcher._signal_listing_tree(process, pgid=4242)
+
+    assert kills == ["parent"]
+
+
 def _listing_process_tree_helper(tmp_path):
     helper = tmp_path / "listing_tree.py"
     helper.write_text(
