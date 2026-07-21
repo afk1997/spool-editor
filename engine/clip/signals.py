@@ -143,7 +143,8 @@ def _rms_db_series(media_path: str, start: float | None = None, end: float | Non
 
 
 def energy_envelope(media_path: str, *, buckets: int = 120,
-                    start: float | None = None, end: float | None = None) -> list[float] | None:
+                    start: float | None = None, end: float | None = None,
+                    use_cache: bool = True) -> list[float] | None:
     """A normalized ``0..1`` loudness envelope for the audio-energy waveform: one bar per bucket
     across the media (or a ``[start, end]`` window), peaks ≈ louder / higher-energy moments. Min–max
     normalized (with a small floor) so the curve fills the display. ``None`` on failure / no audio.
@@ -151,7 +152,7 @@ def energy_envelope(media_path: str, *, buckets: int = 120,
     The full-media series is cached next to the media (``<media>.energy.json``) so repeat loads and
     different bucket counts are instant — the ffmpeg pass runs once per source."""
     series, cache = None, None
-    if start is None and end is None:
+    if use_cache and start is None and end is None:
         cache = os.path.splitext(media_path)[0] + ".energy.json"
         try:
             if os.path.exists(cache) and os.path.getmtime(cache) >= os.path.getmtime(media_path):
@@ -185,7 +186,7 @@ def energy_envelope(media_path: str, *, buckets: int = 120,
 
 
 def filmstrip(media_path: str, start: float, end: float, *, frames: int = 12,
-              height: int = 48) -> str | None:
+              height: int = 48, use_cache: bool = True) -> str | None:
     """A horizontal filmstrip of ``frames`` evenly-spaced thumbnails across ``[start, end]``, as a
     single ``data:image/jpeg;base64,...`` URI — the editor timeline's Video lane. One ffmpeg pass
     (``fps`` sample → ``tile`` into one strip). ``None`` on failure / no video stream."""
@@ -193,13 +194,17 @@ def filmstrip(media_path: str, start: float, end: float, *, frames: int = 12,
     n = max(2, min(40, int(frames)))
     # Cache the strip next to the media keyed by the window+frames+height, so reopening a clip's
     # editor is instant instead of re-running ffmpeg every time. Invalidated if the media is newer.
-    cache = f"{os.path.splitext(media_path)[0]}.{start:.2f}-{end:.2f}-{n}x{int(height)}.strip.txt"
-    try:
-        if os.path.exists(cache) and os.path.getmtime(cache) >= os.path.getmtime(media_path):
-            with open(cache) as f:
-                return f.read() or None
-    except OSError:
-        pass
+    cache = (
+        f"{os.path.splitext(media_path)[0]}.{start:.2f}-{end:.2f}-{n}x{int(height)}.strip.txt"
+        if use_cache else None
+    )
+    if cache:
+        try:
+            if os.path.exists(cache) and os.path.getmtime(cache) >= os.path.getmtime(media_path):
+                with open(cache) as f:
+                    return f.read() or None
+        except OSError:
+            pass
     with tempfile.TemporaryDirectory() as td:
         out = os.path.join(td, "strip.jpg")
         try:
@@ -216,13 +221,14 @@ def filmstrip(media_path: str, start: float, end: float, *, frames: int = 12,
     if not data:
         return None
     uri = "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")
-    try:
-        tmp = cache + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(uri)
-        os.replace(tmp, cache)
-    except OSError:
-        pass
+    if cache:
+        try:
+            tmp = cache + ".tmp"
+            with open(tmp, "w") as f:
+                f.write(uri)
+            os.replace(tmp, cache)
+        except OSError:
+            pass
     return uri
 
 

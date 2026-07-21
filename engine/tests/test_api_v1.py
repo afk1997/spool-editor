@@ -2871,6 +2871,38 @@ def test_source_filmstrip_endpoint_returns_data_uri(client, tmp_path, monkeypatc
     assert c.get("/api/v1/sources/abc/filmstrip").get_json()["strip"] is None
 
 
+def test_source_signal_endpoints_forward_explicit_cache_policy(client, tmp_path, monkeypatch):
+    import clip.signals as sig
+
+    calls = []
+
+    def energy(path, **kwargs):
+        calls.append(("energy", kwargs["use_cache"]))
+        return [0.5]
+
+    def filmstrip(path, start, end, **kwargs):
+        calls.append(("filmstrip", kwargs["use_cache"]))
+        return "data:image/jpeg;base64,AAAA"
+
+    monkeypatch.setattr(sig, "energy_envelope", energy)
+    monkeypatch.setattr(sig, "filmstrip", filmstrip)
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())
+
+    assert c.get("/api/v1/sources/abc/energy?use_cache=0").status_code == 200
+    assert c.get(
+        "/api/v1/sources/abc/filmstrip?start=1&end=2&use_cache=0"
+    ).status_code == 200
+    assert c.get("/api/v1/sources/abc/energy").status_code == 200
+    assert c.get("/api/v1/sources/abc/filmstrip?start=1&end=2").status_code == 200
+    assert calls == [
+        ("energy", False),
+        ("filmstrip", False),
+        ("energy", True),
+        ("filmstrip", True),
+    ]
+
+
 # ---- agent: NL → bounded ReAct tool-loop over the full /api/v1 surface ----
 
 def _enable_reasoning(c):

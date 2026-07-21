@@ -370,6 +370,45 @@ def test_every_mutating_mcp_tool_is_disabled_before_client_access(monkeypatch):
     asyncio.run(_call_all())
 
 
+def test_phase_zero_signal_reads_disable_durable_cache(monkeypatch):
+    import mcp_server
+
+    calls = []
+
+    class CountingClient:
+        def source_energy(self, source_id, **kwargs):
+            calls.append(("source_energy", source_id, kwargs))
+            return {"bars": [0.5], "buckets": kwargs["buckets"]}
+
+        def source_filmstrip(self, source_id, **kwargs):
+            calls.append(("source_filmstrip", source_id, kwargs))
+            return {"strip": "data:image/jpeg;base64,AAAA", "frames": kwargs["frames"]}
+
+    monkeypatch.setattr(mcp_server, "_client", CountingClient())
+    server = mcp_server._build_server()
+
+    async def _call_signals():
+        await server.call_tool("source_energy", {"source_id": "src1"})
+        await server.call_tool(
+            "source_filmstrip",
+            {"source_id": "src1", "start": 1.0, "end": 5.0},
+        )
+
+    asyncio.run(_call_signals())
+    assert calls == [
+        (
+            "source_energy",
+            "src1",
+            {"buckets": 96, "start": None, "end": None, "use_cache": False},
+        ),
+        (
+            "source_filmstrip",
+            "src1",
+            {"start": 1.0, "end": 5.0, "frames": 12, "use_cache": False},
+        ),
+    ]
+
+
 def test_contract_fixture_mcp_word_edit_and_bulk_schemas_make_zero_client_calls(
     monkeypatch,
 ):

@@ -342,22 +342,28 @@ class TroveClient:
     # ----- clips (the render queue) -----------------------------------
 
     def source_energy(self, source_id: str, *, buckets: int = 96,
-                      start: float | None = None, end: float | None = None) -> dict:
+                      start: float | None = None, end: float | None = None,
+                      use_cache: bool = True) -> dict:
         """Normalized 0..1 loudness envelope (the audio-energy waveform); optional ``start``/``end``
         windows it to a clip. Parity with the studio's sourceEnergy."""
         qs = f"?buckets={int(buckets)}"
         if start is not None and end is not None:
             qs += f"&start={float(start)}&end={float(end)}"
+        if not use_cache:
+            qs += "&use_cache=0"
         return self.get(f"/api/v1/sources/{source_id}/energy" + qs)
 
     def source_scenes(self, source_id: str, *, start: float, end: float) -> dict:
         """Scene-cut timestamps within ``[start, end]`` (the editor timeline's Scenes lane)."""
         return self.get(f"/api/v1/sources/{source_id}/scenes?start={float(start)}&end={float(end)}")
 
-    def source_filmstrip(self, source_id: str, *, start: float, end: float, frames: int = 12) -> dict:
+    def source_filmstrip(self, source_id: str, *, start: float, end: float,
+                         frames: int = 12, use_cache: bool = True) -> dict:
         """Thumbnail filmstrip data-URI across ``[start, end]`` (the editor timeline's Video lane)."""
-        return self.get(f"/api/v1/sources/{source_id}/filmstrip"
-                        f"?start={float(start)}&end={float(end)}&frames={int(frames)}")
+        qs = f"?start={float(start)}&end={float(end)}&frames={int(frames)}"
+        if not use_cache:
+            qs += "&use_cache=0"
+        return self.get(f"/api/v1/sources/{source_id}/filmstrip" + qs)
 
     def find_moments(self, source_id: str, *, mode: str = "funny", count: int = 5,
                      window: tuple[float, float] | None = None) -> dict:

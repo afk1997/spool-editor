@@ -649,7 +649,9 @@ def _build_server():
     def source_energy(source_id: str, buckets: int = 96, start: float | None = None,
                       end: float | None = None) -> dict:
         """Normalized 0..1 loudness envelope (the audio-energy waveform); optional start/end window it."""
-        return _safe("source_energy", lambda: _client.source_energy(source_id, buckets=buckets, start=start, end=end))
+        return _safe("source_energy", lambda: _client.source_energy(
+            source_id, buckets=buckets, start=start, end=end, use_cache=False,
+        ))
 
     @mcp.tool()
     def source_scenes(source_id: str, start: float, end: float) -> dict:
@@ -659,7 +661,9 @@ def _build_server():
     @mcp.tool()
     def source_filmstrip(source_id: str, start: float, end: float, frames: int = 12) -> dict:
         """Thumbnail filmstrip data-URI across [start, end] (the editor timeline's Video lane)."""
-        return _safe("source_filmstrip", lambda: _client.source_filmstrip(source_id, start=start, end=end, frames=frames))
+        return _safe("source_filmstrip", lambda: _client.source_filmstrip(
+            source_id, start=start, end=end, frames=frames, use_cache=False,
+        ))
 
     @mcp.tool()
     def download_render(clip_id: str, render_id: str, save_to: str) -> dict:

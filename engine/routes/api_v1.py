@@ -1708,6 +1708,12 @@ def _opt_window(req):
         return None, None
 
 
+def _use_signal_cache(req) -> bool:
+    """Default UI/REST reads to cached; automation may request a zero-write calculation."""
+    value = str(req.args.get("use_cache", "1")).strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
 @api_v1_bp.get("/sources/<source_id>/energy")
 @token_required
 def source_energy(source_id):
@@ -1724,7 +1730,13 @@ def source_energy(source_id):
     except (TypeError, ValueError):
         buckets = 96
     start, end = _opt_window(request)
-    bars = signals.energy_envelope(src.file_path, buckets=buckets, start=start, end=end)
+    bars = signals.energy_envelope(
+        src.file_path,
+        buckets=buckets,
+        start=start,
+        end=end,
+        use_cache=_use_signal_cache(request),
+    )
     return jsonify({"bars": bars or [], "buckets": buckets})
 
 
@@ -1759,7 +1771,16 @@ def source_filmstrip(source_id):
         frames = max(2, min(40, int(request.args.get("frames", 12))))
     except (TypeError, ValueError):
         frames = 12
-    return jsonify({"strip": signals.filmstrip(src.file_path, start, end, frames=frames), "frames": frames})
+    return jsonify({
+        "strip": signals.filmstrip(
+            src.file_path,
+            start,
+            end,
+            frames=frames,
+            use_cache=_use_signal_cache(request),
+        ),
+        "frames": frames,
+    })
 
 
 @api_v1_bp.post("/sources/<source_id>/rank")

@@ -6,8 +6,18 @@ output, so we mock subprocess; annotate ties them onto candidates' ``features``.
 from __future__ import annotations
 
 import types
+from pathlib import Path
 
 from clip import signals
+
+
+def _filesystem_snapshot(root: Path) -> dict[str, tuple[bytes, int]]:
+    """Capture durable file bytes + mtimes so a read path cannot hide a rewrite."""
+    return {
+        str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
 
 
 # --- text_signals (deterministic, no LLM, no media) --------------------------
@@ -130,6 +140,47 @@ def test_energy_envelope_buckets_and_normalizes(monkeypatch):
     assert bars[1] > bars[2] > bars[0]                 # -20 > -30 > -40 ordering preserved
     monkeypatch.setattr(signals, "_rms_db_series", lambda *a, **k: None)   # no audio
     assert signals.energy_envelope("m.mp4", buckets=4, start=0, end=8) is None
+
+
+def test_energy_envelope_no_cache_returns_fresh_result_without_filesystem_delta(
+    tmp_path, monkeypatch
+):
+    media = tmp_path / "source.mp4"
+    media.write_bytes(b"media")
+    cache = tmp_path / "source.energy.json"
+    cache.write_text('{"db": [-1.0, -1.0]}', encoding="utf-8")
+    monkeypatch.setattr(
+        signals,
+        "_rms_db_series",
+        lambda *args, **kwargs: [-40.0, -20.0, -30.0, -10.0],
+    )
+    before = _filesystem_snapshot(tmp_path)
+
+    bars = signals.energy_envelope(str(media), buckets=4, use_cache=False)
+
+    assert bars == [0.06, 0.6867, 0.3733, 1.0]
+    assert _filesystem_snapshot(tmp_path) == before
+
+
+def test_filmstrip_no_cache_returns_fresh_result_without_filesystem_delta(
+    tmp_path, monkeypatch
+):
+    media = tmp_path / "source.mp4"
+    media.write_bytes(b"media")
+    cache = tmp_path / "source.1.00-5.00-2x48.strip.txt"
+    cache.write_text("data:image/jpeg;base64,OLD", encoding="utf-8")
+
+    def fake_run(args, **kwargs):
+        Path(args[-1]).write_bytes(b"fresh-jpeg")
+        return types.SimpleNamespace(stderr="", stdout="", returncode=0)
+
+    monkeypatch.setattr(signals.subprocess, "run", fake_run)
+    before = _filesystem_snapshot(tmp_path)
+
+    strip = signals.filmstrip(str(media), 1.0, 5.0, frames=2, use_cache=False)
+
+    assert strip == "data:image/jpeg;base64,ZnJlc2gtanBlZw=="
+    assert _filesystem_snapshot(tmp_path) == before
 
 
 def test_scene_cuts_offsets_window_relative_times_to_absolute(monkeypatch):

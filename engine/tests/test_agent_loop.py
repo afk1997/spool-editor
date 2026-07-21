@@ -198,6 +198,29 @@ def test_phase_zero_catalog_is_fully_classified_and_prompt_is_read_only():
         assert (f"- {name}(" in prompt) is (name in agent_tools.READ_ONLY_TOOLS)
 
 
+def test_phase_zero_source_energy_agent_read_disables_durable_cache():
+    calls = []
+
+    class Client:
+        def source_energy(self, source_id, **kwargs):
+            calls.append((source_id, kwargs))
+            return {"bars": [0.5], "buckets": 96}
+
+    out = agent.run_agent(
+        "inspect source energy",
+        client=Client(),
+        provider=_provider(
+            json.dumps({"tool": "source_energy", "args": {"source_id": "src1"}}),
+            json.dumps({"final": {"reply": "done"}}),
+        ),
+    )
+
+    assert out["reply"] == "done"
+    assert calls == [
+        ("src1", {"start": None, "end": None, "use_cache": False})
+    ]
+
+
 @pytest.mark.parametrize(
     "tool_name",
     sorted(set(agent_tools.CATALOG) - READ_ONLY_TOOL_NAMES),

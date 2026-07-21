@@ -142,3 +142,12 @@ def test_source_signals_windowed(c, captured):
     assert captured[-1]["url"].endswith("/api/v1/sources/s1/scenes?start=10.0&end=40.0")
     c.source_filmstrip("s1", start=10, end=40, frames=8)
     assert captured[-1]["url"].endswith("/api/v1/sources/s1/filmstrip?start=10.0&end=40.0&frames=8")
+
+
+def test_source_signal_client_can_explicitly_disable_durable_cache(c, captured):
+    c.source_energy("s1", use_cache=False)
+    assert captured[-1]["url"] == "http://x/api/v1/sources/s1/energy?buckets=96&use_cache=0"
+    c.source_filmstrip("s1", start=10, end=40, use_cache=False)
+    assert captured[-1]["url"].endswith(
+        "/api/v1/sources/s1/filmstrip?start=10.0&end=40.0&frames=12&use_cache=0"
+    )
