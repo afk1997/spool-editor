@@ -28,7 +28,7 @@ DEFAULT_BASE_URL: str = os.environ.get(
 
 class UnauthenticatedPublicBindError(RuntimeError):
     """Raised when the server would bind to a non-loopback address with
-    no TROVE_TOKEN set and no explicit opt-in via TROVE_ALLOW_UNAUTH_PUBLIC=1.
+    no TROVE_TOKEN set.
 
     Refusing to start protects users from accidentally exposing an
     unauthenticated download/transcribe API to their LAN or, worse,
@@ -80,11 +80,9 @@ def rate_limit_max_keys(*, env: dict[str, str] | None = None) -> int:
 def assert_safe_bind(host: str, *, env: dict[str, str] | None = None) -> None:
     """Raise if `host` would expose Trove publicly without a token.
 
-    Allows the bind when ANY of the following is true:
+    Allows the bind when either of the following is true:
       * host is loopback (127.0.0.1, ::1, localhost)
       * TROVE_TOKEN is set (every /api/* request must authenticate)
-      * TROVE_ALLOW_UNAUTH_PUBLIC=1 (explicit opt-in for trusted LANs,
-        Docker port-forwarding without auth, kiosks, etc.)
 
     `env` is injectable for unit tests; defaults to os.environ.
     """
@@ -93,8 +91,6 @@ def assert_safe_bind(host: str, *, env: dict[str, str] | None = None) -> None:
         return
     if (e.get("TROVE_TOKEN") or "").strip():
         return
-    if (e.get("TROVE_ALLOW_UNAUTH_PUBLIC") or "").strip() == "1":
-        return
     raise UnauthenticatedPublicBindError(
         f"Refusing to bind to {host!r} without authentication.\n"
         "Trove's HTTP API has no auth by default; binding to a non-\n"
@@ -102,7 +98,5 @@ def assert_safe_bind(host: str, *, env: dict[str, str] | None = None) -> None:
         "who can reach the port.\n\n"
         "Pick ONE:\n"
         "  1. Bind to localhost only:   export HOST=127.0.0.1\n"
-        "  2. Require a bearer token:   export TROVE_TOKEN=$(openssl rand -hex 32)\n"
-        "  3. Acknowledge the risk:     export TROVE_ALLOW_UNAUTH_PUBLIC=1\n"
-        "     (only safe on a trusted LAN or behind a private network)"
+        "  2. Require a bearer token:   export TROVE_TOKEN=$(openssl rand -hex 32)"
     )

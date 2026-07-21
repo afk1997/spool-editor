@@ -41,10 +41,11 @@ or with Docker:
 
 ```bash
 docker build -t trove .
-docker run -p 8899:8899 -e HOST=0.0.0.0 -e TROVE_ALLOW_UNAUTH_PUBLIC=1 trove
+export TROVE_TOKEN="$(openssl rand -hex 32)"
+docker run -p 8899:8899 -e HOST=0.0.0.0 -e TROVE_TOKEN="$TROVE_TOKEN" trove
 ```
 
-*the `-e HOST=0.0.0.0` is required for Docker port-forwarding. trove refuses to start on a non-loopback bind without auth — `TROVE_ALLOW_UNAUTH_PUBLIC=1` is the explicit "I know, I'm only exposing this to my host" opt-in. **for LAN/internet exposure, drop the opt-in and set `TROVE_TOKEN` instead — see below.***
+*the `-e HOST=0.0.0.0` is required for Docker port-forwarding. every non-loopback bind requires `TROVE_TOKEN`, including ports published only to the Docker host. keep the generated token private and send it as `Authorization: Bearer <token>` on API requests.*
 
 <p align="center">
   <img src="docs/screenshots/mobile.png" alt="trove on mobile" width="320">
@@ -57,10 +58,9 @@ docker run -p 8899:8899 -e HOST=0.0.0.0 -e TROVE_ALLOW_UNAUTH_PUBLIC=1 trove
 | `HOST` | `127.0.0.1` | bind address. set to `0.0.0.0` only with a token. |
 | `PORT` | `8899` | TCP port. |
 | `TROVE_TOKEN` | *(unset)* | when set, every `/api/*` request must send `Authorization: Bearer <token>`. |
-| `TROVE_ALLOW_UNAUTH_PUBLIC` | *(unset)* | set to `1` to allow `HOST=0.0.0.0` with no token (Docker port-forward, trusted LAN). without this opt-in, trove refuses to start on a non-loopback bind unless `TROVE_TOKEN` is set. |
 | `TROVE_COOKIES_FROM_BROWSER` | *(unset)* | one of `safari\|chrome\|firefox\|brave\|edge`. required for YouTube right now (Google blocks cookieless yt-dlp). |
 | `TROVE_CONCURRENT_FRAGMENTS` | `4` | parallel fragment downloads for HLS streams (YouTube etc.). clamped 1–32. |
-| `TROVE_JOB_TTL_SECONDS` | `3600` | how long completed jobs (and their files) linger before being swept. |
+| `TROVE_JOB_TTL_SECONDS` | `3600` | how long completed job history lingers before being swept. managed media files persist until explicitly deleted. |
 | `TROVE_MAX_WORKERS` | `4` | concurrent downloads. excess returns HTTP 503. |
 | `TROVE_RATE_LIMIT` | `30` | requests per minute per IP. set to `0` to disable. |
 | `TROVE_BATCH_MAX_URLS` | `50` | hard cap on URLs accepted per `/api/batch-download` request. |
@@ -77,7 +77,7 @@ the defaults assume **localhost only**. to expose trove safely:
 2. set host: `export HOST=0.0.0.0`
 3. run behind a reverse proxy that adds HTTPS (Caddy, nginx, fly.io, etc.).
 
-without `TROVE_TOKEN`, anyone who can reach the port can download.
+trove refuses to start any non-loopback bind without `TROVE_TOKEN`; there is no unauthenticated public-bind override.
 
 ## YouTube and cookies
 

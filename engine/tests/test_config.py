@@ -59,16 +59,12 @@ def test_public_bind_with_token_allowed():
     config.assert_safe_bind("0.0.0.0", env={"TROVE_TOKEN": "secret"})
 
 
-def test_public_bind_with_explicit_optin_allowed():
-    config.assert_safe_bind("0.0.0.0", env={"TROVE_ALLOW_UNAUTH_PUBLIC": "1"})
-
-
-def test_optin_must_be_exactly_1():
-    # Anything other than "1" should NOT count as opt-in — prevents typos
-    # like TROVE_ALLOW_UNAUTH_PUBLIC=true silently disabling the guard.
-    for v in ("true", "yes", "0", "", "TRUE"):
-        with pytest.raises(config.UnauthenticatedPublicBindError):
-            config.assert_safe_bind("0.0.0.0", env={"TROVE_ALLOW_UNAUTH_PUBLIC": v})
+def test_public_bind_rejects_legacy_unauthenticated_optin():
+    with pytest.raises(config.UnauthenticatedPublicBindError):
+        config.assert_safe_bind(
+            "0.0.0.0",
+            env={"TROVE_ALLOW_UNAUTH_PUBLIC": "1"},
+        )
 
 
 def test_empty_token_does_not_count():
@@ -82,14 +78,14 @@ def test_arbitrary_public_address_refused():
         config.assert_safe_bind("192.168.1.10", env={})
 
 
-def test_error_message_lists_three_remedies():
+def test_error_message_lists_only_authenticated_or_loopback_remedies():
     try:
         config.assert_safe_bind("0.0.0.0", env={})
     except config.UnauthenticatedPublicBindError as e:
         msg = str(e)
         assert "HOST=127.0.0.1" in msg
         assert "TROVE_TOKEN" in msg
-        assert "TROVE_ALLOW_UNAUTH_PUBLIC" in msg
+        assert "TROVE_ALLOW_UNAUTH_PUBLIC" not in msg
     else:
         pytest.fail("expected UnauthenticatedPublicBindError")
 
