@@ -40,6 +40,8 @@ def _is_blocked_ip(addr: str) -> bool:
         ip = ipaddress.ip_address(addr)
     except ValueError:
         return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
     return any(ip in net for net in _BLOCKED_NETWORKS)
 
 

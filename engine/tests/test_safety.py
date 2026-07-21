@@ -1,3 +1,5 @@
+import socket
+
 import pytest
 from safety import is_safe_url
 from network_policy import NetworkPolicy, NetworkPolicyError
@@ -29,6 +31,51 @@ def test_is_safe_url_accepts_public(url):
 ])
 def test_is_safe_url_rejects_unsafe(url):
     assert is_safe_url(url, network_policy=NetworkPolicy()) is False
+
+
+_MAPPED_ADDRESS_CASES = [
+    ("::ffff:127.0.0.1", False),
+    ("::ffff:10.0.0.1", False),
+    ("::ffff:172.16.0.1", False),
+    ("::ffff:192.168.0.1", False),
+    ("::ffff:169.254.169.254", False),
+    ("::ffff:8.8.8.8", True),
+    ("8.8.8.8", True),
+    ("2001:4860:4860::8888", True),
+]
+
+
+def _address_info(address: str):
+    if ":" in address:
+        return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", (address, 0, 0, 0))]
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 0))]
+
+
+@pytest.mark.parametrize(("address", "expected"), _MAPPED_ADDRESS_CASES)
+def test_is_safe_url_normalizes_mapped_ip_literals(monkeypatch, address, expected):
+    monkeypatch.setattr(
+        "safety.socket.getaddrinfo",
+        lambda host, _port: _address_info(host),
+    )
+    host = f"[{address}]" if ":" in address else address
+
+    assert is_safe_url(
+        f"https://{host}/video",
+        network_policy=NetworkPolicy(),
+    ) is expected
+
+
+@pytest.mark.parametrize(("address", "expected"), _MAPPED_ADDRESS_CASES)
+def test_is_safe_url_normalizes_mapped_dns_answers(monkeypatch, address, expected):
+    monkeypatch.setattr(
+        "safety.socket.getaddrinfo",
+        lambda _host, _port: _address_info(address),
+    )
+
+    assert is_safe_url(
+        "https://media.example.test/video",
+        network_policy=NetworkPolicy(),
+    ) is expected
 
 
 import os
