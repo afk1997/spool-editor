@@ -265,12 +265,13 @@ class ReasoningProcessRegistry:
         self._lock = RLock()
         self._active: set[_OwnedReasoningProcess] = set()
         self._leases: dict[_OwnedReasoningProcess, object] = {}
+        self._fallback: list[tuple[_OwnedReasoningProcess, object | None]] = []
         self._closing = False
 
     @property
     def active_count(self) -> int:
         with self._lock:
-            return len(self._active)
+            return len(self._active) + len(self._fallback)
 
     @property
     def closing(self) -> bool:
@@ -311,11 +312,14 @@ class ReasoningProcessRegistry:
                     except BaseException as cleanup_error:
                         # Keep the retained policy reference: an unconfirmed live
                         # process must continue blocking Offline even if registration
-                        # itself failed and cannot be retried through this registry.
+                        # itself failed. The identity-based fallback also keeps it
+                        # available to every later shutdown retry.
+                        self._fallback.append((process, lease))
                         raise ReasoningDrainError(
                             "could not drain Codex process after registration failed"
                         ) from cleanup_error
                     if not process.tree_exited:
+                        self._fallback.append((process, lease))
                         raise ReasoningDrainError(
                             "Codex process exit remained unconfirmed after registration failed"
                         )
@@ -325,8 +329,16 @@ class ReasoningProcessRegistry:
 
     def release(self, process: _OwnedReasoningProcess) -> None:
         with self._lock:
-            self._active.discard(process)
-            lease = self._leases.pop(process, None)
+            try:
+                self._active.discard(process)
+                lease = self._leases.pop(process, None)
+            except TypeError:
+                lease = None
+            for index, (candidate, fallback_lease) in enumerate(self._fallback):
+                if candidate is process:
+                    self._fallback.pop(index)
+                    lease = fallback_lease
+                    break
         # Never acquire the policy lock while holding the registry lock: spawn
         # consistently takes policy then registry, so the reverse order can deadlock.
         if lease is not None:
@@ -336,7 +348,9 @@ class ReasoningProcessRegistry:
         """Reject new launches, kill all registered trees, and reap their parents."""
         with self._lock:
             self._closing = True
-            active = tuple(self._active)
+            active = tuple(self._active) + tuple(
+                process for process, _lease in self._fallback
+            )
         for process in active:
             try:
                 process.kill()

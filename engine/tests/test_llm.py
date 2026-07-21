@@ -1219,3 +1219,38 @@ def test_registry_spawn_rolls_back_retained_lease_and_process_on_registration_er
         assert policy.active_leases == 1
 
     assert policy.active_leases == 0
+
+
+def test_failed_registration_cleanup_remains_owned_for_shutdown_retry():
+    policy = NetworkPolicy()
+    registry = llm.ReasoningProcessRegistry()
+
+    class InitiallyStuckUnhashableProcess:
+        __hash__ = None
+        tree_exited = False
+
+        def __init__(self):
+            self.attempts = 0
+
+        def kill(self):
+            pass
+
+        def terminate_and_wait(self, *, timeout):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("still live")
+            self.tree_exited = True
+
+    process = InitiallyStuckUnhashableProcess()
+    with policy.egress("codex_reasoning") as lease:
+        with pytest.raises(llm.ReasoningDrainError, match="registration failed"):
+            registry.spawn(lambda: process, lease=lease)
+
+        assert registry.active_count == 1
+        assert policy.active_leases == 1
+        registry.shutdown(timeout=0)
+        assert process.attempts == 2
+        assert registry.active_count == 0
+        assert policy.active_leases == 1
+
+    assert policy.active_leases == 0

@@ -12,6 +12,7 @@ import logging
 import os
 import signal
 import threading
+import time
 from typing import Callable
 
 
@@ -59,7 +60,15 @@ class _SigtermShutdown(AbstractContextManager):
         )
         signal.signal(signal.SIGTERM, relay)
         # The pipe buffers a signal delivered before the worker starts.
-        self._worker.start()
+        try:
+            self._worker.start()
+        except BaseException:
+            try:
+                signal.signal(signal.SIGTERM, self._previous_handler)
+            finally:
+                self._close_pipe()
+                self._worker = None
+            raise
         return self
 
     def _wait_for_signal(self) -> None:
@@ -96,6 +105,10 @@ class _SigtermShutdown(AbstractContextManager):
             pass
         if self._worker is not None:
             self._worker.join(timeout=1)
+        self._close_pipe()
+        return False
+
+    def _close_pipe(self) -> None:
         for fd in (self._write_fd, self._read_fd):
             if fd is not None:
                 try:
@@ -104,7 +117,6 @@ class _SigtermShutdown(AbstractContextManager):
                     pass
         self._write_fd = None
         self._read_fd = None
-        return False
 
 
 def sigterm_shutdown(shutdown: Callable[[], None]) -> AbstractContextManager:
@@ -143,4 +155,20 @@ def run_flask_app(app=None, *, app_factory=None, **run_options):
         try:
             return app.run(**run_options)
         finally:
-            shutdown(wait=True)
+            delay = 0.05
+            while True:
+                try:
+                    shutdown(wait=True)
+                except BaseException:
+                    _log.exception(
+                        "engine shutdown is incomplete; retrying before process exit"
+                    )
+                    try:
+                        time.sleep(delay)
+                    except BaseException:
+                        # Repeated Ctrl-C must not bypass ownership cleanup. An
+                        # operator can still use SIGKILL for an explicit hard stop.
+                        pass
+                    delay = min(1.0, delay * 2)
+                    continue
+                break
