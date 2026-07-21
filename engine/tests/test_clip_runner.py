@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 import clip_runner as cr
-from clip_jobs import ClipJob
+from clip_jobs import ClipJob, ClipStatus
 from network_policy import NetworkPolicy
 
 
@@ -244,6 +244,65 @@ def test_produce_target_records_empty_result_when_no_moments(runner, monkeypatch
     assert job.result["count"] == 0 and job.result["clip_jobs"] == []      # empty case recorded
     assert job.result["recipe_id"] == "r1"
     assert any("zero moments" in r.message for r in caplog.records)        # not silent
+
+
+def test_managed_produce_capacity_overflow_preserves_manager_error(tmp_path, monkeypatch):
+    dl = tmp_path / "downloads"
+    dl.mkdir()
+    (dl / "src1.mp4").write_bytes(b"MEDIA")
+    (dl / "src1.words.json").write_text(json.dumps({"words": []}))
+
+    class FullManager:
+        def update_progress(self, *_args, **_kwargs):
+            return True
+
+        def submit_children_if_current(self, parent, _attempt, specs):
+            parent.status = ClipStatus.ERROR
+            parent.error_category = "queue_full"
+            parent.error_message = "media queue full"
+            parent.result = {
+                "error": "queue_full",
+                "requested": len(specs),
+                "clip_jobs": [],
+            }
+            return []
+
+        def attempt_cancelled(self, *_args, **_kwargs):
+            return True
+
+    manager = FullManager()
+    managed = cr.ClipRunner(
+        download_dir=dl,
+        job_manager=_FakeJM({"src1": str(dl / "src1.mp4")}),
+        clip_manager=manager,
+    )
+    candidate = {
+        "start": 0.0,
+        "end": 18.0,
+        "title": "moment",
+        "rationale": "",
+        "mode": "funny",
+        "signals": [],
+    }
+    _patch(monkeypatch, "moments", "find_moments", lambda *_args, **_kwargs: [candidate])
+    _patch(monkeypatch, "moments", "rank", lambda candidates, **_kwargs: candidates)
+    job = ClipJob(id="managed", kind="produce", source_id="src1", status=ClipStatus.RUNNING)
+    job._attempt = 1
+    job._staging_root = str(tmp_path / "attempt")
+
+    outcome = managed.produce_target(
+        source_id="src1", recipe={"id": "recipe", "count": 1},
+    )(job, attempt=job._attempt)
+
+    assert outcome is None
+    assert job.status is ClipStatus.ERROR
+    assert job.error_category == "queue_full"
+    assert job.error_message == "media queue full"
+    assert job.result == {
+        "error": "queue_full",
+        "requested": 1,
+        "clip_jobs": [],
+    }
 
 
 # ---- reframe ---------------------------------------------------------

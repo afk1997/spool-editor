@@ -36,6 +36,7 @@ from attempt_staging import (
     cleanup_attempt,
     commit_outcome,
 )
+from job_capacity import QueueFullError, pending_capacity
 
 
 class ClipStatus(str, enum.Enum):
@@ -47,6 +48,25 @@ class ClipStatus(str, enum.Enum):
 
 
 _TERMINAL_STATUSES = {ClipStatus.DONE, ClipStatus.ERROR, ClipStatus.CANCELLED}
+
+
+class _AdmissionLease:
+    """Idempotent ownership of one admitted executor wrapper."""
+
+    __slots__ = ("_manager", "_released")
+
+    def __init__(self, manager: "ClipJobManager"):
+        self._manager = manager
+        self._released = False
+
+    def release(self) -> bool:
+        manager = self._manager
+        with manager._lock:
+            if self._released:
+                return False
+            self._released = True
+            manager._pending_count -= 1
+            return True
 
 
 def _utc_now_rfc3339() -> str:
@@ -92,6 +112,7 @@ class ClipJobManager:
     def __init__(self, *, max_workers: int = 2, ttl_seconds: int = 3600,
                  store_path: object = None):
         self.max_workers = max_workers
+        self.pending_capacity = pending_capacity(max_workers)
         self.ttl_seconds = ttl_seconds
         self._jobs: dict[str, ClipJob] = {}
         # _persist() takes the persistence mutex before this state lock.
@@ -100,6 +121,8 @@ class ClipJobManager:
         self._persist_lock = threading.Lock()
         self._persist_dirty = False
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._pending_count = 0
+        self._accepting = True
         self._store_path = Path(store_path) if store_path else None
         self._attempt_base = (
             self._store_path.parent
@@ -108,6 +131,22 @@ class ClipJobManager:
         )
         if self._store_path is not None:
             self._load_from_store()
+
+    @property
+    def pending_count(self) -> int:
+        with self._lock:
+            return self._pending_count
+
+    def _reserve_many_locked(self, count: int) -> list[_AdmissionLease]:
+        if not self._accepting:
+            raise RuntimeError("clip manager is shut down")
+        if self._pending_count + count > self.pending_capacity:
+            raise QueueFullError("media queue full")
+        self._pending_count += count
+        return [_AdmissionLease(self) for _ in range(count)]
+
+    def _reserve_locked(self) -> _AdmissionLease:
+        return self._reserve_many_locked(1)[0]
 
     # ----- persistence ---------------------------------------------------
 
@@ -269,6 +308,7 @@ class ClipJobManager:
         job: ClipJob,
         attempt: int,
         target: Callable[[ClipJob], object],
+        reservation: _AdmissionLease,
     ) -> None:
         try:
             started = self._mutate_current(
@@ -312,13 +352,23 @@ class ClipJobManager:
             if accepted:
                 self._persist()
         finally:
-            with self._lock:
-                current = self._jobs.get(job.id)
-                if current is job:
-                    if current._staging_root:
-                        cleanup_attempt(current._staging_root)
-                    current.process_handle = None
-                    current._worker_active = False
+            try:
+                with self._lock:
+                    current = self._jobs.get(job.id)
+                    if current is job:
+                        if current._staging_root:
+                            try:
+                                cleanup_attempt(current._staging_root)
+                            except Exception:
+                                logging.getLogger(__name__).warning(
+                                    "clip attempt cleanup failed for %s",
+                                    current.id,
+                                    exc_info=True,
+                                )
+                        current.process_handle = None
+                        current._worker_active = False
+            finally:
+                reservation.release()
 
     def _new_job_locked(
         self,
@@ -361,21 +411,43 @@ class ClipJobManager:
                params: dict | None = None) -> str:
         if kind not in CLIP_KINDS:
             raise ValueError(f"unknown clip kind {kind!r}; expected one of {sorted(CLIP_KINDS)}")
-        with self._lock:
-            job, attempt, target = self._new_job_locked(
-                kind=kind, target=target, source_id=source_id,
-                clip_id=clip_id, params=params,
-            )
-        self._persist()
+        reservation = None
+        job = None
         try:
-            self._executor.submit(self._run_attempt, job, attempt, target)
-        except Exception:
             with self._lock:
-                self._jobs.pop(job.id, None)
-                job._worker_active = False
-                cleanup_attempt(job._staging_root)
+                reservation = self._reserve_locked()
+                try:
+                    job, attempt, target = self._new_job_locked(
+                        kind=kind, target=target, source_id=source_id,
+                        clip_id=clip_id, params=params,
+                    )
+                    self._executor.submit(
+                        self._run_attempt, job, attempt, target, reservation,
+                    )
+                except Exception:
+                    if job is not None:
+                        self._jobs.pop(job.id, None)
+                        job.process_handle = None
+                        job._worker_active = False
+                        if job._staging_root:
+                            try:
+                                cleanup_attempt(job._staging_root)
+                            except Exception:
+                                logging.getLogger(__name__).warning(
+                                    "failed to clean rejected clip %s",
+                                    job.id,
+                                    exc_info=True,
+                                )
+                    reservation.release()
+                    raise
+        except (QueueFullError, RuntimeError):
+            if reservation is not None:
+                self._persist()
+            raise
+        except Exception:
             self._persist()
             raise
+        self._persist()
         return job.id
 
     def submit_children_if_current(
@@ -391,6 +463,7 @@ class ClipJobManager:
         until the complete child set and the parent's child-id result are
         visible together.
         """
+        overflow = False
         with self._lock:
             current = self._jobs.get(parent.id)
             if not (
@@ -421,57 +494,109 @@ class ClipJobManager:
                     spec.get("params"),
                 ))
 
-            original_result = current.result
-            initial_job_ids = set(self._jobs)
-            submissions: list[tuple[ClipJob, int, Callable[[ClipJob], object]]] = []
-            futures = []
             try:
-                for kind, target, source_id, clip_id, params in validated:
-                    submissions.append(self._new_job_locked(
-                        kind=kind,
-                        target=target,
-                        source_id=source_id,
-                        clip_id=clip_id,
-                        params=params,
-                    ))
-
-                for child, child_attempt, target in submissions:
-                    futures.append(self._executor.submit(
-                        self._run_attempt, child, child_attempt, target,
-                    ))
-
-                child_ids = [child.id for child, _attempt, _target in submissions]
+                reservations = self._reserve_many_locked(len(validated))
+            except QueueFullError:
+                current.status = ClipStatus.ERROR
+                current.error_category = "queue_full"
+                current.error_message = "media queue full"
                 current.result = {
-                    **(original_result or {}),
-                    "count": len(child_ids),
-                    "clip_jobs": child_ids,
+                    "error": "queue_full",
+                    "requested": len(validated),
+                    "clip_jobs": [],
                 }
-            except Exception:
-                # Any already-submitted closure is still blocked on this RLock;
-                # removing every captured identity makes all of them no-op.
-                for future in futures:
-                    try:
-                        future.cancel()
-                    except Exception:
-                        pass
-                new_children = [
-                    child for jid, child in self._jobs.items()
-                    if jid not in initial_job_ids
-                ]
-                for child in new_children:
-                    self._jobs.pop(child.id, None)
-                    child.process_handle = None
-                    child._worker_active = False
-                    if child._staging_root:
+                overflow = True
+
+            if overflow:
+                child_ids = []
+            else:
+                original_result = current.result
+                initial_job_ids = set(self._jobs)
+                submissions: list[
+                    tuple[
+                        ClipJob,
+                        int,
+                        Callable[[ClipJob], object],
+                        _AdmissionLease,
+                    ]
+                ] = []
+                futures: list[tuple[object, _AdmissionLease]] = []
+                try:
+                    for reservation, (
+                        kind, target, source_id, clip_id, params,
+                    ) in zip(reservations, validated):
+                        child, child_attempt, child_target = self._new_job_locked(
+                            kind=kind,
+                            target=target,
+                            source_id=source_id,
+                            clip_id=clip_id,
+                            params=params,
+                        )
+                        submissions.append((
+                            child,
+                            child_attempt,
+                            child_target,
+                            reservation,
+                        ))
+
+                    for child, child_attempt, child_target, reservation in submissions:
+                        future = self._executor.submit(
+                            self._run_attempt,
+                            child,
+                            child_attempt,
+                            child_target,
+                            reservation,
+                        )
+                        futures.append((future, reservation))
+
+                    child_ids = [
+                        child.id
+                        for child, _attempt, _target, _reservation in submissions
+                    ]
+                    current.result = {
+                        **(original_result or {}),
+                        "count": len(child_ids),
+                        "clip_jobs": child_ids,
+                    }
+                except Exception:
+                    # Child wrappers cannot leave QUEUED while this RLock is
+                    # held. Remove their identities below; wrappers that could
+                    # not be cancelled then drain as stale no-ops and release
+                    # their own reservations.
+                    submitted_reservations = {
+                        id(reservation) for _future, reservation in futures
+                    }
+                    for future, reservation in futures:
                         try:
-                            cleanup_attempt(child._staging_root)
+                            if future.cancel():
+                                reservation.release()
                         except Exception:
                             logging.getLogger(__name__).warning(
-                                "failed to clean rolled-back clip child %s",
-                                child.id, exc_info=True,
+                                "failed to cancel rolled-back clip child",
+                                exc_info=True,
                             )
-                current.result = original_result
-                raise
+                    for reservation in reservations:
+                        if id(reservation) not in submitted_reservations:
+                            reservation.release()
+
+                    new_children = [
+                        child for jid, child in self._jobs.items()
+                        if jid not in initial_job_ids
+                    ]
+                    for child in new_children:
+                        self._jobs.pop(child.id, None)
+                        child.process_handle = None
+                        child._worker_active = False
+                        if child._staging_root:
+                            try:
+                                cleanup_attempt(child._staging_root)
+                            except Exception:
+                                logging.getLogger(__name__).warning(
+                                    "failed to clean rolled-back clip child %s",
+                                    child.id, exc_info=True,
+                                )
+                    current.result = original_result
+                    raise
         self._persist()
         return child_ids
 
@@ -585,4 +710,10 @@ class ClipJobManager:
         ).start()
 
     def shutdown(self, wait: bool = False) -> None:
+        with self._lock:
+            self._accepting = False
         self._executor.shutdown(wait=wait)
+        if wait:
+            with self._lock:
+                if self._pending_count != 0:
+                    raise RuntimeError("clip manager shutdown left pending work")

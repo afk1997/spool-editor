@@ -657,6 +657,8 @@ class ClipRunner:
                 submitted = self.clip_manager.submit_children_if_current(
                     job, attempt, child_specs,
                 )
+                if self.clip_manager.attempt_cancelled(job.id, job, attempt):
+                    return None
             else:
                 submitted = [
                     self.clip_manager.submit(**spec)

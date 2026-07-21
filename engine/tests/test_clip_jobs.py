@@ -8,11 +8,13 @@ import copy
 import json
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
 from clip_jobs import ClipJob, ClipStatus, ClipJobManager, CLIP_KINDS
+from job_capacity import QueueFullError
 
 
 def test_status_enum_values():
@@ -539,10 +541,11 @@ def test_atomic_fanout_rolls_back_every_child_and_exact_parent_result(
         def __init__(self):
             self.calls = 0
 
-        def submit(self, _fn, child, _attempt, _target):
+        def submit(self, _fn, child, _attempt, _target, _reservation):
             self.calls += 1
             if failure_stage == "submission" and self.calls == 2:
                 raise RuntimeError("submission failed")
+            return Future()
 
         def shutdown(self, wait=True):
             return None
@@ -657,3 +660,378 @@ def test_clip_attempt_runtime_fields_are_not_persisted(tmp_path):
     assert "_staging_root" not in payload
     gate.set()
     mgr.shutdown(wait=True)
+
+
+# ---- bounded pending admission --------------------------------------
+
+
+def _wait_clip_pending(manager, expected, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if manager.pending_count == expected:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def _fill_clip_capacity(manager, gate):
+    return [
+        manager.submit(
+            kind="cut",
+            source_id=f"source-{index}",
+            target=lambda _job: gate.wait(5),
+        )
+        for index in range(manager.pending_capacity)
+    ]
+
+
+def test_clip_capacity_plus_one_creates_no_record_or_executor_work(monkeypatch):
+    manager = ClipJobManager(max_workers=1)
+    gate = threading.Event()
+    try:
+        admitted = _fill_clip_capacity(manager, gate)
+        assert manager.pending_count == manager.pending_capacity == 4
+        before_ids = [job.id for job in manager.snapshot_jobs()]
+        executor_calls = []
+        real_submit = manager._executor.submit
+        monkeypatch.setattr(
+            manager._executor,
+            "submit",
+            lambda *args, **kwargs: executor_calls.append((args, kwargs))
+            or real_submit(*args, **kwargs),
+        )
+
+        with pytest.raises(QueueFullError):
+            manager.submit(kind="cut", target=lambda _job: None)
+
+        assert [job.id for job in manager.snapshot_jobs()] == before_ids == admitted
+        assert manager.pending_count == manager.pending_capacity
+        assert executor_calls == []
+    finally:
+        gate.set()
+        manager.shutdown(wait=True)
+    assert manager.pending_count == 0
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_clip_reservation_recovers_after_target_completion(raises):
+    manager = ClipJobManager(max_workers=1)
+
+    def target(_job):
+        if raises:
+            raise RuntimeError("target failed")
+
+    jid = manager.submit(kind="cut", target=target)
+    assert _wait_worker_inactive(manager, jid)
+    assert manager.pending_count == 0
+    manager.shutdown(wait=True)
+
+
+def test_clip_queued_cancel_keeps_reservation_until_stale_wrapper_drains(monkeypatch):
+    manager = ClipJobManager(max_workers=1)
+    gate = threading.Event()
+    cancel_calls = []
+    real_submit = manager._executor.submit
+
+    def tracked_submit(*args, **kwargs):
+        future = real_submit(*args, **kwargs)
+        real_cancel = future.cancel
+
+        def tracked_cancel():
+            cancel_calls.append(True)
+            return real_cancel()
+
+        monkeypatch.setattr(future, "cancel", tracked_cancel)
+        return future
+
+    monkeypatch.setattr(manager._executor, "submit", tracked_submit)
+    try:
+        admitted = _fill_clip_capacity(manager, gate)
+        queued = admitted[-1]
+        assert manager.get(queued).status is ClipStatus.QUEUED
+        assert manager.cancel(queued) is True
+        assert cancel_calls == []
+        assert manager.pending_count == manager.pending_capacity
+        with pytest.raises(QueueFullError):
+            manager.submit(kind="cut", target=lambda _job: None)
+    finally:
+        gate.set()
+        manager.shutdown(wait=True)
+
+    assert cancel_calls == []
+    assert manager.pending_count == 0
+
+
+class _RejectingClipExecutor:
+    def __init__(self):
+        self.submit_calls = 0
+
+    def submit(self, *_args, **_kwargs):
+        self.submit_calls += 1
+        raise RuntimeError("executor rejected")
+
+    def shutdown(self, wait=False, **_kwargs):
+        return None
+
+
+def test_clip_submit_rejection_rolls_back_reservation_record_and_store(tmp_path):
+    store = tmp_path / "clip.json"
+    manager = ClipJobManager(max_workers=1, store_path=store)
+    manager._executor.shutdown(wait=True)
+    rejecting = _RejectingClipExecutor()
+    manager._executor = rejecting
+
+    with pytest.raises(RuntimeError, match="executor rejected"):
+        manager.submit(kind="cut", target=lambda _job: None)
+
+    assert manager.pending_count == 0
+    assert manager.snapshot_jobs() == []
+    assert json.loads(store.read_text()) == {"schema_version": 1, "jobs": {}}
+    assert rejecting.submit_calls == 1
+    manager.shutdown(wait=True)
+
+
+def test_clip_cleanup_failure_does_not_leak_reservation(tmp_path, monkeypatch):
+    import clip_jobs as module
+
+    manager = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
+    monkeypatch.setattr(
+        module,
+        "cleanup_attempt",
+        lambda _root: (_ for _ in ()).throw(RuntimeError("cleanup failed")),
+    )
+
+    jid = manager.submit(kind="cut", target=lambda _job: None)
+
+    assert _wait_worker_inactive(manager, jid)
+    assert manager.pending_count == 0
+    manager.shutdown(wait=True)
+
+
+def test_clip_shutdown_wait_false_rejects_new_work_and_drains():
+    manager = ClipJobManager(max_workers=1)
+    gate = threading.Event()
+    jid = manager.submit(kind="cut", target=lambda _job: gate.wait(5))
+    _await(manager, jid, ClipStatus.RUNNING)
+
+    manager.shutdown(wait=False)
+    assert manager.pending_count == 1
+    before_ids = [job.id for job in manager.snapshot_jobs()]
+    with pytest.raises(RuntimeError, match="shut down"):
+        manager.submit(kind="cut", target=lambda _job: None)
+    assert [job.id for job in manager.snapshot_jobs()] == before_ids
+
+    gate.set()
+    assert _wait_clip_pending(manager, 0)
+    manager.shutdown(wait=True)
+
+
+def test_clip_shutdown_wait_true_returns_with_zero_pending():
+    manager = ClipJobManager(max_workers=1)
+    gate = threading.Event()
+    manager.submit(kind="cut", target=lambda _job: gate.wait(5))
+    returned = threading.Event()
+    thread = threading.Thread(
+        target=lambda: (manager.shutdown(wait=True), returned.set()),
+    )
+    thread.start()
+    try:
+        assert not returned.wait(0.05)
+    finally:
+        gate.set()
+        thread.join(5)
+
+    assert returned.is_set()
+    assert manager.pending_count == 0
+
+
+class _BlockingClipSubmitExecutor:
+    def __init__(self):
+        self.inner = ThreadPoolExecutor(max_workers=1)
+        self.submit_entered = threading.Event()
+        self.allow_submit = threading.Event()
+
+    def submit(self, fn, *args, **kwargs):
+        self.submit_entered.set()
+        assert self.allow_submit.wait(5)
+        return self.inner.submit(fn, *args, **kwargs)
+
+    def shutdown(self, wait=False, **kwargs):
+        return self.inner.shutdown(wait=wait, **kwargs)
+
+
+def test_clip_submit_is_linearized_before_shutdown():
+    manager = ClipJobManager(max_workers=1)
+    manager._executor.shutdown(wait=True)
+    blocking = _BlockingClipSubmitExecutor()
+    manager._executor = blocking
+    submitted = []
+    submit_error = []
+
+    def submit_work():
+        try:
+            submitted.append(manager.submit(kind="cut", target=lambda _job: None))
+        except Exception as exc:
+            submit_error.append(exc)
+
+    submit_thread = threading.Thread(target=submit_work)
+    submit_thread.start()
+    assert blocking.submit_entered.wait(2)
+    shutdown_returned = threading.Event()
+    shutdown_thread = threading.Thread(
+        target=lambda: (manager.shutdown(wait=True), shutdown_returned.set()),
+    )
+    shutdown_thread.start()
+    try:
+        assert not shutdown_returned.wait(0.05)
+    finally:
+        blocking.allow_submit.set()
+        submit_thread.join(5)
+        shutdown_thread.join(5)
+
+    assert submit_error == []
+    assert len(submitted) == 1
+    assert shutdown_returned.is_set()
+    assert manager.pending_count == 0
+
+
+def test_atomic_fanout_capacity_overflow_marks_parent_error_without_children(
+    tmp_path, monkeypatch,
+):
+    manager = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
+    fanout_ready = threading.Event()
+    allow_fanout = threading.Event()
+    filler_gate = threading.Event()
+    observed = []
+
+    def parent_target(parent, *, attempt):
+        fanout_ready.set()
+        assert allow_fanout.wait(5)
+        observed.extend(manager.submit_children_if_current(parent, attempt, [
+            {"kind": "cut", "clip_id": "a", "target": lambda child: None},
+            {"kind": "cut", "clip_id": "b", "target": lambda child: None},
+        ]))
+
+    parent_id = manager.submit(kind="produce", target=parent_target)
+    assert fanout_ready.wait(2)
+    fillers = [
+        manager.submit(kind="cut", target=lambda _job: filler_gate.wait(5))
+        for _ in range(manager.pending_capacity - 1)
+    ]
+    assert manager.pending_count == manager.pending_capacity == 4
+    new_job_calls = []
+    real_new_job = manager._new_job_locked
+    monkeypatch.setattr(
+        manager,
+        "_new_job_locked",
+        lambda **kwargs: new_job_calls.append(kwargs) or real_new_job(**kwargs),
+    )
+
+    allow_fanout.set()
+    _await(manager, parent_id, ClipStatus.ERROR)
+    parent = manager.get(parent_id)
+    assert observed == []
+    assert new_job_calls == []
+    assert parent.error_category == "queue_full"
+    assert parent.error_message == "media queue full"
+    assert parent.result == {
+        "error": "queue_full",
+        "requested": 2,
+        "clip_jobs": [],
+    }
+    assert [job.id for job in manager.snapshot_jobs()] == [parent_id, *fillers]
+
+    filler_gate.set()
+    manager.shutdown(wait=True)
+    assert manager.pending_count == 0
+
+
+def test_atomic_fanout_children_observe_complete_parent_child_list():
+    manager = ClipJobManager(max_workers=3)
+    observed = []
+    child_ids = []
+
+    def parent_target(parent, *, attempt):
+        child_ids.extend(manager.submit_children_if_current(parent, attempt, [
+            {
+                "kind": "cut",
+                "clip_id": "a",
+                "target": lambda _child: observed.append(list(parent.result["clip_jobs"])),
+            },
+            {
+                "kind": "cut",
+                "clip_id": "b",
+                "target": lambda _child: observed.append(list(parent.result["clip_jobs"])),
+            },
+        ]))
+
+    parent_id = manager.submit(kind="produce", target=parent_target)
+    _await(manager, parent_id, ClipStatus.DONE)
+    assert len(child_ids) == 2
+    for child_id in child_ids:
+        _await(manager, child_id, ClipStatus.DONE)
+
+    assert observed == [child_ids, child_ids]
+    manager.shutdown(wait=True)
+    assert manager.pending_count == 0
+
+
+class _MixedFanoutFuture:
+    def __init__(self, cancel_result):
+        self.cancel_result = cancel_result
+        self.cancel_calls = 0
+
+    def cancel(self):
+        self.cancel_calls += 1
+        return self.cancel_result
+
+
+class _MixedFanoutExecutor:
+    def __init__(self):
+        self.calls = 0
+        self.futures = []
+        self.threads = []
+
+    def submit(self, fn, *args, **kwargs):
+        self.calls += 1
+        if self.calls == 3:
+            raise RuntimeError("third submit failed")
+        future = _MixedFanoutFuture(cancel_result=self.calls == 1)
+        self.futures.append(future)
+        if self.calls == 2:
+            thread = threading.Thread(target=fn, args=args, kwargs=kwargs, daemon=True)
+            self.threads.append(thread)
+            thread.start()
+        return future
+
+    def shutdown(self, wait=False, **_kwargs):
+        if wait:
+            for thread in self.threads:
+                thread.join(5)
+
+
+def test_atomic_fanout_midbatch_failure_releases_each_reservation_exactly_once(tmp_path):
+    store = tmp_path / "clip.json"
+    manager = ClipJobManager(max_workers=1, store_path=store)
+    parent = _seed_running_produce_parent(manager)
+    original_result = parent.result
+    manager._persist()
+    manager._executor.shutdown(wait=True)
+    mixed = _MixedFanoutExecutor()
+    manager._executor = mixed
+
+    with pytest.raises(RuntimeError, match="third submit failed"):
+        manager.submit_children_if_current(parent, parent._attempt, [
+            {"kind": "cut", "clip_id": "a", "target": lambda child: None},
+            {"kind": "cut", "clip_id": "b", "target": lambda child: None},
+            {"kind": "cut", "clip_id": "c", "target": lambda child: None},
+        ])
+
+    assert _wait_clip_pending(manager, 0)
+    assert [future.cancel_calls for future in mixed.futures] == [1, 1]
+    assert [job.id for job in manager.snapshot_jobs()] == [parent.id]
+    assert parent.result is original_result
+    assert set(json.loads(store.read_text())["jobs"]) == {parent.id}
+    attempts = tmp_path / ".attempts" / "clip"
+    assert not attempts.exists() or list(attempts.iterdir()) == []
+    manager.shutdown(wait=True)
