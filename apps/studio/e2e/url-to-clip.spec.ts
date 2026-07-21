@@ -270,7 +270,7 @@ test("token-on URL import reaches a downloadable render only through the Studio 
   await expect(codex).toHaveAttribute("aria-pressed", "true");
 
   const consent = page.getByRole("switch", {
-    name: "Allow transcript text to leave this machine for Codex",
+    name: "Allow your message and any attached transcript text to leave this machine for Codex",
   });
   await expect(consent).toHaveAttribute("aria-checked", "false");
   const consentPatch = page.waitForResponse(
