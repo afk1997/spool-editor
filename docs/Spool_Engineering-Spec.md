@@ -124,12 +124,12 @@ Each phase is independently shippable. Format: **Goal · Reuse (already built) �
 - **Done-when:** from a clean checkout, `docker compose up` → POST a URL to `api_v1` → file downloads with live progress → transcribe yields `words.json` + `.srt`; Claude Desktop can inspect that same state through the Python MCP server, while MCP mutations fail closed with the Phase 0 envelope and make zero underlying calls; no htmx anywhere.
 
 ### Phase 1 — Core clip loop + own UI (MVP)
-- **Goal:** the end-to-end "paste → clip," in Spool's own UI **and** via the agent. This is the demo.
+- **Goal:** the end-to-end "paste → clip" in Spool's own UI, with external agents able to inspect the same sources, jobs, transcripts, and completed clips. This is the demo.
 - **Reuse:** trove ingest/transcribe/jobs/MCP/diarization; base engine `analyze.py`/`build_pan.py`/`build_ass.py`.
 - **Build — engine:** new modules `moments.py` (LLM moment-finding over `words.json`), `cutter.py` (`ffmpeg -c copy` trim), `reframe.py` (detect ROIs on a sample frame; build the **diar⊕ROI** speaker timeline; wrap `build_pan.py`; pan/split/center), `captioner.py` (`build_ass.py` fed from `words.json` sliced to the clip; opus/karaoke/minimal), `exporter.py` (final mp4 + platform preset); register clip/render job types.
-- **Build — MCP:** add the clip tools + elicitation + `spool://` resources (§4).
+- **Build — MCP:** add read/status tools and `spool://` resources (§4); keep mutation schemas behind the central `agent_mutation_disabled` guard until Phase 4.
 - **Build — UI (own Next.js; rebuilt from the approved demo `Spool (standalone) (1).html`):** the Phase-1 screens — S0 Onboarding/Dependency-Doctor, S1 Home, **S2 Import/Downloader**, S3 Library, S4 Project/Transcript, S5 Clip Discovery, S7 Reframe (basic), S8 Caption Studio (presets), S10 Render Queue, S11 Clips Library — plus the global **Agent panel**, **⌘K**, and the **status/queue bar**. **Strip every bit of the demo's dummy data and wire each screen to `api_v1` + the progress stream; the Agent panel uses REST `/api/v1/agent`, while external MCP clients use the Python stdio server** (§6). Follow the front-end standards in §6 (componentized, typed clients, no in-browser Babel, perf budget).
-- **Done-when:** paste a YouTube URL → download → transcribe → agent proposes candidates → user picks (card *or* chat) → a 2-person 16:9 moment renders to **9:16 with a working diar⊕ROI speaker-pan + opus captions** → lands in the Clips library as a real `.mp4`; achievable **both** via the UI **and** via one agent sentence; works **offline** after the download.
+- **Done-when:** in the UI, paste a YouTube URL → download → transcribe → find candidates → choose one → render a 2-person 16:9 moment to **9:16 with a working diar⊕ROI speaker-pan + opus captions** → land a real `.mp4` in the Clips library; an external MCP client can inspect the same source/job/transcript/clip state but cannot mutate it; the manual flow works **offline** after the download.
 
 ### Phase 2 — Studios + editor
 - **Goal:** editor-grade control + a repeatable brand look.
@@ -144,8 +144,8 @@ Each phase is independently shippable. Format: **Goal · Reuse (already built) �
 
 ### Phase 4 — Publish + analyze
 - **Goal:** close the create→publish→learn loop.
-- **Build:** publish/schedule to TikTok/Reels/Shorts/LinkedIn/X (OAuth tokens in the OS keychain); content calendar; per-platform caption/hashtags; analytics (views/retention/likes); feed performance back into ranking weights. Optional light multi-seat/agency.
-- **Done-when:** schedule a clip from the calendar, see its performance, and watch the ranking adapt.
+- **Build:** an explicit approval, audit, and undo contract for mutating REST-agent and MCP tools, followed by gated agent execution; publish/schedule to TikTok/Reels/Shorts/LinkedIn/X (OAuth tokens in the OS keychain); content calendar; per-platform caption/hashtags; analytics (views/retention/likes); feed performance back into ranking weights. Optional light multi-seat/agency.
+- **Done-when:** one agent sentence can execute the clip workflow only through explicit approvals and its mutations can be undone; schedule a clip from the calendar, see its performance, and watch the ranking adapt.
 
 **Cross-phase invariants:** keep yt-dlp on master + updater; diarization opt-in (one-click enable); UI and MCP read the same state; everything inspectable, undoable, offline-capable. Mutation parity is gated on the Phase 4 approval and undo contract and fails closed until then.
 
