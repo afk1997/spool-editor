@@ -10,8 +10,8 @@ export function SettingCard({ title, children }: { title: string; children: Reac
   return <div className="card" style={{ padding: 18 }}><div className="eyebrow" style={{ marginBottom: 14 }}>{title}</div><div style={{ display: "flex", flexDirection: "column", gap: 14 }}>{children}</div></div>;
 }
 
-export function Row({ l, r, sub }: { l?: ReactNode; r: ReactNode; sub?: string }) {
-  return <div><div className="row" style={{ gap: 14, minHeight: 32 }}>{l && <span style={{ fontSize: 13.5, fontWeight: 500 }}>{l}</span>}<span className="spacer" />{r}</div>{sub && <div style={{ fontSize: 11.5, color: "var(--text-faint)", marginTop: 4 }}>{sub}</div>}</div>;
+export function Row({ l, r, sub, subId }: { l?: ReactNode; r: ReactNode; sub?: string; subId?: string }) {
+  return <div><div className="row" style={{ gap: 14, minHeight: 32 }}>{l && <span style={{ fontSize: 13.5, fontWeight: 500 }}>{l}</span>}<span className="spacer" />{r}</div>{sub && <div id={subId} style={{ fontSize: 11.5, color: "var(--text-faint)", marginTop: 4 }}>{sub}</div>}</div>;
 }
 
 export function FutureScreen({ code, title, desc, phase, icon }: { code: string; title: string; desc: string; phase: string; icon: string; children?: ReactNode }) {

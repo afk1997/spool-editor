@@ -1342,6 +1342,7 @@ describe("visible mutation inventory: Settings", () => {
 
     const model = await screen.findByRole("button", { name: "Candidate model" });
     expect(model).toBeDisabled();
+    expect(model).toHaveAccessibleDescription(reason);
     fireEvent.click(model);
     expect(installModel).not.toHaveBeenCalled();
     expect(screen.getByText(reason, { exact: true })).toBeInTheDocument();

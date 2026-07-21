@@ -113,6 +113,9 @@ export default function SettingsScreen() {
   };
 
   const models = modelsQ.data?.models ?? [];
+  const modelInstallDescriptionId = modelInstallBlock && models.some((model) => !model.is_installed)
+    ? "model-install-status"
+    : undefined;
   const installedLabels = models.filter((m) => m.is_installed).map((m) => m.label);
   const pickModel = (name: string) => {
     const m = models.find((x) => x.name === name);
@@ -183,12 +186,13 @@ export default function SettingsScreen() {
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
               <SettingCard title="Whisper transcription">
                 <Row l="Active model"
-                  r={<Seg value={modelsQ.data?.active ?? ""} onChange={pickModel} disabled={modelMutating} options={models.map((m) => ({ value: m.name, label: m.label, disabled: !m.is_installed && !!modelInstallBlock }))} />}
+                  r={<Seg value={modelsQ.data?.active ?? ""} onChange={pickModel} disabled={modelMutating} options={models.map((m) => ({ value: m.name, label: m.label, disabled: !m.is_installed && !!modelInstallBlock, ariaDescribedBy: !m.is_installed ? modelInstallDescriptionId : undefined }))} />}
                   sub={installing
                     ? `Downloading ${installing.name} — ${installing.total ? Math.round((installing.received / installing.total) * 100) : 0}%`
                     : modelInstallBlock && models.some((model) => !model.is_installed)
                       ? modelInstallBlock
-                      : "Click a model to make it active; an un-downloaded model downloads first. The next transcribe uses it."} />
+                      : "Click a model to make it active; an un-downloaded model downloads first. The next transcribe uses it."}
+                  subId={modelInstallDescriptionId} />
                 <Row l="Downloaded models" r={mono(installedLabels.join(", ") || "none yet")} />
                 <Row l="Engine" r={mono(`whisper.cpp ${ver("whisper_cpp")} · on-device`)} />
               </SettingCard>

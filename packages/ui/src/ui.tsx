@@ -134,7 +134,7 @@ export function Switch({ on, onClick, label, disabled = false }: { on?: boolean;
   return <button type="button" role="switch" aria-checked={!!on} aria-label={label} disabled={disabled} className={"switch" + (on ? " on" : "")} onClick={onClick}><i /></button>;
 }
 
-type SegOpt = string | { value: string; label: string; icon?: string; ariaLabel?: string; disabled?: boolean };
+type SegOpt = string | { value: string; label: string; icon?: string; ariaLabel?: string; ariaDescribedBy?: string; disabled?: boolean };
 export function Seg({ value, onChange, options, neutral = false, disabled = false }: { value: string; onChange: (v: string) => void; options: SegOpt[]; neutral?: boolean; disabled?: boolean }) {
   return (
     <div className={"seg" + (neutral ? " neutral" : "")}>
@@ -143,8 +143,9 @@ export function Seg({ value, onChange, options, neutral = false, disabled = fals
         const lbl = typeof o === "string" ? o : o.label;
         const ic = typeof o === "string" ? undefined : o.icon;
         const ariaLabel = typeof o === "string" ? undefined : o.ariaLabel;
+        const ariaDescribedBy = typeof o === "string" ? undefined : o.ariaDescribedBy;
         const optionDisabled = typeof o === "string" ? false : o.disabled;
-        return <button type="button" key={val} className={value === val ? "on" : ""} aria-label={ariaLabel} aria-pressed={value === val} disabled={disabled || optionDisabled} onClick={() => onChange(val)}>{ic && <Icon name={ic} size={14} />}{lbl}</button>;
+        return <button type="button" key={val} className={value === val ? "on" : ""} aria-label={ariaLabel} aria-describedby={ariaDescribedBy} aria-pressed={value === val} disabled={disabled || optionDisabled} onClick={() => onChange(val)}>{ic && <Icon name={ic} size={14} />}{lbl}</button>;
       })}
     </div>
   );
