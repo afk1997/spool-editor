@@ -29,6 +29,7 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const BODYLESS_STATUSES = new Set([204, 205, 304]);
 const CONNECTION_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
+const VISIBLE_ASCII = /^[\x21-\x7e]+$/u;
 
 type ProxyEnvironment = Readonly<Record<string, string | undefined>>;
 
@@ -146,6 +147,12 @@ function parseEngineOrigin(value: string | undefined): URL | null {
   }
 }
 
+function parseBearerToken(value: string | undefined): string | null {
+  const token = value?.trim() ?? "";
+  if (!token) return "";
+  return VISIBLE_ASCII.test(token) ? token : null;
+}
+
 function connectionNominations(headers: Headers): Set<string> {
   const nominated = new Set<string>();
   const value = headers.get("connection");
@@ -158,7 +165,7 @@ function connectionNominations(headers: Headers): Set<string> {
   return nominated;
 }
 
-function upstreamHeaders(request: Request, token: string | undefined): Headers {
+function upstreamHeaders(request: Request, token: string): Headers {
   const headers = new Headers();
   const nominated = connectionNominations(request.headers);
 
@@ -171,8 +178,7 @@ function upstreamHeaders(request: Request, token: string | undefined): Headers {
   // Node fetch transparently decompresses responses while retaining the original
   // Content-Encoding/Content-Length. Identity keeps streamed media metadata truthful.
   headers.set("accept-encoding", "identity");
-  const bearer = token?.trim();
-  if (bearer) headers.set("authorization", `Bearer ${bearer}`);
+  if (token) headers.set("authorization", `Bearer ${token}`);
   return headers;
 }
 
@@ -197,16 +203,27 @@ function downstreamHeaders(upstream: Response): Headers {
   return headers;
 }
 
-function rewriteRedirect(
+async function cancelUpstreamBody(upstream: Response): Promise<void> {
+  try {
+    await upstream.body?.cancel();
+  } catch {
+    // The response is being discarded either way; cancellation is best-effort cleanup.
+  }
+}
+
+async function rewriteRedirect(
   upstream: Response,
   upstreamUrl: URL,
   engineOrigin: URL,
   headers: Headers,
-): Response | null {
+): Promise<Response | null> {
   if (!REDIRECT_STATUSES.has(upstream.status)) return null;
 
   const location = upstream.headers.get("location");
-  if (!location) return errorResponse("engine_redirect_forbidden", 502);
+  if (!location) {
+    await cancelUpstreamBody(upstream);
+    return errorResponse("engine_redirect_forbidden", 502);
+  }
 
   try {
     const target = new URL(location, upstreamUrl);
@@ -214,6 +231,7 @@ function rewriteRedirect(
       target.origin !== engineOrigin.origin ||
       (target.pathname !== "/api/v1" && !target.pathname.startsWith("/api/v1/"))
     ) {
+      await cancelUpstreamBody(upstream);
       return errorResponse("engine_redirect_forbidden", 502);
     }
     headers.set(
@@ -226,6 +244,7 @@ function rewriteRedirect(
       headers,
     });
   } catch {
+    await cancelUpstreamBody(upstream);
     return errorResponse("engine_redirect_forbidden", 502);
   }
 }
@@ -246,6 +265,8 @@ export async function forwardEngineRequest(
   const env = dependencies.env ?? process.env;
   const engineOrigin = parseEngineOrigin(env.SPOOL_ENGINE_URL);
   if (!engineOrigin) return errorResponse("engine_proxy_misconfigured", 500);
+  const token = parseBearerToken(env.SPOOL_ENGINE_TOKEN);
+  if (token === null) return errorResponse("engine_proxy_misconfigured", 500);
 
   const upstreamUrl = new URL(`/${encodedPath.join("/")}`, engineOrigin);
   upstreamUrl.search = requestUrl.search;
@@ -255,7 +276,7 @@ export async function forwardEngineRequest(
 
   const init: NodeRequestInit = {
     method: request.method,
-    headers: upstreamHeaders(request, env.SPOOL_ENGINE_TOKEN),
+    headers: upstreamHeaders(request, token),
     redirect: "manual",
     cache: "no-store",
     credentials: "omit",
@@ -275,7 +296,7 @@ export async function forwardEngineRequest(
   }
 
   const headers = downstreamHeaders(upstream);
-  const redirect = rewriteRedirect(upstream, upstreamUrl, engineOrigin, headers);
+  const redirect = await rewriteRedirect(upstream, upstreamUrl, engineOrigin, headers);
   if (redirect) return redirect;
 
   const body = request.method === "HEAD" || BODYLESS_STATUSES.has(upstream.status)

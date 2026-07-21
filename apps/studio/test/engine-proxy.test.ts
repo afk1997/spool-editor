@@ -1,5 +1,16 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import {
+  DELETE,
+  dynamic,
+  GET,
+  HEAD,
+  OPTIONS,
+  PATCH,
+  POST,
+  PUT,
+  runtime,
+} from "@/app/api/engine/[...path]/route";
 import { forwardEngineRequest } from "@/lib/engine-proxy";
 
 type ProxyEnv = Readonly<Record<string, string | undefined>>;
@@ -10,6 +21,11 @@ const defaultEnv: ProxyEnv = {
   SPOOL_ENGINE_URL: "http://127.0.0.1:8899",
   SPOOL_ENGINE_TOKEN: "server-secret",
 };
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+});
 
 function request(
   url = studioUrl,
@@ -114,6 +130,19 @@ describe("engine proxy request boundary", () => {
     });
     expect(new Headers(upstream.calls[0]!.init?.headers).has("authorization")).toBe(false);
   });
+
+  it.each(["line-one\nline-two", "emoji-😀", "nul\u0000token"])(
+    "returns a structured configuration error for an invalid bearer %j",
+    async (token) => {
+      const upstream = vi.fn();
+      const response = await forwardEngineRequest(request(), ["api", "v1", "health"], {
+        env: { SPOOL_ENGINE_TOKEN: token },
+        fetchImpl: upstream as unknown as typeof fetch,
+      });
+      await expectError(response, 500, "engine_proxy_misconfigured");
+      expect(upstream).not.toHaveBeenCalled();
+    },
+  );
 
   it("forwards the explicit request allowlist and forces identity encoding", async () => {
     const upstream = fetchReturning(new Response("ok"));
@@ -487,17 +516,20 @@ describe("engine proxy redirects and failures", () => {
     "/admin",
     "http://[not-an-ipv6-address",
   ])("blocks unsafe upstream redirect %s", async (location) => {
-    const upstream = fetchReturning(new Response(null, {
+    const cancel = vi.fn();
+    const body = new ReadableStream({ cancel });
+    const fetchImpl = vi.fn(async () => new Response(body, {
       status: 302,
       headers: { Location: location },
     }));
     const response = await forwardEngineRequest(request(), ["api", "v1", "jobs"], {
       env: defaultEnv,
-      fetchImpl: upstream.fetchImpl,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
     });
     await expectError(response, 502, "engine_redirect_forbidden");
     expect(response.headers.has("location")).toBe(false);
-    expect(upstream.calls).toHaveLength(1);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(cancel).toHaveBeenCalledOnce();
   });
 
   it("returns a non-secret structured error when the engine is unreachable", async () => {
@@ -510,4 +542,42 @@ describe("engine proxy redirects and failures", () => {
     });
     await expectError(response, 502, "engine_unreachable");
   });
+});
+
+describe("Next engine route adapters", () => {
+  const adapters = { GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS } as const;
+
+  it("pins the route to the Node runtime and dynamic rendering", () => {
+    expect(runtime).toBe("nodejs");
+    expect(dynamic).toBe("force-dynamic");
+  });
+
+  it.each(Object.entries(adapters))(
+    "%s awaits catch-all params and delegates with the original method",
+    async (method, adapter) => {
+      vi.stubEnv("SPOOL_ENGINE_URL", "http://127.0.0.1:8899");
+      vi.stubEnv("SPOOL_ENGINE_TOKEN", "");
+      const fetchImpl = vi.fn(async (...args: Parameters<typeof fetch>) => {
+        void args;
+        return new Response("upstream-body");
+      });
+      vi.stubGlobal("fetch", fetchImpl);
+
+      const response = await adapter(
+        request(studioUrl, {
+          method,
+          headers: method === "GET" || method === "HEAD"
+            ? undefined
+            : { Origin: "http://127.0.0.1:3000" },
+        }),
+        { params: Promise.resolve({ path: ["api", "v1", "jobs"] }) },
+      );
+
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      expect(fetchImpl.mock.calls[0]![0]).toBe("http://127.0.0.1:8899/api/v1/jobs");
+      expect(fetchImpl.mock.calls[0]![1]?.method).toBe(method);
+      if (method === "HEAD") expect(response.body).toBeNull();
+      else expect(await response.text()).toBe("upstream-body");
+    },
+  );
 });
