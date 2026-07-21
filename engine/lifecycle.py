@@ -84,15 +84,25 @@ class _SigtermShutdown(AbstractContextManager):
                 return
             if command != _TERMINATE:
                 continue
-            try:
-                self._shutdown()
-            except BaseException:
-                _log.exception("engine shutdown failed while handling SIGTERM")
-                # A retained process tree is not drained. Stay alive so a later
-                # SIGTERM can retry; SIGKILL remains the operator's explicit escape.
-                continue
-            os._exit(128 + signal.SIGTERM)
-            return
+            delay = 0.05
+            while True:
+                try:
+                    self._shutdown()
+                except BaseException:
+                    _log.exception(
+                        "engine shutdown failed while handling SIGTERM; retrying"
+                    )
+                    # One termination request owns the drain through completion.
+                    # Each registry attempt is bounded; SIGKILL remains the
+                    # operator's explicit escape if a process tree never exits.
+                    try:
+                        time.sleep(delay)
+                    except BaseException:
+                        pass
+                    delay = min(1.0, delay * 2)
+                    continue
+                os._exit(128 + signal.SIGTERM)
+                return
 
     def __exit__(self, exc_type, exc_value, traceback):
         if self._write_fd is None:

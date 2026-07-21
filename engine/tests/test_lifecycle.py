@@ -154,10 +154,6 @@ def test_failed_sigterm_drain_does_not_exit_and_can_be_retried(monkeypatch):
     with lifecycle.sigterm_shutdown(shutdown) as bridge:
         os.write(bridge._write_fd, lifecycle._TERMINATE)
         assert first_attempt.wait(1)
-        time.sleep(0.01)
-        assert exit_codes == []
-
-        os.write(bridge._write_fd, lifecycle._TERMINATE)
         assert second_attempt.wait(1)
         deadline = time.monotonic() + 1
         while time.monotonic() < deadline and not exit_codes:
