@@ -45,7 +45,7 @@ export TROVE_TOKEN="$(openssl rand -hex 32)"
 docker run -p 8899:8899 -e HOST=0.0.0.0 -e TROVE_TOKEN="$TROVE_TOKEN" trove
 ```
 
-*the `-e HOST=0.0.0.0` is required for Docker port-forwarding. every non-loopback bind requires `TROVE_TOKEN`, including ports published only to the Docker host. keep the generated token private and send it as `Authorization: Bearer <token>` on API requests.*
+*the `-e HOST=0.0.0.0` is required for Docker port-forwarding. every non-loopback bind requires `TROVE_TOKEN`, including ports published only to the Docker host. keep the generated token private. public discovery is limited to `/api/v1/health`, `/api/v1/capabilities`, and `/api/v1/openapi.json`; send `Authorization: Bearer <token>` on every other API request.*
 
 <p align="center">
   <img src="docs/screenshots/mobile.png" alt="trove on mobile" width="320">
@@ -57,11 +57,11 @@ docker run -p 8899:8899 -e HOST=0.0.0.0 -e TROVE_TOKEN="$TROVE_TOKEN" trove
 |---|---|---|
 | `HOST` | `127.0.0.1` | bind address. set to `0.0.0.0` only with a token. |
 | `PORT` | `8899` | TCP port. |
-| `TROVE_TOKEN` | *(unset)* | when set, every `/api/*` request must send `Authorization: Bearer <token>`. |
+| `TROVE_TOKEN` | *(unset)* | protects every API route except the three public discovery endpoints above. `/api/v1/doctor` requires the configured bearer token. |
 | `TROVE_COOKIES_FROM_BROWSER` | *(unset)* | one of `safari\|chrome\|firefox\|brave\|edge`. required for YouTube right now (Google blocks cookieless yt-dlp). |
 | `TROVE_CONCURRENT_FRAGMENTS` | `4` | parallel fragment downloads for HLS streams (YouTube etc.). clamped 1–32. |
 | `TROVE_JOB_TTL_SECONDS` | `3600` | how long completed job history lingers before being swept. managed media files persist until explicitly deleted. |
-| `TROVE_MAX_WORKERS` | `4` | concurrent downloads. excess returns HTTP 503. |
+| `TROVE_MAX_WORKERS` | `4` | concurrent downloads. capacity overflow returns HTTP 429 `queue_full` with `Retry-After: 1` and creates no work. |
 | `TROVE_RATE_LIMIT` | `30` | requests per minute per IP. set to `0` to disable. |
 | `TROVE_BATCH_MAX_URLS` | `50` | hard cap on URLs accepted per `/api/batch-download` request. |
 | `TROVE_DIARIZATION` | `off` | `on` enables speaker labelling on transcribe (requires extra deps — see below). |
