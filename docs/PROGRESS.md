@@ -4,6 +4,11 @@
 > `Spool_Engineering-Spec.md` (§5 roadmap, §6 front-end standards). Status legend:
 > ✅ done & verified · 🟡 in progress · ◻️ not started.
 >
+> **Phase 0 safety-fuse update (2026-07-22; supersedes older provider notes):** Current
+> runtime/provider default is **none**. Remote Codex reasoning is unavailable in Phase 0 and
+> fails closed until a supported zero-tool transport exists. Codex and live-agent references
+> below are pre-fuse historical evidence only.
+>
 > **Last updated:** 2026-06-12 · **Phase 0 — ✅ · Phase 1 — ✅ · Phase 2 — ✅ COMPLETE** (all 4 spec
 > done-whens + all 8 work-items: S7 reframe · S8 caption · transcript editing · S9 brand kits · library
 > search · S6 editor timeline · **Settings config writes** · **perf/virtualization** + an explicit, shipped
@@ -444,15 +449,16 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
   (per-ROI ffmpeg motion → vendored `roi_motion` → **diar⊕ROI fusion**, still/off-mic
   speakers resolved by audio turns) + `render` (pan via vendored `pan_expr`, split, center;
   9:16/16:9/1:1/4:5). 15 tests.
-- [x] **`moments`** — LLM moment-finding over `words.json` via a **pluggable provider
-  layer** (`clip/llm.py`): DEFAULT = **codex bridge** (`codex exec`, read-only sandbox,
-  prompt piped over stdin — the user's ChatGPT/Codex subscription, no key/GPU), plus a
-  `CallableProvider` for the injected **agent** LLM and room for Claude/local. Prompt reuses
+- [x] **`moments`** — LLM moment-finding over `words.json` has a **pluggable provider
+  layer** (`clip/llm.py`) and a `CallableProvider` seam. Current runtime/provider default is
+  **none**. The pre-fuse build included a Codex CLI bridge and injected-agent provider; neither
+  remote path is available in Phase 0. Prompt construction reuses
   **clipify's Step-1 heuristics** (punchlines/reversals/awkward pauses/quotable one-liners/
   audio peaks), mode-tuned (funny/insightful/hot-take/story/how-to/q&a). Tolerant JSON parse
   (bare/fenced/prose), range clamp-to-duration, `transcript_window`, glass-box-ready
-  `signals`. Only transcript text egresses; **`SPOOL_OFFLINE=1` disables the bridge**.
-  16 (`llm`) + 15 (`moments`) tests, provider mocked. **(Supersedes spec §10 #2's Ollama default.)**
+  `signals`. Remote reasoning fails closed pending a supported zero-tool transport;
+  **`SPOOL_OFFLINE=1` additionally blocks all non-loopback egress**. 16 (`llm`) + 15
+  (`moments`) tests, provider mocked.
 - [x] **`exporter`** — platform presets (tiktok/reels/shorts/linkedin/x/youtube) →
   codec/bitrate/fps + -14 LUFS loudnorm, hardware encoder (VideoToolbox/NVENC/x264),
   fast-vs-quality. Brand kits deferred to P2. 9 tests.
@@ -841,14 +847,12 @@ Spec: `docs/Spool_Engineering-Spec.md` (§5 phases, §6 front-end). Visual sourc
 ## Locked decisions
 
 - License **Apache-2.0**; diarization kept in **core install** (heavier base, no missing-dep step).
-- **Moment-finding LLM = pluggable provider, default "codex bridge"** — the user's
-  ChatGPT/Codex subscription via the Codex CLI (no API key, no local GPU). Ditches the
-  spec's local-Ollama default (§10 #2). Local-first preserved: only transcript text is
-  sent (media never leaves the machine), agent mode uses the agent's own LLM, and
-  offline-mode disables the bridge. Pluggable so a Claude/local provider can be added.
-  Implemented in `clip/llm.py`. **New Spool config uses the `SPOOL_*` env namespace**
-  (not `TROVE_*`): `SPOOL_LLM_PROVIDER` (default `codex`), `SPOOL_CODEX_BIN/MODEL/TIMEOUT`,
-  and the engine-wide offline switch `SPOOL_OFFLINE=1`.
+- **Moment-finding LLM = pluggable provider; current runtime/provider default is `none`.**
+  Remote Codex reasoning is unavailable in Phase 0 and fails closed until a supported
+  zero-tool transport exists. The provider scaffolding remains in `clip/llm.py`, but historical
+  Codex settings do not enable the bridge. **New Spool config uses the `SPOOL_*` env namespace**
+  (not `TROVE_*`): `SPOOL_LLM_PROVIDER` (default `none`) and the engine-wide offline switch
+  `SPOOL_OFFLINE=1`.
 - Engine = flat fold-in of trove (reuse, don't rebuild); htmx stripped in Phase 0, not at bootstrap.
 - **Dev/test loop = local uv venv (Python 3.12)**, not Docker. Docker is reserved for packaging (B6) and was reset after a full-disk corruption.
 - Internal TS packages export raw source; Next `transpilePackages` compiles them.
