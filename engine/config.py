@@ -58,6 +58,25 @@ def trusted_proxy_hops(*, env: dict[str, str] | None = None) -> int:
     return value
 
 
+def rate_limit_max_keys(*, env: dict[str, str] | None = None) -> int:
+    """Return the bounded limiter identity capacity, defaulting safely."""
+    e = env if env is not None else os.environ
+    raw = e.get("TROVE_RATE_LIMIT_MAX_KEYS")
+    if raw is None:
+        return 4096
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 0
+    if value <= 0:
+        _logger.warning(
+            "Invalid TROVE_RATE_LIMIT_MAX_KEYS=%r; defaulting to 4096",
+            raw,
+        )
+        return 4096
+    return value
+
+
 def assert_safe_bind(host: str, *, env: dict[str, str] | None = None) -> None:
     """Raise if `host` would expose Trove publicly without a token.
 

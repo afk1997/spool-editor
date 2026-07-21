@@ -283,21 +283,38 @@ def token_or_sig_required(scope: str, *, kwarg: str):
 class RateLimiter:
     """Sliding-window per-key rate limiter. In-process only."""
 
-    def __init__(self, rate: int, per_seconds: int):
+    def __init__(self, rate: int, per_seconds: int, max_keys: int = 4096):
         self.rate = rate
         self.per_seconds = per_seconds
+        self.max_keys = max_keys
         self._hits: dict[str, deque[float]] = {}
+        self._last_seen: dict[str, float] = {}
         self._lock = Lock()
+
+    def _prune_expired_locked(self, now: float) -> None:
+        cutoff = now - self.per_seconds
+        for key, q in list(self._hits.items()):
+            while q and q[0] < cutoff:
+                q.popleft()
+            if not q:
+                del self._hits[key]
+                self._last_seen.pop(key, None)
 
     def allow(self, key: str) -> bool:
         if self.rate <= 0:
             return True
         now = time.monotonic()
         with self._lock:
+            self._prune_expired_locked(now)
+            if key not in self._hits and len(self._hits) >= self.max_keys:
+                evicted = min(
+                    self._hits,
+                    key=lambda current: (self._last_seen[current], current),
+                )
+                del self._hits[evicted]
+                del self._last_seen[evicted]
             q = self._hits.setdefault(key, deque())
-            cutoff = now - self.per_seconds
-            while q and q[0] < cutoff:
-                q.popleft()
+            self._last_seen[key] = now
             if len(q) >= self.rate:
                 return False
             q.append(now)

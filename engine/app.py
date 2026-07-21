@@ -9,7 +9,7 @@ from safety import (
     RateLimiter, attach_cors, attach_security_headers, is_safe_url,
     resolve_client_ip,
 )
-from config import trusted_proxy_hops
+from config import rate_limit_max_keys, trusted_proxy_hops
 from runner import run_download, run_info
 from jobs import AttemptUnwindingError, JobManager, Job, JobStatus
 from attempt_staging import AttemptOutcome, Promotion
@@ -71,7 +71,11 @@ def create_app() -> Flask:
     def _network_policy_error(error):
         return jsonify({"error": error.code}), 409
 
-    rate_limiter = RateLimiter(rate=RATE_LIMIT_PER_MIN, per_seconds=60)
+    rate_limiter = RateLimiter(
+        rate=RATE_LIMIT_PER_MIN,
+        per_seconds=60,
+        max_keys=rate_limit_max_keys(),
+    )
     # Prefer the module-level DOWNLOAD_DIR so existing tests can use
     # ``monkeypatch.setattr(app, "DOWNLOAD_DIR", ...)``. Fall back to
     # the env-var-aware resolver only if the module global was cleared.

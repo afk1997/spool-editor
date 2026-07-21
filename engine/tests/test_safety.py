@@ -333,6 +333,49 @@ def test_rate_limiter_window_resets(monkeypatch):
     assert rl.allow("x") is True
 
 
+def test_rate_limiter_prunes_expired_identities_before_capacity(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr("safety.time.monotonic", lambda: now[0])
+    rl = RateLimiter(rate=5, per_seconds=10, max_keys=4)
+    for key in ("alpha", "bravo", "charlie", "delta"):
+        assert rl.allow(key) is True
+
+    now[0] = 11.0
+    assert rl.allow("fresh") is True
+
+    assert set(rl._hits) == {"fresh"}
+    assert len(rl._hits) <= 4
+
+
+def test_rate_limiter_evicts_least_recently_seen_identity(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr("safety.time.monotonic", lambda: now[0])
+    rl = RateLimiter(rate=1, per_seconds=60, max_keys=4)
+    for index, key in enumerate(("alpha", "bravo", "charlie", "delta")):
+        now[0] = float(index)
+        assert rl.allow(key) is True
+
+    now[0] = 4.0
+    assert rl.allow("alpha") is False
+    now[0] = 5.0
+    assert rl.allow("echo") is True
+
+    assert set(rl._hits) == {"alpha", "charlie", "delta", "echo"}
+    assert len(rl._hits) == 4
+
+
+def test_rate_limiter_breaks_recency_ties_by_lexical_key(monkeypatch):
+    monkeypatch.setattr("safety.time.monotonic", lambda: 0.0)
+    rl = RateLimiter(rate=5, per_seconds=60, max_keys=4)
+    for key in ("zulu", "alpha", "bravo", "charlie"):
+        assert rl.allow(key) is True
+
+    assert rl.allow("echo") is True
+
+    assert set(rl._hits) == {"zulu", "bravo", "charlie", "echo"}
+    assert len(rl._hits) == 4
+
+
 # ---------------------------------------------------------------------------
 # Signed-URL system: scope, expiry, and decorator-factory verification.
 # ---------------------------------------------------------------------------

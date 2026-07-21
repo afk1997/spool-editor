@@ -29,6 +29,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.delenv("SPOOL_LLM_PROVIDER", raising=False)
     monkeypatch.delenv("SPOOL_LLM_EGRESS_CONSENT", raising=False)
     monkeypatch.delenv("TROVE_TRUST_PROXY_HOPS", raising=False)
+    monkeypatch.delenv("TROVE_RATE_LIMIT_MAX_KEYS", raising=False)
     # Isolate download dir so storage / search tests don't see real
     # files (and don't write transcribe_jobs.json into the repo).
     import app as _app_module
@@ -1370,6 +1371,23 @@ def test_rate_limit_uses_valid_rightmost_trusted_proxy_hop(tmp_path, monkeypatch
             "203.0.113.9",
             "203.0.113.10",
         }
+    finally:
+        created.extensions["trove.jobs"].shutdown(wait=True)
+        created.extensions["trove.transcribe"].shutdown(wait=True)
+        created.extensions["trove.clips"].shutdown(wait=True)
+
+
+def test_create_app_reads_rate_limit_max_keys_at_runtime(tmp_path, monkeypatch):
+    import app as app_module
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TROVE_RATE_LIMIT_MAX_KEYS", "4")
+    monkeypatch.delenv("TROVE_TOKEN", raising=False)
+    monkeypatch.setattr(app_module, "DOWNLOAD_DIR", tmp_path / "limited-downloads")
+    created = app_module.create_app()
+
+    try:
+        assert created.extensions["trove.rate_limiter"].max_keys == 4
     finally:
         created.extensions["trove.jobs"].shutdown(wait=True)
         created.extensions["trove.transcribe"].shutdown(wait=True)

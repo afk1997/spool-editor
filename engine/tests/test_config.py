@@ -110,3 +110,20 @@ def test_invalid_trusted_proxy_hops_falls_back_with_warning(caplog, value):
     assert result == 0
     assert "TROVE_TRUST_PROXY_HOPS" in caplog.text
     assert "defaulting to 0" in caplog.text
+
+
+def test_rate_limit_max_keys_defaults_to_4096_and_accepts_positive_values():
+    assert config.rate_limit_max_keys(env={}) == 4096
+    assert config.rate_limit_max_keys(env={"TROVE_RATE_LIMIT_MAX_KEYS": " 4 "}) == 4
+
+
+@pytest.mark.parametrize("value", ["not-an-int", "0", "-1", ""])
+def test_invalid_rate_limit_max_keys_falls_back_with_warning(caplog, value):
+    with caplog.at_level("WARNING"):
+        result = config.rate_limit_max_keys(
+            env={"TROVE_RATE_LIMIT_MAX_KEYS": value},
+        )
+
+    assert result == 4096
+    assert "TROVE_RATE_LIMIT_MAX_KEYS" in caplog.text
+    assert "defaulting to 4096" in caplog.text
