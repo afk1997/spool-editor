@@ -13,7 +13,6 @@
   },
   "dependencies": {
     "@spool/api-client": "workspace:*",
-    "@spool/mcp-client": "workspace:*",
     "@spool/types": "workspace:*",
     "@spool/ui": "workspace:*",
     "@tanstack/react-virtual": "^3.14.2",

@@ -23,9 +23,6 @@ importers:
       '@spool/api-client':
         specifier: workspace:*
         version: link:../../packages/api-client
-      '@spool/mcp-client':
-        specifier: workspace:*
-        version: link:../../packages/mcp-client
       '@spool/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -89,19 +86,6 @@ importers:
         version: 4.1.8(@types/node@20.19.41)(jsdom@29.1.1)(vite@8.0.16(@types/node@20.19.41)(jiti@2.7.0))
 
   packages/api-client:
-    dependencies:
-      '@spool/types':
-        specifier: workspace:*
-        version: link:../types
-    devDependencies:
-      prettier:
-        specifier: ^3.4.2
-        version: 3.8.3
-      typescript:
-        specifier: ^5.7.3
-        version: 5.9.3
-
-  packages/mcp-client:
     dependencies:
       '@spool/types':
         specifier: workspace:*

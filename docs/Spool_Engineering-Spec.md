@@ -184,7 +184,7 @@ The demo is full of hard-coded sample data (fake projects like "Ep.42 — Why Lo
 | Agent panel | extended MCP tools + elicitation |
 
 ### 6.3 Modularization & architecture
-- **Monorepo** (pnpm + turbo): `apps/studio` (Next.js), `packages/ui` (design system), `packages/api-client` (typed REST client mirroring `trove_client`), `packages/mcp-client`, `packages/types` (shared TS types ↔ the engine's data model in §3); the Python `engine` + `mcp` packages alongside.
+- **Monorepo** (pnpm + turbo): `apps/studio` (Next.js), `packages/ui` (design system), `packages/api-client` (typed REST client mirroring `trove_client`), and `packages/types` (shared TS types ↔ the engine's data model in §3), alongside the Python `engine`. Agent integrations use the working FastMCP stdio server in `engine/mcp_server.py`, which delegates through `trove_client.py` to the same JSON API; there is no TypeScript MCP transport package.
 - **Typed clients** — keep TS types in sync with the API schema; one client module, no `fetch` scattered through components.
 - **Component library** — the recurring pieces from the Design Brief as isolated, prop-typed, documented components: MediaCard, CandidateCard + ScoreBar, AspectToggle, ReframeModeToggle, VideoPreview, Timeline, ROIEditor, CaptionStyler, TranscriptView, JobRow/QueueDrawer, AgentPanel, ElicitationCard, CommandPalette, DependencyDoctor, EmptyState/Skeleton/ErrorState.
 - **State/data** — server state via React Query/SWR (caching, retries, the progress stream); local UI state via hooks/Zustand. **Never `useState` for continuous drag/scrub** (ROI boxes, timeline playhead) — use refs/motion values to avoid re-render storms.

@@ -25,12 +25,11 @@ so the vertical crop pans to the speaker offline, in seconds. (`engine/clip/refr
 
 | Path | What |
 |---|---|
-| `engine/` | Python (Flask) engine: JSON API, MCP server, job system, downloader, transcription, diarization. |
+| `engine/` | Python engine: Flask JSON API plus the working FastMCP stdio server (`mcp_server.py`), job system, downloader, transcription, and diarization. |
 | `engine/clip/` | The clip back-half — moment-finding, cut, reframe (diar⊕ROI pan), captions, export. |
 | `apps/studio/` | The Next.js + TypeScript + Tailwind + shadcn studio UI. |
 | `packages/types/` | Shared TS types mirroring the engine data model. |
 | `packages/api-client/` | Typed REST client for the engine's JSON API. |
-| `packages/mcp-client/` | TS client for the engine's MCP server. |
 | `packages/ui/` | Design-system components — the studio's building blocks. |
 | `docs/` | Engineering spec, product overview, and the approved visual design. |
 
