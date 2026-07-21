@@ -279,7 +279,10 @@ class ReasoningProcessRegistry:
             self._closing = True
             active = tuple(self._active)
         for process in active:
-            process.kill()
+            try:
+                process.kill()
+            except OSError as exc:
+                _log.warning("could not signal Codex process during shutdown: %s", exc)
         deadline = time.monotonic() + max(0.0, timeout)
         for process in active:
             try:
@@ -289,7 +292,10 @@ class ReasoningProcessRegistry:
             except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
                 _log.warning("could not drain Codex process during shutdown: %s", exc)
             finally:
-                self.release(process)
+                # A failed wait must not make a live tree disappear from ownership.
+                # A later shutdown call can retry every entry that remains tracked.
+                if process.tree_exited:
+                    self.release(process)
 
 
 _reasoning_registries_lock = RLock()
@@ -369,7 +375,13 @@ class CodexProvider:
         self._privacy_state_source = privacy_state
         self._privacy_env_source = env
         self.privacy_state = _privacy_getter(privacy_state, env)
-        self.process_registry = process_registry or reasoning_process_registry(network_policy)
+        shared_registry = reasoning_process_registry(network_policy)
+        if process_registry is not None and process_registry is not shared_registry:
+            raise ValueError(
+                "CodexProvider requires the shared reasoning process registry for its "
+                "network policy"
+            )
+        self.process_registry = shared_registry
         self.bin = bin or CODEX_BIN
         self.model = model if model is not None else CODEX_MODEL
         self.timeout = timeout if timeout is not None else CODEX_TIMEOUT

@@ -894,7 +894,7 @@ def test_reasoning_registry_shutdown_kills_live_group_and_rejects_new_launches(
     tmp_path, monkeypatch,
 ):
     policy = NetworkPolicy()
-    registry = llm.ReasoningProcessRegistry()
+    registry = llm.reasoning_process_registry(policy)
     bridge_pid_file = tmp_path / "bridge.pid"
     bridge = tmp_path / "codex-bridge"
     bridge.write_text(
@@ -965,3 +965,44 @@ def _capture_completion(outcome, provider):
         outcome.append(provider.complete("transcript"))
     except BaseException as exc:
         outcome.append(exc)
+
+
+def test_reasoning_registry_retains_a_tree_until_exit_is_confirmed():
+    registry = llm.ReasoningProcessRegistry()
+
+    class UnconfirmedProcess:
+        tree_exited = False
+
+        def __init__(self):
+            self.attempts = 0
+
+        def kill(self):
+            pass
+
+        def terminate_and_wait(self, *, timeout):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("group still alive")
+            self.tree_exited = True
+
+    process = UnconfirmedProcess()
+    registry.spawn(lambda: process)
+
+    registry.shutdown(timeout=0)
+    assert registry.active_count == 1
+
+    registry.shutdown(timeout=0)
+    assert process.attempts == 2
+    assert registry.active_count == 0
+
+
+def test_codex_provider_rejects_a_registry_outside_its_shared_policy_boundary():
+    policy = NetworkPolicy()
+    rogue_registry = llm.ReasoningProcessRegistry()
+
+    with pytest.raises(ValueError, match="shared reasoning process registry"):
+        llm.CodexProvider(
+            network_policy=policy,
+            privacy_state=lambda: _privacy(),
+            process_registry=rogue_registry,
+        )
