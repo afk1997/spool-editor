@@ -1549,6 +1549,7 @@ def test_spawn_never_holds_registry_lock_while_retaining_policy_lease():
 
 def test_contended_shutdown_latches_closing_before_registry_lock():
     registry = llm.ReasoningProcessRegistry()
+    assert type(registry._closing) is bool
     factory_entered = threading.Event()
     release_factory = threading.Event()
     outcome = []
@@ -1655,6 +1656,35 @@ def _capture_registry_spawn(registry, factory):
         return registry.spawn(factory)
     except BaseException as exc:
         return exc
+
+
+def test_registry_shutdown_does_not_call_synchronous_logging(monkeypatch):
+    registry = llm.ReasoningProcessRegistry()
+
+    class StuckProcess:
+        tree_exited = False
+
+        def kill(self):
+            pass
+
+        def terminate_and_wait(self, *, timeout):
+            raise RuntimeError("tree still live")
+
+    registry.spawn(StuckProcess)
+    monkeypatch.setattr(
+        llm._log,
+        "warning",
+        lambda *_args, **_kwargs: time.sleep(0.25),
+    )
+
+    started = time.monotonic()
+    with pytest.raises(llm.ReasoningDrainError):
+        registry.shutdown(timeout=0)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.1
+    assert type(registry.last_shutdown_error) is RuntimeError
+    assert str(registry.last_shutdown_error) == "tree still live"
 
 
 @pytest.mark.parametrize("failure", ["closing", "factory"])

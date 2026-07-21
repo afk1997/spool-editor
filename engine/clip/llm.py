@@ -29,7 +29,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from threading import Event, RLock
+from threading import RLock
 from typing import Callable, Mapping, Protocol, runtime_checkable
 from weakref import WeakKeyDictionary
 
@@ -354,7 +354,11 @@ class ReasoningProcessRegistry:
         self._active: set[_OwnedReasoningProcess] = set()
         self._leases: dict[_OwnedReasoningProcess, object] = {}
         self._fallback: list[tuple[_OwnedReasoningProcess, object | None]] = []
-        self._closing = Event()
+        # Spool's engine runs on CPython, where a reference assignment/read is
+        # atomic under the GIL. Keep this one-way latch lock-free: Event.set()
+        # itself takes an unbounded condition lock and belongs outside shutdown.
+        self._closing = False
+        self._last_shutdown_error: BaseException | None = None
 
     @property
     def active_count(self) -> int:
@@ -363,7 +367,11 @@ class ReasoningProcessRegistry:
 
     @property
     def closing(self) -> bool:
-        return self._closing.is_set()
+        return self._closing
+
+    @property
+    def last_shutdown_error(self) -> BaseException | None:
+        return self._last_shutdown_error
 
     def spawn(
         self,
@@ -372,7 +380,7 @@ class ReasoningProcessRegistry:
         lease=None,
     ) -> _OwnedReasoningProcess:
         """Linearize process creation/registration against shutdown."""
-        if self._closing.is_set():
+        if self._closing:
             raise ProviderUnavailableError("remote reasoning is shutting down")
         retained = lease is not None
         retained_lease = None
@@ -385,7 +393,7 @@ class ReasoningProcessRegistry:
             retained_lease = _RetainedEgressLease(lease)
         try:
             with self._lock:
-                if self._closing.is_set():
+                if self._closing:
                     raise ProviderUnavailableError("remote reasoning is shutting down")
                 process = None
                 registered = False
@@ -393,7 +401,7 @@ class ReasoningProcessRegistry:
                     # Keep creation + registration under one registry boundary so
                     # shutdown can never miss a process created concurrently.
                     process = factory()
-                    if self._closing.is_set():
+                    if self._closing:
                         raise ProviderUnavailableError(
                             "remote reasoning is shutting down"
                         )
@@ -510,13 +518,16 @@ class ReasoningProcessRegistry:
         deadline = time.monotonic() + max(0.0, timeout)
         # Latch intent before any contended ownership lock. Even an attempt that
         # exhausts its budget must reject every fresh launch until a later retry.
-        self._closing.set()
+        self._closing = True
+        self._last_shutdown_error = None
         if not self._lock.acquire(
             timeout=max(0.0, deadline - time.monotonic())
         ):
-            raise ReasoningDrainError(
+            error = ReasoningDrainError(
                 "could not acquire the reasoning registry before the shutdown deadline"
             )
+            self._last_shutdown_error = error
+            raise error
         try:
             active = tuple(self._active) + tuple(
                 process for process, _lease in self._fallback
@@ -530,7 +541,8 @@ class ReasoningProcessRegistry:
                 else:
                     process.kill()
             except (OSError, RuntimeError) as exc:
-                _log.warning("could not signal Codex process during shutdown: %s", exc)
+                # Never invoke logging handlers on the bounded shutdown path.
+                self._last_shutdown_error = exc
         for process in active:
             try:
                 if isinstance(process, _OwnedReasoningProcess):
@@ -540,7 +552,7 @@ class ReasoningProcessRegistry:
                         timeout=max(0.0, deadline - time.monotonic())
                     )
             except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-                _log.warning("could not drain Codex process during shutdown: %s", exc)
+                self._last_shutdown_error = exc
             else:
                 # A failed wait must not make a live tree disappear from ownership.
                 # A later shutdown call can retry every entry that remains tracked.
@@ -553,17 +565,22 @@ class ReasoningProcessRegistry:
         if not self._lock.acquire(
             timeout=max(0.0, deadline - time.monotonic())
         ):
-            raise ReasoningDrainError(
+            error = ReasoningDrainError(
                 "could not inspect the reasoning registry before the shutdown deadline"
             )
+            self._last_shutdown_error = error
+            raise error
         try:
             remaining = len(self._active) + len(self._fallback)
         finally:
             self._lock.release()
         if remaining:
-            raise ReasoningDrainError(
+            error = ReasoningDrainError(
                 f"could not confirm exit for {remaining} Codex process tree(s)"
             )
+            if self._last_shutdown_error is None:
+                self._last_shutdown_error = error
+            raise error
 
 
 _reasoning_registries_lock = RLock()

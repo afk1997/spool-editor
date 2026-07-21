@@ -161,6 +161,32 @@ def test_failed_sigterm_drain_does_not_exit_and_can_be_retried(monkeypatch):
         assert exit_codes == [128 + signal.SIGTERM]
 
 
+def test_sigterm_retry_does_not_call_synchronous_logging(monkeypatch):
+    import lifecycle
+
+    second_attempt = threading.Event()
+    attempts = 0
+
+    def shutdown():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("tree still live")
+        second_attempt.set()
+
+    monkeypatch.setattr(lifecycle.os, "_exit", lambda _code: None)
+    monkeypatch.setattr(
+        lifecycle._log,
+        "exception",
+        lambda *_args, **_kwargs: time.sleep(0.25),
+    )
+
+    with lifecycle.sigterm_shutdown(shutdown) as bridge:
+        os.write(bridge._write_fd, lifecycle._TERMINATE)
+        assert second_attempt.wait(0.15)
+        assert isinstance(bridge._last_shutdown_error, RuntimeError)
+
+
 def test_normal_server_exit_retries_failed_drain_before_restoring_handler(monkeypatch):
     import lifecycle
     from contextlib import contextmanager
@@ -189,6 +215,13 @@ def test_normal_server_exit_retries_failed_drain_before_restoring_handler(monkey
             events.append("restore")
 
     monkeypatch.setattr(lifecycle, "sigterm_shutdown", observed_bridge)
+    monkeypatch.setattr(
+        lifecycle._log,
+        "exception",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("normal shutdown retry must not enter logger locks")
+        ),
+    )
     monkeypatch.setattr(
         lifecycle.time,
         "sleep",

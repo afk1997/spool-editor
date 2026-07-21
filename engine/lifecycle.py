@@ -28,6 +28,7 @@ class _SigtermShutdown(AbstractContextManager):
         self._write_fd: int | None = None
         self._previous_handler = None
         self._worker: threading.Thread | None = None
+        self._last_shutdown_error: BaseException | None = None
 
     def __enter__(self):
         if (
@@ -88,10 +89,10 @@ class _SigtermShutdown(AbstractContextManager):
             while True:
                 try:
                     self._shutdown()
-                except BaseException:
-                    _log.exception(
-                        "engine shutdown failed while handling SIGTERM; retrying"
-                    )
+                except BaseException as shutdown_error:
+                    # Logging handlers own unbounded locks. Preserve the exception
+                    # in memory, but never let diagnostics delay the next drain.
+                    self._last_shutdown_error = shutdown_error
                     # One termination request owns the drain through completion.
                     # Each registry attempt is bounded; SIGKILL remains the
                     # operator's explicit escape if a process tree never exits.
@@ -169,10 +170,10 @@ def run_flask_app(app=None, *, app_factory=None, **run_options):
             while True:
                 try:
                     shutdown(wait=True)
-                except BaseException:
-                    _log.exception(
-                        "engine shutdown is incomplete; retrying before process exit"
-                    )
+                except BaseException as shutdown_error:
+                    # Keep retry diagnostics without synchronously entering logger
+                    # handler locks on the process-exit path.
+                    shutdown_holder["last_error"] = shutdown_error
                     try:
                         time.sleep(delay)
                     except BaseException:
