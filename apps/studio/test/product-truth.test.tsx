@@ -927,6 +927,49 @@ describe("product truth: visible control inventory", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders the engine-reported storage root without invented paths", () => {
+    importHarness.queryData = {
+      doctor: { tools: {}, machine: {}, encoders: [] },
+      storage: { download_dir: "/srv/spool/library" },
+      listModels: { models: [], active: "" },
+    };
+    importHarness.ctx = baseCtx();
+    const onboarding = render(<OnboardingScreen />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Let’s set up" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(screen.getByDisplayValue("/srv/spool/library")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("~/Spool")).not.toBeInTheDocument();
+    onboarding.unmount();
+
+    render(<SettingsScreen />);
+    fireEvent.click(screen.getByRole("button", { name: "Storage" }));
+    expect(screen.getByText("/srv/spool/library")).toBeInTheDocument();
+    expect(screen.queryByText("~/Spool")).not.toBeInTheDocument();
+    expect(screen.queryByText(/engine\/downloads/i)).not.toBeInTheDocument();
+  });
+
+  it("shows storage as unavailable instead of guessing when the engine path is missing", () => {
+    importHarness.queryData = {
+      doctor: { tools: {}, machine: {}, encoders: [] },
+      listModels: { models: [], active: "" },
+    };
+    importHarness.ctx = baseCtx();
+    const onboarding = render(<OnboardingScreen />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Let’s set up" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(screen.getByText("Storage path unavailable")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("~/Spool")).not.toBeInTheDocument();
+    onboarding.unmount();
+
+    render(<SettingsScreen />);
+    fireEvent.click(screen.getByRole("button", { name: "Storage" }));
+    expect(screen.getByText("Unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("~/Spool")).not.toBeInTheDocument();
+    expect(screen.queryByText(/engine\/downloads/i)).not.toBeInTheDocument();
+  });
+
   it("renders the Codex agent as text-only and submits a plain-language query", () => {
     expect(INITIAL_AGENT).toEqual([
       {

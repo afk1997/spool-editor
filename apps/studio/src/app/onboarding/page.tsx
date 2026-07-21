@@ -22,6 +22,7 @@ const trimVer = (v: string | null) => (v ? v.split(/[-+ ]/)[0] : "—");
 export default function OnboardingScreen() {
   const ctx = useSpool();
   const doctor = useEngineQuery((c) => c.doctor());
+  const storage = useEngineQuery((c) => c.storage());
   const [step, setStep] = useState(0);
 
   const tools = doctor.data?.tools ?? {};
@@ -34,6 +35,9 @@ export default function OnboardingScreen() {
   const encoders = doctor.data?.encoders ?? [];
   const encoder = encoders.some((e) => e.includes("videotoolbox")) ? "VideoToolbox" : encoders.some((e) => e.includes("nvenc")) ? "NVENC" : encoders[0] || "x264";
   const freeDisk = machine.free_disk_gb != null ? `${machine.free_disk_gb} GB free on disk` : "checking disk…";
+  const storageRoot = typeof storage.data?.download_dir === "string" && storage.data.download_dir.trim()
+    ? storage.data.download_dir
+    : null;
   const privacySummary = !ctx.settingsReady
     ? ctx.settingsLoading
       ? "Checking privacy settings…"
@@ -126,7 +130,9 @@ export default function OnboardingScreen() {
                 <div className="row" style={{ padding: "13px 16px", gap: 12 }}><Icon name="sparkles" size={16} style={{ color: "var(--accent)" }} /><div className="grow"><b>Moment-finding</b><div style={{ fontSize: 12, color: "var(--text-faint)" }}>{momentFindingSummary}</div></div><Chip tone={momentFindingTone}>{momentFindingState}</Chip></div>
               </div>
               <span className="field-label">Storage location</span>
-              <input className="input mono" defaultValue="~/Spool" readOnly />
+              {storageRoot
+                ? <input className="input mono" value={storageRoot} readOnly />
+                : <div role="status" className="input mono">Storage path unavailable</div>}
               <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 7 }}>{freeDisk} · encoder auto-detected: {encoder}</div>
               <div className="row" style={{ gap: 12, marginTop: 26 }}><Btn variant="primary" size="lg" iconR="arrowR" onClick={() => setStep(3)}>Continue</Btn></div>
             </div>

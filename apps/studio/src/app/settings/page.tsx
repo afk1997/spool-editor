@@ -22,6 +22,7 @@ export default function SettingsScreen() {
   const client = ctx.client;
   const doctor = useEngineQuery((c) => c.doctor());
   const modelsQ = useEngineQuery((c) => c.listModels(), []);
+  const storageQ = useEngineQuery((c) => c.storage(), []);
   const [sec, setSec] = useState("Models");
   const pendingSettingsRef = useRef<Set<keyof EngineSettings>>(new Set());
   const [pendingSettings, setPendingSettings] = useState<ReadonlySet<keyof EngineSettings>>(() => new Set());
@@ -149,6 +150,9 @@ export default function SettingsScreen() {
   const encoder = encoders.some((e) => e.includes("videotoolbox")) ? "VideoToolbox" : encoders.some((e) => e.includes("nvenc")) ? "NVENC" : encoders[0] || "x264";
   const ver = (k: string) => (tools[k]?.version || "").split(/[-+ ]/)[0] || "—";
   const mono = (t: string, color = "var(--text-dim)") => <span className="mono" style={{ fontSize: 12, color }}>{t}</span>;
+  const storageRoot = typeof storageQ.data?.download_dir === "string" && storageQ.data.download_dir.trim()
+    ? storageQ.data.download_dir
+    : null;
   const sections: [string, string][] = [["General", "settings"], ["Models", "cpu"], ["Hardware", "drive"], ["Integrations", "link"], ["MCP server", "terminal"], ["Privacy", "shield"], ["Storage", "folder"], ["About", "help"]];
   const providerName = !ctx.settingsReady ? "not loaded" : s?.reasoning_provider === "codex" ? "Codex" : "None";
   const egressState = !ctx.settingsReady
@@ -287,9 +291,9 @@ export default function SettingsScreen() {
           )}
           {sec === "Storage" && (
             <SettingCard title="Storage">
-              <Row l="Library root" r={mono("~/Spool")} />
+              <Row l="Library root" r={mono(storageRoot ?? "Unavailable")} sub={storageRoot ? "Reported by the connected engine." : "The connected engine did not report a storage path."} />
               <Row l="Free disk" r={mono(`${machine.free_disk_gb ?? "—"} GB`)} />
-              <Row l="Renders" r={mono("engine/downloads/clips/<clip>/renders/")} sub="Each clip's rendered .mp4 (downloadable from the Editor → Export tab)." />
+              <Row l="Renders" r={mono("Library-managed")} sub="Each rendered .mp4 is managed with the library media and downloadable from the Editor → Export tab." />
             </SettingCard>
           )}
           {sec === "General" && (
