@@ -1241,6 +1241,34 @@ describe("visible mutation inventory: Offline watch gates", () => {
     },
   );
 
+  it.each(["channel", "playlist"] as const)(
+    "blocks an existing $kind watch changed to Folder in Offline mode",
+    (kind) => {
+      const watch = watchFixture(kind);
+      const updateWatch = vi.fn().mockResolvedValue({ ...watch, kind: "folder" });
+      harness.queryData = { listWatches: { watches: [watch] }, listRecipes: { recipes: [] } };
+      harness.ctx = baseCtx({
+        settings: settingsFixture({ offline: true }),
+        settingsReady: true,
+        offline: true,
+        client: clientFixture({ updateWatch }),
+      });
+      render(<WatchesScreen />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Folder" }));
+      const save = screen.getByRole("button", { name: "Save" });
+      const reason = screen.getByRole("status");
+      expect(save).toBeDisabled();
+      expect(save).toHaveAttribute("aria-describedby", reason.id);
+      expect(reason).toHaveTextContent(
+        "Offline mode blocks remote watch actions. Folder watches remain available.",
+      );
+      fireEvent.click(save);
+
+      expect(updateWatch).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(blockedStates.flatMap((privacy) => (["create", "update", "scan"] as const).map((operation) => ({ ...privacy, operation }))))(
     "keeps folder $operation usable $state",
     async ({ ctx, operation }) => {

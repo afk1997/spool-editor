@@ -52,9 +52,11 @@ export default function WatchesScreen() {
   const selectWatch = (w: Watch) => { if (operationRef.current) return; setSel(w.id); setF(toForm(w)); };
   const newWatch = () => { if (operationRef.current) return; setSel(null); setF(EMPTY); setSynced(true); };
   const recipeName = (id?: string) => recipes.find((r) => r.id === id)?.name || "—";
+  const selWatch = watches.find((w) => w.id === sel) || null;
+  const saveTouchesRemote = isRemoteKind(f.kind) || (!!selWatch && isRemoteKind(selWatch.kind));
 
   const save = async () => {
-    if (operationRef.current || (isRemoteKind(f.kind) && remoteWatchBlock)) return;
+    if (operationRef.current || (saveTouchesRemote && remoteWatchBlock)) return;
     if (!f.name.trim() || !f.target.trim()) { ctx.pushToast({ icon: "alert", tone: "warn", title: "Name and a folder/URL are required" }); return; }
     operationRef.current = "save";
     setBusy(true);
@@ -109,9 +111,8 @@ export default function WatchesScreen() {
     }
   };
 
-  const selWatch = watches.find((w) => w.id === sel) || null;
   const kindHint = KINDS.find((k) => k.key === f.kind)?.hint ?? "";
-  const saveRemoteBlocked = isRemoteKind(f.kind) && remoteWatchBlock !== null;
+  const saveRemoteBlocked = saveTouchesRemote && remoteWatchBlock !== null;
   const scanRemoteBlocked = !!selWatch && isRemoteKind(selWatch.kind) && remoteWatchBlock !== null;
   const visibleRemoteBlock = saveRemoteBlocked || scanRemoteBlocked ? remoteWatchBlock : null;
 
