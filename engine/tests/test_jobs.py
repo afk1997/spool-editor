@@ -946,6 +946,26 @@ def test_download_reservation_recovers_after_target_completion(raises):
     manager.shutdown(wait=True)
 
 
+def test_download_completion_cleanup_oserror_still_releases_reservation(monkeypatch):
+    import jobs
+
+    cleanup_calls = []
+
+    def fail_cleanup(root):
+        cleanup_calls.append(root)
+        raise OSError("cleanup failed")
+
+    monkeypatch.setattr(jobs, "cleanup_attempt", fail_cleanup)
+    manager = JobManager(max_workers=1)
+    jid = manager.submit(target=lambda _job: None, title="one", url="u-one")
+
+    assert _wait_worker_inactive(manager, jid)
+    assert manager.get(jid).status is JobStatus.DONE
+    assert cleanup_calls == [manager.get(jid)._staging_root]
+    assert manager.pending_count == 0
+    manager.shutdown(wait=True)
+
+
 def test_download_queued_cancel_keeps_reservation_until_stale_wrapper_drains(monkeypatch):
     manager = JobManager(max_workers=1)
     gate = threading.Event()
@@ -1046,6 +1066,35 @@ def test_download_submit_rejection_rolls_back_reservation_record_and_store(tmp_p
     with pytest.raises(RuntimeError, match="executor rejected"):
         manager.submit(target=lambda _job: None, title="rejected", url="u-rejected")
 
+    assert manager.pending_count == 0
+    assert manager.snapshot_jobs() == []
+    assert json.loads(store.read_text()) == {"version": 1, "jobs": []}
+    assert rejecting.submit_calls == 1
+    manager.shutdown(wait=True)
+
+
+def test_download_submit_rejection_cleanup_oserror_still_releases_reservation(
+    tmp_path, monkeypatch,
+):
+    import jobs
+
+    store = tmp_path / "jobs.json"
+    manager = JobManager(max_workers=1, store_path=store)
+    manager._executor.shutdown(wait=True)
+    rejecting = _RejectingExecutor()
+    manager._executor = rejecting
+    cleanup_calls = []
+
+    def fail_cleanup(root):
+        cleanup_calls.append(root)
+        raise OSError("cleanup failed")
+
+    monkeypatch.setattr(jobs, "cleanup_attempt", fail_cleanup)
+
+    with pytest.raises(RuntimeError, match="executor rejected"):
+        manager.submit(target=lambda _job: None, title="rejected", url="u-rejected")
+
+    assert len(cleanup_calls) == 1
     assert manager.pending_count == 0
     assert manager.snapshot_jobs() == []
     assert json.loads(store.read_text()) == {"version": 1, "jobs": []}
