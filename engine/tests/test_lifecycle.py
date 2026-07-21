@@ -258,12 +258,31 @@ def test_app_exposes_one_shutdown_boundary_for_all_owned_workers(tmp_path, monke
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX SIGTERM/process-group lifecycle")
 def test_sigterm_bridge_drains_live_reasoning_process_before_exit(tmp_path):
+    from clip import llm
+
     bridge_pid_file = tmp_path / "bridge.pid"
+    auth_home = tmp_path / "codex-home"
+    auth_home.mkdir()
+    (auth_home / "auth.json").write_text('{"auth_mode":"chatgpt"}')
+    feature_rows = "\n".join(
+        (
+            f"{name} removed true"
+            if name == "tui_app_server"
+            else f"{name} under development false"
+            if name == "apps_mcp_path_override"
+            else f"{name} stable false"
+        )
+        for name in llm._CODEX_DISABLED_FEATURES
+    )
     bridge = tmp_path / "codex-bridge"
     bridge.write_text(
         f"#!{sys.executable}\n"
         "import os, sys, time\n"
-        "with open(os.environ['SPOOL_TEST_BRIDGE_PID'], 'w') as f:\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        f"    print({llm._CODEX_REVIEWED_VERSION!r}); raise SystemExit(0)\n"
+        "if sys.argv[-2:] == ['features', 'list']:\n"
+        f"    print({feature_rows!r}); raise SystemExit(0)\n"
+        f"with open({str(bridge_pid_file)!r}, 'w') as f:\n"
         "    f.write(str(os.getpid())); f.flush(); os.fsync(f.fileno())\n"
         "sys.stdin.read()\n"
         "time.sleep(60)\n"
@@ -299,7 +318,7 @@ with lifecycle.sigterm_shutdown(lambda: registry.shutdown(timeout=3)):
     env = os.environ.copy()
     env["PYTHONPATH"] = str(engine_dir)
     env["SPOOL_TEST_BRIDGE"] = str(bridge)
-    env["SPOOL_TEST_BRIDGE_PID"] = str(bridge_pid_file)
+    env["CODEX_HOME"] = str(auth_home)
     supervisor = subprocess.Popen([sys.executable, "-c", supervisor_source], env=env)
     bridge_pid = None
     try:

@@ -44,6 +44,48 @@ def _codex(*, policy=None, state=None, **kwargs):
     )
 
 
+@pytest.fixture(autouse=True)
+def codex_auth_home(tmp_path, monkeypatch):
+    home = tmp_path / "real-codex-home"
+    home.mkdir()
+    (home / "auth.json").write_text('{"auth_mode":"chatgpt"}')
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    return home
+
+
+@pytest.fixture(autouse=True)
+def reviewed_codex_capabilities(monkeypatch, request):
+    if request.node.name in {
+        "test_codex_capability_probe_is_process_group_owned_and_bounded",
+        "test_installed_codex_supports_every_inference_only_feature_flag",
+    }:
+        return
+
+    def reviewed_probe(_binary, *, args, env):
+        assert env["CODEX_HOME"] == env["HOME"]
+        if args == ("--version",):
+            return 0, "codex-cli 0.136.0\n", ""
+        if args == (
+            *llm._codex_inference_options(strict_config=False),
+            "features",
+            "list",
+        ):
+            output = "\n".join(
+                (
+                    f"{name} removed true"
+                    if name == "tui_app_server"
+                    else f"{name} under development false"
+                    if name == "apps_mcp_path_override"
+                    else f"{name} stable false"
+                )
+                for name in llm._CODEX_DISABLED_FEATURES
+            )
+            return 0, f"{output}\n", ""
+        raise AssertionError(f"unexpected Codex capability probe: {args!r}")
+
+    monkeypatch.setattr(llm, "_run_codex_probe", reviewed_probe)
+
+
 # --- provider resolution -------------------------------------------------
 
 def test_get_provider_defaults_to_none():
@@ -83,12 +125,31 @@ def _write_o(argv, text):
         f.write(text)
 
 
-def test_codex_builds_read_only_exec_argv(monkeypatch):
+def test_codex_builds_inference_only_isolated_exec_argv(
+    tmp_path, monkeypatch, codex_auth_home,
+):
     captured = {}
+    global_sentinel = "GLOBAL_CODEX_HOME_INSTRUCTION_MUST_NOT_LOAD"
+    project_sentinel = "PROJECT_INSTRUCTION_MUST_NOT_LOAD"
+    (codex_auth_home / "AGENTS.md").write_text(global_sentinel)
+    (codex_auth_home / "config.toml").write_text('model = "unsafe-user-model"')
+    project = tmp_path / "private-project"
+    project.mkdir()
+    (project / "AGENTS.md").write_text(project_sentinel)
 
     def fake_popen(argv, **kw):
         captured["argv"] = argv
         captured["kw"] = kw
+        captured["scratch"] = Path(kw["cwd"])
+        captured["runtime_entries"] = sorted(
+            path.name for path in captured["scratch"].iterdir()
+        )
+        captured["isolated_auth"] = (
+            captured["scratch"] / "auth.json"
+        ).read_bytes()
+        captured["isolated_auth_mode"] = (
+            captured["scratch"] / "auth.json"
+        ).stat().st_mode & 0o777
         _write_o(argv, "RESULT")
         proc = _FakeProc(returncode=0)
 
@@ -103,18 +164,457 @@ def test_codex_builds_read_only_exec_argv(monkeypatch):
     monkeypatch.setattr(llm.shutil, "which", lambda b: "/usr/local/bin/codex")
     monkeypatch.setattr(llm.subprocess, "Popen", fake_popen)
 
-    out = _codex().complete("find clips", system="you are a producer")
+    out = _codex(cwd=str(project)).complete(
+        "find clips",
+        system="you are a producer",
+    )
 
     assert out == "RESULT"  # read from the -o file, not the noisy stdout log
     argv = captured["argv"]
-    assert argv[0] == "codex" and argv[1] == "exec"
-    # read-only sandbox so the agent can never touch the filesystem
-    assert "--sandbox" in argv and argv[argv.index("--sandbox") + 1] == "read-only"
+    assert argv[0] == "/usr/local/bin/codex" and argv[1] == "exec"
+    # A zero-filesystem/no-network permission profile and explicit inference-only
+    # flags remove model-executable process and data-access tools.
+    assert "--sandbox" not in argv
     assert "--skip-git-repo-check" in argv and "--ephemeral" in argv and "-o" in argv
+    assert "--strict-config" in argv
+    assert "--ignore-user-config" in argv and "--ignore-rules" in argv
+    assert 'web_search="disabled"' in argv
+    assert 'default_permissions="spool-inference"' in argv
+    assert "permissions.spool-inference.filesystem={}" in argv
+    assert "permissions.spool-inference.network.enabled=false" in argv
+    assert "skills.bundled.enabled=false" in argv
+    assert "skills.include_instructions=false" in argv
+    assert "skills.config=[]" in argv
+    assert "tools.experimental_request_user_input.enabled=false" in argv
+    assert "analytics.enabled=false" in argv
+    assert "feedback.enabled=false" in argv
+    assert "check_for_update_on_startup=false" in argv
+    assert "otel.log_user_prompt=false" in argv
+    assert 'otel.exporter="none"' in argv
+    assert 'otel.trace_exporter="none"' in argv
+    assert 'otel.metrics_exporter="none"' in argv
+    disabled = {
+        argv[index + 1]
+        for index, value in enumerate(argv[:-1])
+        if value == "--disable"
+    }
+    assert {
+        "shell_tool",
+        "plugins",
+        "remote_plugin",
+        "apps",
+        "browser_use",
+        "browser_use_external",
+        "image_generation",
+        "memories",
+        "workspace_dependencies",
+        "shell_snapshot",
+        "hooks",
+        "plugin_sharing",
+        "enable_mcp_apps",
+        "tool_call_mcp_elicitation",
+        "skill_mcp_dependency_install",
+        "multi_agent",
+        "multi_agent_v2",
+        "enable_fanout",
+    } <= disabled
     assert "model_reasoning_effort=low" in argv  # cheap-by-default (SPOOL_CODEX_REASONING)
+    assert argv[argv.index("-C") + 1] == str(captured["scratch"])
+    assert captured["scratch"] != project
+    assert captured["kw"]["env"]["HOME"] == str(captured["scratch"])
+    assert captured["kw"]["env"]["CODEX_HOME"] == str(captured["scratch"])
+    assert captured["kw"]["env"]["TMPDIR"] == str(captured["scratch"])
+    assert captured["kw"]["env"]["TERM"] == "dumb"
+    assert captured["kw"]["env"]["NO_COLOR"] == "1"
+    assert captured["runtime_entries"] == ["auth.json"]
+    assert captured["isolated_auth"] == (codex_auth_home / "auth.json").read_bytes()
+    assert captured["isolated_auth_mode"] == 0o600
+    assert not captured["scratch"].exists()
     # prompt goes over stdin (transcripts can be large); system is prepended
     assert "find clips" in captured["input"]
     assert "you are a producer" in captured["input"]
+    assert global_sentinel not in captured["input"]
+    assert project_sentinel not in captured["input"]
+
+
+def test_codex_sanitizes_process_environment(monkeypatch):
+    captured = {}
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-leak")
+    monkeypatch.setenv("SPOOL_PRIVATE_PATH", "/private/watch")
+    monkeypatch.setenv("PYTHONPATH", "/tmp/inject")
+    monkeypatch.setenv("NODE_OPTIONS", "--require=/tmp/inject.js")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:8080")
+    monkeypatch.setenv("SSL_CERT_FILE", "/tmp/cert.pem")
+
+    def fake_popen(argv, **kwargs):
+        captured["env"] = kwargs["env"]
+        _write_o(argv, "RESULT")
+        return _FakeProc()
+
+    monkeypatch.setattr(llm.shutil, "which", lambda _binary: "/usr/local/bin/codex")
+    monkeypatch.setattr(llm.subprocess, "Popen", fake_popen)
+
+    assert _codex().complete("transcript") == "RESULT"
+
+    env = captured["env"]
+    assert "HTTPS_PROXY" not in env
+    assert "SSL_CERT_FILE" not in env
+    assert (
+        env["HOME"]
+        == env["CODEX_HOME"]
+        == env["TMPDIR"]
+        == env["TMP"]
+        == env["TEMP"]
+    )
+    assert "PATH" in env
+    assert set(env) == {
+        "PATH",
+        "HOME",
+        "CODEX_HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "TERM",
+        "NO_COLOR",
+    }
+    assert "OPENAI_API_KEY" not in env
+    assert "SPOOL_PRIVATE_PATH" not in env
+    assert "PYTHONPATH" not in env
+    assert "NODE_OPTIONS" not in env
+
+
+def test_codex_reconciles_only_a_successful_isolated_auth_refresh(
+    monkeypatch, codex_auth_home,
+):
+    original = b'{"access_token":"old"}'
+    refreshed = b'{"access_token":"new"}'
+    source = codex_auth_home / "auth.json"
+    source.write_bytes(original)
+    source.chmod(0o640)
+
+    class RefreshingProcess(_FakeProc):
+        def __init__(self, argv, **kwargs):
+            super().__init__()
+            self.argv = argv
+            self.runtime_home = Path(kwargs["env"]["CODEX_HOME"])
+
+        def communicate(self, input=None, timeout=None):
+            (self.runtime_home / "auth.json").write_bytes(refreshed)
+            _write_o(self.argv, "RESULT")
+            return "", ""
+
+    monkeypatch.setattr(llm.shutil, "which", lambda _binary: "/usr/local/bin/codex")
+    monkeypatch.setattr(llm.subprocess, "Popen", RefreshingProcess)
+
+    assert _codex().complete("transcript") == "RESULT"
+
+    assert source.read_bytes() == refreshed
+    assert source.stat().st_mode & 0o777 == 0o640
+    assert list(codex_auth_home.glob(".auth.json.spool-*")) == []
+
+
+def test_codex_auth_reconcile_persists_mode_before_file_and_directory_fsync(
+    tmp_path, monkeypatch,
+):
+    source_home = tmp_path / "source"
+    runtime_home = tmp_path / "runtime"
+    source_home.mkdir()
+    runtime_home.mkdir()
+    source = source_home / "auth.json"
+    source.write_bytes(b"old")
+    source.chmod(0o640)
+    (runtime_home / "auth.json").write_bytes(b"new")
+    events = []
+    real_fchmod = llm.os.fchmod
+    real_fsync = llm.os.fsync
+    real_replace = llm.os.replace
+
+    def observed_fchmod(descriptor, mode):
+        events.append(("fchmod", mode))
+        return real_fchmod(descriptor, mode)
+
+    def observed_fsync(descriptor):
+        events.append(("fsync", None))
+        return real_fsync(descriptor)
+
+    def observed_replace(source_path, destination_path):
+        events.append(("replace", None))
+        return real_replace(source_path, destination_path)
+
+    monkeypatch.setattr(llm.os, "fchmod", observed_fchmod)
+    monkeypatch.setattr(llm.os, "fsync", observed_fsync)
+    monkeypatch.setattr(llm.os, "replace", observed_replace)
+
+    llm._reconcile_codex_auth(
+        source,
+        runtime_home=str(runtime_home),
+        snapshot=b"old",
+        source_mode=0o640,
+    )
+
+    assert events == [
+        ("fchmod", 0o640),
+        ("fsync", None),
+        ("replace", None),
+        ("fsync", None),
+    ]
+    assert source.read_bytes() == b"new"
+    assert source.stat().st_mode & 0o777 == 0o640
+
+
+def test_codex_does_not_persist_auth_changes_from_a_failed_exec(
+    monkeypatch, codex_auth_home,
+):
+    original = b'{"access_token":"old"}'
+    source = codex_auth_home / "auth.json"
+    source.write_bytes(original)
+
+    class FailingRefreshProcess(_FakeProc):
+        def __init__(self, argv, **kwargs):
+            super().__init__(returncode=2, stderr="rejected")
+            self.runtime_home = Path(kwargs["env"]["CODEX_HOME"])
+
+        def communicate(self, input=None, timeout=None):
+            (self.runtime_home / "auth.json").write_text('{"access_token":"bad"}')
+            return "", self.stderr
+
+    monkeypatch.setattr(llm.shutil, "which", lambda _binary: "/usr/local/bin/codex")
+    monkeypatch.setattr(llm.subprocess, "Popen", FailingRefreshProcess)
+
+    with pytest.raises(RuntimeError, match="rejected"):
+        _codex().complete("transcript")
+
+    assert source.read_bytes() == original
+
+
+def test_codex_serializes_auth_snapshot_exec_and_reconcile(monkeypatch):
+    policy = NetworkPolicy()
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_spawned = threading.Event()
+    counter_lock = threading.Lock()
+    spawn_count = 0
+
+    class SerializedProcess(_FakeProc):
+        def __init__(self, argv, *, ordinal, **kwargs):
+            super().__init__()
+            self.argv = argv
+            self.ordinal = ordinal
+
+        def communicate(self, input=None, timeout=None):
+            if self.ordinal == 1:
+                first_entered.set()
+                assert release_first.wait(2), "first Codex call was not released"
+            else:
+                second_spawned.set()
+            _write_o(self.argv, f"RESULT-{self.ordinal}")
+            return "", ""
+
+    def fake_popen(argv, **kwargs):
+        nonlocal spawn_count
+        with counter_lock:
+            spawn_count += 1
+            ordinal = spawn_count
+        return SerializedProcess(argv, ordinal=ordinal, **kwargs)
+
+    monkeypatch.setattr(llm.shutil, "which", lambda _binary: "/usr/local/bin/codex")
+    monkeypatch.setattr(llm.subprocess, "Popen", fake_popen)
+    provider = _codex(policy=policy)
+    outcomes = []
+    first = threading.Thread(target=lambda: outcomes.append(provider.complete("one")))
+    second = threading.Thread(target=lambda: outcomes.append(provider.complete("two")))
+
+    first.start()
+    assert first_entered.wait(2), "first Codex call did not reach exec"
+    second.start()
+    assert second_spawned.wait(0.1) is False
+    release_first.set()
+    first.join(2)
+    second.join(2)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert sorted(outcomes) == ["RESULT-1", "RESULT-2"]
+    assert spawn_count == 2
+    assert policy.active_leases == 0
+
+
+def test_codex_fails_closed_without_recognized_auth_file(tmp_path, monkeypatch):
+    empty_home = tmp_path / "empty-codex-home"
+    empty_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(empty_home))
+    monkeypatch.setattr(llm.shutil, "which", lambda _binary: "/usr/local/bin/codex")
+    monkeypatch.setattr(
+        llm.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("missing auth launched Codex"),
+    )
+
+    with pytest.raises(llm.ProviderUnavailableError, match="auth credential"):
+        _codex().complete("transcript")
+
+
+def test_codex_fails_closed_on_unreviewed_cli_version(monkeypatch):
+    def unreviewed_probe(_binary, *, args, env):
+        return 0, "codex-cli 0.137.0\n", ""
+
+    monkeypatch.setattr(llm.shutil, "which", lambda _binary: "/usr/local/bin/codex")
+    monkeypatch.setattr(llm, "_run_codex_probe", unreviewed_probe)
+    monkeypatch.setattr(
+        llm.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("unreviewed Codex launched"),
+    )
+
+    with pytest.raises(llm.ProviderUnavailableError, match="reviewed Codex CLI"):
+        _codex().complete("transcript")
+
+
+def test_codex_fails_closed_when_a_nonremoved_feature_stays_enabled(monkeypatch):
+    def unsafe_probe(_binary, *, args, env):
+        if args == ("--version",):
+            return 0, f"{llm._CODEX_REVIEWED_VERSION}\n", ""
+        output = "\n".join(
+            (
+                f"{name} removed true"
+                if name == "tui_app_server"
+                else f"{name} stable {'true' if name == 'shell_tool' else 'false'}"
+            )
+            for name in llm._CODEX_DISABLED_FEATURES
+        )
+        return 0, f"{output}\n", ""
+
+    monkeypatch.setattr(llm.shutil, "which", lambda _binary: "/usr/local/bin/codex")
+    monkeypatch.setattr(llm, "_run_codex_probe", unsafe_probe)
+    monkeypatch.setattr(
+        llm.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("unsafe feature state launched Codex"),
+    )
+
+    with pytest.raises(llm.ProviderUnavailableError, match="feature state"):
+        _codex().complete("transcript")
+
+
+def test_codex_validator_accepts_reviewed_multiword_feature_lifecycle(
+    tmp_path, monkeypatch,
+):
+    calls = []
+
+    def reviewed_probe(_binary, *, args, env):
+        calls.append(args)
+        if args == ("--version",):
+            return 0, f"{llm._CODEX_REVIEWED_VERSION}\n", ""
+        output = "\n".join(
+            (
+                f"{name} removed true"
+                if name == "tui_app_server"
+                else f"{name} under development false"
+                if name == "apps_mcp_path_override"
+                else f"{name} stable false"
+            )
+            for name in llm._CODEX_DISABLED_FEATURES
+        )
+        return 0, f"{output}\n", ""
+
+    monkeypatch.setattr(llm, "_run_codex_probe", reviewed_probe)
+    env = llm._sanitized_codex_env(
+        runtime_home=str(tmp_path),
+        discovered_bin="/opt/homebrew/bin/codex",
+    )
+
+    llm._validate_codex_cli("/resolved/codex", env=env)
+
+    assert calls == [
+        ("--version",),
+        (
+            *llm._codex_inference_options(strict_config=False),
+            "features",
+            "list",
+        ),
+    ]
+    assert env["PATH"].split(os.pathsep)[0] == "/opt/homebrew/bin"
+
+
+def test_codex_capability_probe_is_process_group_owned_and_bounded(
+    tmp_path, monkeypatch,
+):
+    captured = {}
+
+    class Probe:
+        returncode = 0
+
+    process = Probe()
+
+    def fake_spawn(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return process
+
+    def fake_communicate(candidate, *, input_text, timeout):
+        captured["communicate"] = (candidate, input_text, timeout)
+        return "probe-output", ""
+
+    monkeypatch.setattr(llm, "_spawn_reasoning_process", fake_spawn)
+    monkeypatch.setattr(llm, "_communicate_reasoning_process", fake_communicate)
+    env = llm._sanitized_codex_env(
+        runtime_home=str(tmp_path),
+        discovered_bin="/usr/local/bin/codex",
+    )
+
+    result = llm._run_codex_probe(
+        "/usr/local/bin/codex",
+        args=("--version",),
+        env=env,
+    )
+
+    assert result == (0, "probe-output", "")
+    assert captured["argv"] == ["/usr/local/bin/codex", "--version"]
+    assert captured["kwargs"]["cwd"] == str(tmp_path)
+    assert captured["kwargs"]["env"] == env
+    assert captured["communicate"] == (process, "", 5)
+
+
+def test_codex_cleans_scratch_when_spawn_fails(monkeypatch):
+    scratch_paths = []
+
+    def failed_spawn(_argv, **kwargs):
+        scratch_paths.append(Path(kwargs["cwd"]))
+        raise FileNotFoundError("vanished")
+
+    monkeypatch.setattr(llm.shutil, "which", lambda _binary: "/usr/local/bin/codex")
+    monkeypatch.setattr(llm.subprocess, "Popen", failed_spawn)
+
+    with pytest.raises(llm.ProviderUnavailableError, match="could not be run"):
+        _codex().complete("transcript")
+
+    assert scratch_paths
+    assert all(not path.exists() for path in scratch_paths)
+
+
+@pytest.mark.skipif(
+    stdlib_shutil.which("codex") is None,
+    reason="installed Codex CLI capability contract",
+)
+def test_installed_codex_supports_every_inference_only_feature_flag():
+    binary = stdlib_shutil.which("codex")
+    with llm.tempfile.TemporaryDirectory(prefix="spool-codex-live-probe-") as home:
+        env = llm._sanitized_codex_env(
+            runtime_home=home,
+            discovered_bin=binary,
+        )
+        llm._validate_codex_cli(binary, env=env)
+
+    help_text = llm.subprocess.run(
+        [binary, "exec", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    ).stdout
+    assert "--strict-config" in help_text
+    assert "--disable <FEATURE>" in help_text
+    assert "--ignore-user-config" in help_text
+    assert "--ignore-rules" in help_text
 
 
 def test_codex_ignores_user_config_but_keeps_explicit_model(monkeypatch):
@@ -521,13 +1021,6 @@ def test_codex_holds_lease_until_owned_process_group_is_quiescent(monkeypatch):
 
     monkeypatch.setattr(llm.shutil, "which", lambda _bin: "/usr/local/bin/codex")
     monkeypatch.setattr(llm.subprocess, "Popen", CompletedProcess)
-    monkeypatch.setattr(
-        llm.subprocess,
-        "run",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("subprocess.run cannot own the Codex process tree")
-        ),
-    )
     monkeypatch.setattr(llm.os, "killpg", group_probe)
 
     assert _codex(policy=policy).complete("find clips") == "RESULT"
@@ -806,7 +1299,9 @@ def test_codex_logs_output_temp_cleanup_failure(tmp_path, monkeypatch, caplog):
         _write_o(argv, "RESULT")
         return _FakeProc()
 
-    def failed_unlink(path):
+    def failed_unlink(path, *args, **kwargs):
+        if kwargs.get("dir_fd") is not None:
+            return real_unlink(path, *args, **kwargs)
         output_paths.append(path)
         raise OSError("permission denied")
 
@@ -838,6 +1333,8 @@ def test_codex_logs_scratch_cleanup_failure(monkeypatch, caplog):
         return _FakeProc()
 
     def failed_rmtree(path, **kwargs):
+        if Path(path).name.startswith("spool-codex-home-"):
+            return real_rmtree(path, **kwargs)
         raise OSError("scratch busy")
 
     monkeypatch.setattr(llm.shutil, "which", lambda _bin: "/usr/local/bin/codex")
@@ -911,16 +1408,16 @@ def test_codex_timeout_kills_real_descendant_before_releasing_lease(
     bridge = tmp_path / "codex-bridge"
     bridge.write_text(
         f"#!{sys.executable}\n"
+        f"pid_file = {str(child_pid_file)!r}\n"
         "import os, subprocess, sys, time\n"
         "out = sys.argv[sys.argv.index('-o') + 1]\n"
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
-        "with open(os.environ['SPOOL_TEST_CHILD_PID'], 'w') as f:\n"
+        "with open(pid_file, 'w') as f:\n"
         "    f.write(str(child.pid)); f.flush(); os.fsync(f.fileno())\n"
         "sys.stdin.read()\n"
         "time.sleep(60)\n"
     )
     bridge.chmod(0o755)
-    monkeypatch.setenv("SPOOL_TEST_CHILD_PID", str(child_pid_file))
 
     child_pid = None
     try:
@@ -955,14 +1452,14 @@ def test_reasoning_registry_shutdown_kills_live_group_and_rejects_new_launches(
     bridge = tmp_path / "codex-bridge"
     bridge.write_text(
         f"#!{sys.executable}\n"
+        f"pid_file = {str(bridge_pid_file)!r}\n"
         "import os, sys, time\n"
-        "with open(os.environ['SPOOL_TEST_BRIDGE_PID'], 'w') as f:\n"
+        "with open(pid_file, 'w') as f:\n"
         "    f.write(str(os.getpid())); f.flush(); os.fsync(f.fileno())\n"
         "sys.stdin.read()\n"
         "time.sleep(60)\n"
     )
     bridge.chmod(0o755)
-    monkeypatch.setenv("SPOOL_TEST_BRIDGE_PID", str(bridge_pid_file))
     provider = llm.CodexProvider(
         network_policy=policy,
         privacy_state=lambda: _privacy(),

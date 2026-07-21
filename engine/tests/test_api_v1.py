@@ -3063,7 +3063,7 @@ def test_agent_route_surfaces_last_moment_privacy_denials_as_exact_409(
 
 
 def test_active_reasoning_lease_blocks_offline_persistence_until_completion(
-    client, monkeypatch,
+    client, tmp_path, monkeypatch,
 ):
     from clip import llm
 
@@ -3074,6 +3074,23 @@ def test_active_reasoning_lease_blocks_offline_persistence_until_completion(
     entered = threading.Event()
     release = threading.Event()
     outcomes = []
+    auth_home = tmp_path / "codex-auth"
+    auth_home.mkdir()
+    (auth_home / "auth.json").write_text('{"auth_mode":"chatgpt"}')
+    monkeypatch.setenv("CODEX_HOME", str(auth_home))
+
+    def reviewed_probe(_binary, *, args, env):
+        if args == ("--version",):
+            return 0, f"{llm._CODEX_REVIEWED_VERSION}\n", ""
+        output = "\n".join(
+            (
+                f"{name} removed true"
+                if name == "tui_app_server"
+                else f"{name} stable false"
+            )
+            for name in llm._CODEX_DISABLED_FEATURES
+        )
+        return 0, f"{output}\n", ""
 
     class BlockingCodexProcess:
         returncode = 0
@@ -3092,6 +3109,7 @@ def test_active_reasoning_lease_blocks_offline_persistence_until_completion(
             return self.returncode
 
     monkeypatch.setattr(llm.shutil, "which", lambda _bin: "/usr/local/bin/codex")
+    monkeypatch.setattr(llm, "_run_codex_probe", reviewed_probe)
     monkeypatch.setattr(llm.subprocess, "Popen", BlockingCodexProcess)
 
     def complete():

@@ -26,9 +26,11 @@ import logging
 import os
 import signal
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
+from pathlib import Path
 from threading import RLock
 from typing import Callable, Mapping, Protocol, runtime_checkable
 from weakref import WeakKeyDictionary
@@ -47,7 +49,322 @@ CODEX_TIMEOUT = int(os.environ.get("SPOOL_CODEX_TIMEOUT", "180"))
 # SPOOL_CODEX_REASONING="" to fall back to the CLI's configured default.
 CODEX_REASONING = os.environ.get("SPOOL_CODEX_REASONING", "low")
 
+_CODEX_DISABLED_FEATURES = (
+    "apply_patch_freeform",
+    "apply_patch_streaming_events",
+    "apps",
+    "apps_mcp_path_override",
+    "artifact",
+    "auth_elicitation",
+    "browser_use",
+    "browser_use_external",
+    "child_agents_md",
+    "chronicle",
+    "code_mode",
+    "code_mode_only",
+    "codex_git_commit",
+    "collaboration_modes",
+    "computer_use",
+    "default_mode_request_user_input",
+    "elevated_windows_sandbox",
+    "enable_fanout",
+    "enable_mcp_apps",
+    "enable_request_compression",
+    "exec_permission_approvals",
+    "experimental_windows_sandbox",
+    "external_migration",
+    "fast_mode",
+    "goals",
+    "guardian_approval",
+    "hooks",
+    "image_detail_original",
+    "image_generation",
+    "imagegenext",
+    "in_app_browser",
+    "js_repl",
+    "js_repl_tools_only",
+    "memories",
+    "mentions_v2",
+    "multi_agent",
+    "multi_agent_v2",
+    "network_proxy",
+    "non_prefixed_mcp_tool_names",
+    "personality",
+    "plugin_hooks",
+    "plugin_sharing",
+    "plugins",
+    "prevent_idle_sleep",
+    "realtime_conversation",
+    "remote_compaction_v2",
+    "remote_control",
+    "remote_models",
+    "remote_plugin",
+    "request_permissions_tool",
+    "request_rule",
+    "responses_websocket_response_processed",
+    "responses_websockets",
+    "responses_websockets_v2",
+    "runtime_metrics",
+    "search_tool",
+    "shell_snapshot",
+    "shell_tool",
+    "shell_zsh_fork",
+    "skill_env_var_dependency_prompt",
+    "skill_mcp_dependency_install",
+    "sqlite",
+    "standalone_web_search",
+    "steer",
+    "terminal_resize_reflow",
+    "tool_call_mcp_elicitation",
+    "tool_search",
+    "tool_search_always_defer_mcp_tools",
+    "tool_suggest",
+    "tui_app_server",
+    "unavailable_dummy_tools",
+    "undo",
+    "unified_exec",
+    "use_legacy_landlock",
+    "use_linux_sandbox_bwrap",
+    "web_search_cached",
+    "web_search_request",
+    "workspace_dependencies",
+    "workspace_owner_usage_nudge",
+)
+_CODEX_REVIEWED_VERSION = "codex-cli 0.136.0"
+_CODEX_AUTH_FILES = ("auth.json",)
+_CODEX_REMOVED_ENABLED_FEATURES = {
+    ("tui_app_server", "removed", "true"),
+}
+_CODEX_INFERENCE_CONFIG = (
+    'web_search="disabled"',
+    "mcp_servers={}",
+    'default_permissions="spool-inference"',
+    "permissions.spool-inference.filesystem={}",
+    "permissions.spool-inference.network.enabled=false",
+    "skills.bundled.enabled=false",
+    "skills.include_instructions=false",
+    "skills.config=[]",
+    "tools.experimental_request_user_input.enabled=false",
+    "analytics.enabled=false",
+    "feedback.enabled=false",
+    "check_for_update_on_startup=false",
+    "otel.log_user_prompt=false",
+    'otel.exporter="none"',
+    'otel.trace_exporter="none"',
+    'otel.metrics_exporter="none"',
+)
+
 _TRUE = {"1", "true", "yes", "on"}
+_codex_auth_lock = RLock()
+
+
+def _codex_auth_file() -> Path:
+    configured_home = os.environ.get("CODEX_HOME")
+    source_home = (
+        Path(configured_home).expanduser()
+        if configured_home
+        else Path.home() / ".codex"
+    )
+    for name in _CODEX_AUTH_FILES:
+        candidate = source_home / name
+        if candidate.is_file():
+            return candidate.resolve()
+    raise ProviderUnavailableError(
+        f"Codex auth credential file auth.json was not found in {source_home}. "
+        "Run `codex login` before enabling remote reasoning."
+    )
+
+
+def _snapshot_codex_auth(source: Path, *, runtime_home: str) -> tuple[bytes, int]:
+    """Copy only auth.json into isolated CODEX_HOME and return its CAS snapshot."""
+    try:
+        snapshot = source.read_bytes()
+        source_mode = stat.S_IMODE(source.stat().st_mode)
+        destination = Path(runtime_home) / "auth.json"
+        descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(snapshot)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        os.chmod(destination, 0o600)
+    except OSError as exc:
+        raise ProviderUnavailableError(
+            "could not create the isolated Codex authentication snapshot"
+        ) from exc
+    return snapshot, source_mode
+
+
+def _reconcile_codex_auth(
+    source: Path,
+    *,
+    runtime_home: str,
+    snapshot: bytes,
+    source_mode: int,
+) -> None:
+    """Atomically persist only a successful CLI auth.json refresh."""
+    isolated = Path(runtime_home) / "auth.json"
+    try:
+        refreshed = isolated.read_bytes()
+        if refreshed == snapshot:
+            return
+        if source.read_bytes() != snapshot:
+            raise ProviderUnavailableError(
+                "Codex auth.json changed concurrently; its isolated refresh was not "
+                "persisted"
+            )
+
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=".auth.json.spool-",
+            dir=str(source.parent),
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(refreshed)
+                handle.flush()
+                os.fchmod(handle.fileno(), source_mode)
+                os.fsync(handle.fileno())
+            os.replace(temporary, source)
+            temporary = ""
+            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            directory_fd = os.open(source.parent, directory_flags)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if temporary:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+    except ProviderUnavailableError:
+        raise
+    except OSError as exc:
+        raise ProviderUnavailableError(
+            "could not persist the refreshed Codex authentication credential"
+        ) from exc
+
+
+
+def _sanitized_codex_env(*, runtime_home: str, discovered_bin: str) -> dict[str, str]:
+    return {
+        "PATH": os.pathsep.join(
+            (os.path.dirname(os.path.abspath(discovered_bin)), os.defpath)
+        ),
+        "HOME": runtime_home,
+        "CODEX_HOME": runtime_home,
+        "TMPDIR": runtime_home,
+        "TMP": runtime_home,
+        "TEMP": runtime_home,
+        "TERM": "dumb",
+        "NO_COLOR": "1",
+    }
+
+
+def _codex_inference_options(*, strict_config: bool) -> tuple[str, ...]:
+    options: list[str] = []
+    if strict_config:
+        options.append("--strict-config")
+    for setting in _CODEX_INFERENCE_CONFIG:
+        options.extend(("-c", setting))
+    for feature in _CODEX_DISABLED_FEATURES:
+        options.extend(("--disable", feature))
+    return tuple(options)
+
+
+def _validate_codex_cli(binary: str, *, env: Mapping[str, str]) -> None:
+    def run_probe(*args: str) -> str:
+        returncode, stdout, _stderr = _run_codex_probe(
+            binary,
+            args=args,
+            env=env,
+        )
+        if returncode != 0:
+            raise ProviderUnavailableError(
+                "could not validate the installed Codex CLI"
+            )
+        return stdout
+
+    version = run_probe("--version").strip()
+    if version != _CODEX_REVIEWED_VERSION:
+        raise ProviderUnavailableError(
+            "remote reasoning requires the reviewed Codex CLI version "
+            f"{_CODEX_REVIEWED_VERSION!r}; found {version or 'unknown'!r}"
+        )
+
+    # `codex features` rejects --strict-config in 0.136.0. It does accept the
+    # complete config/feature override envelope, so exercise that exact denylist
+    # and verify its effective states before the separately strict exec launch.
+    feature_output = run_probe(
+        *_codex_inference_options(strict_config=False),
+        "features",
+        "list",
+    )
+    feature_rows = []
+    for line in feature_output.splitlines():
+        if not line.strip():
+            continue
+        columns = line.split()
+        if len(columns) < 3:
+            raise ProviderUnavailableError(
+                "installed Codex CLI returned an unrecognized feature listing"
+            )
+        feature_rows.append(
+            (columns[0], " ".join(columns[1:-1]), columns[-1])
+        )
+    feature_names = [row[0] for row in feature_rows]
+    unsafe_states = {
+        row
+        for row in feature_rows
+        if row[2] != "false" and row not in _CODEX_REMOVED_ENABLED_FEATURES
+    }
+    if (
+        len(feature_names) != len(set(feature_names))
+        or set(feature_names) != set(_CODEX_DISABLED_FEATURES)
+        or unsafe_states
+        or not _CODEX_REMOVED_ENABLED_FEATURES.issubset(set(feature_rows))
+    ):
+        raise ProviderUnavailableError(
+            "installed Codex CLI feature state differs from the reviewed "
+            "inference-only boundary"
+        )
+
+
+def _run_codex_probe(
+    binary: str,
+    *,
+    args: tuple[str, ...],
+    env: Mapping[str, str],
+) -> tuple[int, str, str]:
+    """Run a no-prompt capability probe in an owned, bounded process group."""
+    try:
+        process = _spawn_reasoning_process(
+            [binary, *args],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=dict(env),
+            cwd=env["HOME"],
+        )
+        stdout, stderr = _communicate_reasoning_process(
+            process,
+            input_text="",
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+        raise ProviderUnavailableError(
+            "could not validate the installed Codex CLI"
+        ) from exc
+    return process.returncode, stdout, stderr
 
 
 class OfflineError(RuntimeError):
@@ -649,9 +966,13 @@ def _communicate_reasoning_process(
 class CodexProvider:
     """Bridge to the user's Codex CLI (ChatGPT/Codex subscription).
 
-    Runs ``codex exec`` non-interactively in a **read-only sandbox** (so the agent
-    can never touch the filesystem) and feeds the prompt over stdin — transcripts can
-    be large. The final message on stdout is returned verbatim; the caller parses it.
+    Runs ``codex exec`` as an inference-only process: a reviewed CLI version and
+    complete feature denylist are enforced, model filesystem/network permissions
+    are empty, HOME/TMP are isolated, and the child environment is sanitized. The
+    CODEX_HOME contains only a private auth.json snapshot; successful credential
+    refreshes are reconciled atomically while user config, AGENTS instructions,
+    skills, plugins, rules, and executable tools stay absent. Prompts go over stdin
+    and the final response is read from an output file.
     """
 
     name = "codex"
@@ -679,7 +1000,10 @@ class CodexProvider:
         self.bin = bin or CODEX_BIN
         self.model = model if model is not None else CODEX_MODEL
         self.timeout = timeout if timeout is not None else CODEX_TIMEOUT
-        self.cwd = cwd
+        # Retained as a backwards-compatible keyword only. Running anywhere a
+        # caller supplies could expose project metadata to trusted Codex core
+        # before model permissions apply, so every invocation ignores it.
+        del cwd
         self.reasoning = CODEX_REASONING if reasoning is None else reasoning
 
     def complete(self, prompt: str, *, system: str | None = None) -> str:
@@ -698,85 +1022,156 @@ class CodexProvider:
     def _complete_leased(
         self, prompt: str, *, system: str | None = None, lease
     ) -> str:
-        if shutil.which(self.bin) is None:
+        discovered_bin = shutil.which(self.bin)
+        if discovered_bin is None:
             raise ProviderUnavailableError(
                 f"the Codex CLI ({self.bin!r}) was not found on PATH. Install it "
                 "(`npm i -g @openai/codex` / `brew install codex`) and sign in with your "
                 "ChatGPT/Codex account (`codex login`), set SPOOL_CODEX_BIN to its path, "
                 "or choose another LLM provider via SPOOL_LLM_PROVIDER."
             )
+        resolved_bin = os.path.realpath(discovered_bin)
         full = prompt if not system else f"{system}\n\n{prompt}"
-        # Run in an empty scratch dir so the agent has nothing to read; --ephemeral keeps
-        # no session files; read-only sandbox blocks any FS write; -o captures *just* the
-        # final message (vs the noisy event log on stdout). Prompt goes over stdin (`-`).
-        scratch = self.cwd or tempfile.mkdtemp(prefix="spool-codex-")
+        # HOME, CODEX_HOME, TMP, -C, and the subprocess cwd all point at one fresh
+        # directory. Only auth.json is copied in under a serialized refresh lock;
+        # strict config, the zero-filesystem permission profile, and a pinned feature
+        # set keep project/global instructions, plugins, tools, and model-spawned
+        # processes out of scope.
+        probe_home: str | None = None
+        runtime_home: str | None = None
+        working_dir: str | None = None
         out_path: str | None = None
         try:
-            out_fd, out_path = tempfile.mkstemp(prefix="spool-codex-out-", suffix=".txt")
-            os.close(out_fd)
-            argv = [
-                self.bin, "exec", "--sandbox", "read-only", "--skip-git-repo-check",
-                "--ephemeral", "--ignore-user-config", "--color", "never",
-                "-C", scratch, "-o", out_path,
-            ]
-            if self.model:
-                argv += ["-m", self.model]
-            if self.reasoning:
-                argv += ["-c", f"model_reasoning_effort={self.reasoning}"]
-            argv += ["-"]
+            probe_home = tempfile.mkdtemp(prefix="spool-codex-probe-")
+            os.chmod(probe_home, 0o700)
+            probe_env = _sanitized_codex_env(
+                runtime_home=probe_home,
+                discovered_bin=discovered_bin,
+            )
+            _validate_codex_cli(resolved_bin, env=probe_env)
+            try:
+                shutil.rmtree(probe_home)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                _log.warning(
+                    "could not remove Codex capability-probe directory %s: %s",
+                    probe_home,
+                    exc,
+                )
+            else:
+                probe_home = None
 
-            try:
-                # The final live read and process creation linearize against every
-                # settings patch on the shared policy lock. Communication remains
-                # outside this short guard while the egress lease stays active.
-                with lease.launch_admission():
-                    _require_remote_reasoning(
-                        self.privacy_state(), provider_name=self.name
-                    )
-                    proc = self.process_registry.spawn(
-                        lambda: _spawn_reasoning_process(
-                            argv,
-                            stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            text=True,
-                            cwd=scratch,
-                        ),
-                        lease=lease,
-                    )
-            except FileNotFoundError as e:  # race: vanished between which() and spawn
-                raise ProviderUnavailableError(
-                    f"the Codex CLI ({self.bin!r}) could not be run: {e}"
-                ) from e
-            try:
-                stdout, stderr = _communicate_reasoning_process(
-                    proc, input_text=full, timeout=self.timeout
+            runtime_home = tempfile.mkdtemp(prefix="spool-codex-")
+            os.chmod(runtime_home, 0o700)
+            working_dir = runtime_home
+            with _codex_auth_lock:
+                auth_source = _codex_auth_file()
+                auth_snapshot, auth_mode = _snapshot_codex_auth(
+                    auth_source,
+                    runtime_home=runtime_home,
                 )
-            finally:
-                if proc.tree_exited:
-                    self.process_registry.release(proc)
-            if proc.returncode != 0:
-                raise RuntimeError(
-                    f"codex exec failed (rc={proc.returncode}): {stderr.strip()[-500:]}"
+                codex_env = _sanitized_codex_env(
+                    runtime_home=runtime_home,
+                    discovered_bin=discovered_bin,
                 )
-            try:
-                with open(out_path) as f:
-                    answer = f.read()
-            except OSError:
-                answer = ""
-            return answer or stdout
+                out_fd, out_path = tempfile.mkstemp(
+                    prefix="spool-codex-out-",
+                    suffix=".txt",
+                )
+                os.close(out_fd)
+                argv = [
+                    resolved_bin,
+                    "exec",
+                    *_codex_inference_options(strict_config=True),
+                    "--skip-git-repo-check",
+                    "--ephemeral",
+                    "--ignore-user-config",
+                    "--ignore-rules",
+                    "--color",
+                    "never",
+                    "-C",
+                    working_dir,
+                    "-o",
+                    out_path,
+                ]
+                if self.model:
+                    argv += ["-m", self.model]
+                if self.reasoning:
+                    argv += ["-c", f"model_reasoning_effort={self.reasoning}"]
+                argv += ["-"]
+
+                try:
+                    # The final live read and process creation linearize against every
+                    # settings patch on the shared policy lock. Communication remains
+                    # outside this short guard while the egress lease stays active.
+                    with lease.launch_admission():
+                        _require_remote_reasoning(
+                            self.privacy_state(), provider_name=self.name
+                        )
+                        proc = self.process_registry.spawn(
+                            lambda: _spawn_reasoning_process(
+                                argv,
+                                stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                text=True,
+                                cwd=working_dir,
+                                env=codex_env,
+                            ),
+                            lease=lease,
+                        )
+                except FileNotFoundError as e:  # race: vanished after discovery
+                    raise ProviderUnavailableError(
+                        f"the Codex CLI ({self.bin!r}) could not be run: {e}"
+                    ) from e
+                try:
+                    stdout, stderr = _communicate_reasoning_process(
+                        proc, input_text=full, timeout=self.timeout
+                    )
+                finally:
+                    if proc.tree_exited:
+                        self.process_registry.release(proc)
+                if proc.returncode != 0:
+                    raise RuntimeError(
+                        f"codex exec failed (rc={proc.returncode}): "
+                        f"{stderr.strip()[-500:]}"
+                    )
+                _reconcile_codex_auth(
+                    auth_source,
+                    runtime_home=runtime_home,
+                    snapshot=auth_snapshot,
+                    source_mode=auth_mode,
+                )
+                try:
+                    with open(out_path) as f:
+                        answer = f.read()
+                except OSError:
+                    answer = ""
+                return answer or stdout
         finally:
             if out_path is not None:
                 self._cleanup(out_path)
-            if not self.cwd:
+            if runtime_home is not None:
                 try:
-                    shutil.rmtree(scratch)
+                    shutil.rmtree(runtime_home)
                 except FileNotFoundError:
                     pass
                 except OSError as exc:
                     _log.warning(
                         "could not remove Codex scratch directory %s: %s",
-                        scratch,
+                        runtime_home,
+                        exc,
+                    )
+            if probe_home is not None:
+                try:
+                    shutil.rmtree(probe_home)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    _log.warning(
+                        "could not remove Codex capability-probe directory %s: %s",
+                        probe_home,
                         exc,
                     )
 
