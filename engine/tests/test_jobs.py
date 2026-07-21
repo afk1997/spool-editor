@@ -1,8 +1,12 @@
+import copy
+import json
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import pytest
+from job_capacity import QueueFullError
 from jobs import JobManager, Job, JobStatus
 
 
@@ -69,18 +73,18 @@ def test_cancel_terminal_is_noop_and_preserves_published_file(status, tmp_path):
     jm.shutdown()
 
 
-def test_pool_full_returns_overflow():
-    jm = JobManager(max_workers=1, ttl_seconds=60, queue_size=0)
-    started = []
+@pytest.mark.parametrize(
+    ("workers", "expected"),
+    [(1, 4), (2, 8), (4, 16), (8, 32), (99, 32)],
+)
+def test_pending_capacity_formula(workers, expected):
+    try:
+        from job_capacity import QueueFullError, pending_capacity
+    except ImportError as exc:
+        pytest.fail(f"bounded-admission contract is missing: {exc}")
 
-    def slow(job: Job):
-        started.append(job.id)
-        time.sleep(0.5)
-
-    j1 = jm.submit(target=slow, title="a", url="https://x")
-    with pytest.raises(RuntimeError):
-        jm.submit(target=slow, title="b", url="https://y")
-    jm.shutdown(wait=True)
+    assert issubclass(QueueFullError, RuntimeError)
+    assert pending_capacity(workers) == expected
 
 
 def test_ttl_sweep_marks_old_done_jobs_and_preserves_file(tmp_path):
@@ -875,3 +879,297 @@ def test_dismiss_returns_false_for_unknown_id():
     jm = JobManager(max_workers=1, ttl_seconds=60)
     assert jm.dismiss("nope") is False
     jm.shutdown()
+
+
+# ---- bounded pending admission --------------------------------------
+
+
+def _wait_pending_count(manager, expected, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if manager.pending_count == expected:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def _fill_download_capacity(manager, gate):
+    return [
+        manager.submit(
+            target=lambda _job: gate.wait(5),
+            title=f"fill-{index}",
+            url=f"u-{index}",
+        )
+        for index in range(manager.pending_capacity)
+    ]
+
+
+def test_download_capacity_plus_one_creates_no_record_or_executor_work(monkeypatch):
+    manager = JobManager(max_workers=1)
+    gate = threading.Event()
+    try:
+        admitted = _fill_download_capacity(manager, gate)
+        assert manager.pending_count == manager.pending_capacity == 4
+        before_ids = [job.id for job in manager.snapshot_jobs()]
+        executor_calls = []
+        real_submit = manager._executor.submit
+        monkeypatch.setattr(
+            manager._executor,
+            "submit",
+            lambda *args, **kwargs: executor_calls.append((args, kwargs))
+            or real_submit(*args, **kwargs),
+        )
+
+        with pytest.raises(QueueFullError):
+            manager.submit(target=lambda _job: None, title="overflow", url="u-overflow")
+
+        assert [job.id for job in manager.snapshot_jobs()] == before_ids == admitted
+        assert manager.pending_count == manager.pending_capacity
+        assert executor_calls == []
+    finally:
+        gate.set()
+        manager.shutdown(wait=True)
+    assert manager.pending_count == 0
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_download_reservation_recovers_after_target_completion(raises):
+    manager = JobManager(max_workers=1)
+
+    def target(_job):
+        if raises:
+            raise RuntimeError("target failed")
+
+    jid = manager.submit(target=target, title="one", url="u-one")
+    assert _wait_worker_inactive(manager, jid)
+    assert manager.pending_count == 0
+    manager.shutdown(wait=True)
+
+
+def test_download_queued_cancel_keeps_reservation_until_stale_wrapper_drains(monkeypatch):
+    manager = JobManager(max_workers=1)
+    gate = threading.Event()
+    futures = []
+    cancel_calls = []
+    real_submit = manager._executor.submit
+
+    def tracked_submit(*args, **kwargs):
+        future = real_submit(*args, **kwargs)
+        real_cancel = future.cancel
+
+        def tracked_cancel():
+            cancel_calls.append(True)
+            return real_cancel()
+
+        monkeypatch.setattr(future, "cancel", tracked_cancel)
+        futures.append(future)
+        return future
+
+    monkeypatch.setattr(manager._executor, "submit", tracked_submit)
+    try:
+        admitted = _fill_download_capacity(manager, gate)
+        queued = admitted[-1]
+        assert manager.get(queued).status is JobStatus.QUEUED
+        assert manager.cancel(queued) is True
+        assert cancel_calls == []
+        assert manager.pending_count == manager.pending_capacity
+        with pytest.raises(QueueFullError):
+            manager.submit(target=lambda _job: None, title="still-full", url="u-full")
+    finally:
+        gate.set()
+        manager.shutdown(wait=True)
+
+    assert cancel_calls == []
+    assert manager.pending_count == 0
+
+
+def test_download_resume_capacity_failure_is_exact_noop(tmp_path, monkeypatch):
+    store = tmp_path / "jobs.json"
+    manager = JobManager(max_workers=1, store_path=store)
+    paused = Job(
+        id="paused", url="u-paused", title="paused", status=JobStatus.PAUSED,
+        error_category="old-error", error_message="old message",
+    )
+    paused._attempt = 7
+    paused._was_paused = True
+    with manager._lock:
+        manager._ensure_download_staging_locked(paused)
+        manager._jobs[paused.id] = paused
+    manager._persist()
+    gate = threading.Event()
+    try:
+        _fill_download_capacity(manager, gate)
+        manager._persist()
+        before_state = copy.deepcopy(vars(paused))
+        before_store = store.read_bytes()
+        executor_calls = []
+        real_submit = manager._executor.submit
+        monkeypatch.setattr(
+            manager._executor,
+            "submit",
+            lambda *args, **kwargs: executor_calls.append((args, kwargs))
+            or real_submit(*args, **kwargs),
+        )
+
+        with pytest.raises(QueueFullError):
+            manager.resume(paused.id, target=lambda _job: None)
+
+        assert vars(paused) == before_state
+        assert store.read_bytes() == before_store
+        assert executor_calls == []
+        assert manager.pending_count == manager.pending_capacity
+    finally:
+        gate.set()
+        manager.shutdown(wait=True)
+
+
+class _RejectingExecutor:
+    def __init__(self):
+        self.submit_calls = 0
+        self.shutdown_calls = []
+
+    def submit(self, *_args, **_kwargs):
+        self.submit_calls += 1
+        raise RuntimeError("executor rejected")
+
+    def shutdown(self, wait=False, **_kwargs):
+        self.shutdown_calls.append(wait)
+
+
+def test_download_submit_rejection_rolls_back_reservation_record_and_store(tmp_path):
+    store = tmp_path / "jobs.json"
+    manager = JobManager(max_workers=1, store_path=store)
+    manager._executor.shutdown(wait=True)
+    rejecting = _RejectingExecutor()
+    manager._executor = rejecting
+
+    with pytest.raises(RuntimeError, match="executor rejected"):
+        manager.submit(target=lambda _job: None, title="rejected", url="u-rejected")
+
+    assert manager.pending_count == 0
+    assert manager.snapshot_jobs() == []
+    assert json.loads(store.read_text()) == {"version": 1, "jobs": []}
+    assert rejecting.submit_calls == 1
+    manager.shutdown(wait=True)
+
+
+def test_download_resume_rejection_restores_paused_record_and_store(tmp_path):
+    store = tmp_path / "jobs.json"
+    manager = JobManager(max_workers=1, store_path=store)
+    paused = Job(
+        id="paused", url="u-paused", title="paused", status=JobStatus.PAUSED,
+        error_category="old-error", error_message="old message",
+    )
+    paused._attempt = 7
+    paused._was_paused = True
+    with manager._lock:
+        manager._ensure_download_staging_locked(paused)
+        manager._jobs[paused.id] = paused
+    manager._persist()
+    before_state = copy.deepcopy(vars(paused))
+    before_store = store.read_bytes()
+    manager._executor.shutdown(wait=True)
+    rejecting = _RejectingExecutor()
+    manager._executor = rejecting
+
+    with pytest.raises(RuntimeError, match="executor rejected"):
+        manager.resume(paused.id, target=lambda _job: None)
+
+    assert vars(paused) == before_state
+    assert store.read_bytes() == before_store
+    assert manager.pending_count == 0
+    assert rejecting.submit_calls == 1
+    manager.shutdown(wait=True)
+
+
+def test_download_shutdown_wait_false_rejects_new_work_and_drains():
+    manager = JobManager(max_workers=1)
+    gate = threading.Event()
+    jid = manager.submit(target=lambda _job: gate.wait(5), title="active", url="u-active")
+    assert _wait_status(manager, jid, JobStatus.DOWNLOADING)
+
+    manager.shutdown(wait=False)
+    assert manager.pending_count == 1
+    before_ids = [job.id for job in manager.snapshot_jobs()]
+    with pytest.raises(RuntimeError, match="shut down"):
+        manager.submit(target=lambda _job: None, title="late", url="u-late")
+    assert [job.id for job in manager.snapshot_jobs()] == before_ids
+
+    gate.set()
+    assert _wait_pending_count(manager, 0)
+    manager.shutdown(wait=True)
+
+
+def test_download_shutdown_wait_true_returns_with_zero_pending():
+    manager = JobManager(max_workers=1)
+    gate = threading.Event()
+    manager.submit(target=lambda _job: gate.wait(5), title="active", url="u-active")
+    returned = threading.Event()
+    thread = threading.Thread(
+        target=lambda: (manager.shutdown(wait=True), returned.set()),
+    )
+    thread.start()
+    try:
+        assert not returned.wait(0.05)
+    finally:
+        gate.set()
+        thread.join(5)
+
+    assert returned.is_set()
+    assert manager.pending_count == 0
+    with pytest.raises(RuntimeError, match="shut down"):
+        manager.submit(target=lambda _job: None, title="late", url="u-late")
+
+
+class _BlockingSubmitExecutor:
+    def __init__(self):
+        self.inner = ThreadPoolExecutor(max_workers=1)
+        self.submit_entered = threading.Event()
+        self.allow_submit = threading.Event()
+
+    def submit(self, fn, *args, **kwargs):
+        self.submit_entered.set()
+        assert self.allow_submit.wait(5)
+        return self.inner.submit(fn, *args, **kwargs)
+
+    def shutdown(self, wait=False, **kwargs):
+        return self.inner.shutdown(wait=wait, **kwargs)
+
+
+def test_download_submit_is_linearized_before_shutdown():
+    manager = JobManager(max_workers=1)
+    manager._executor.shutdown(wait=True)
+    blocking = _BlockingSubmitExecutor()
+    manager._executor = blocking
+    submitted = []
+    submit_error = []
+
+    def submit_work():
+        try:
+            submitted.append(
+                manager.submit(
+                    target=lambda _job: None, title="racing", url="u-racing",
+                ),
+            )
+        except Exception as exc:
+            submit_error.append(exc)
+
+    submit_thread = threading.Thread(target=submit_work)
+    submit_thread.start()
+    assert blocking.submit_entered.wait(2)
+    shutdown_returned = threading.Event()
+    shutdown_thread = threading.Thread(
+        target=lambda: (manager.shutdown(wait=True), shutdown_returned.set()),
+    )
+    shutdown_thread.start()
+    try:
+        assert not shutdown_returned.wait(0.05)
+    finally:
+        blocking.allow_submit.set()
+        submit_thread.join(5)
+        shutdown_thread.join(5)
+
+    assert submit_error == []
+    assert len(submitted) == 1
+    assert shutdown_returned.is_set()
+    assert manager.pending_count == 0

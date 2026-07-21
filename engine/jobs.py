@@ -12,7 +12,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from queue import Full
 from typing import Callable
 
 from attempt_staging import (
@@ -23,6 +22,7 @@ from attempt_staging import (
     cleanup_attempt,
     commit_outcome,
 )
+from job_capacity import QueueFullError, pending_capacity
 
 
 class JobStatus(str, enum.Enum):
@@ -40,6 +40,25 @@ _PUBLISHED_SIDECAR_SUFFIXES = (".json", ".srt", ".vtt", ".txt", ".ass")
 
 class AttemptUnwindingError(RuntimeError):
     """A paused attempt still owns its worker/staging lease."""
+
+
+class _AdmissionLease:
+    """Idempotent ownership of one admitted executor wrapper."""
+
+    __slots__ = ("_manager", "_released")
+
+    def __init__(self, manager: "JobManager"):
+        self._manager = manager
+        self._released = False
+
+    def release(self) -> bool:
+        manager = self._manager
+        with manager._lock:
+            if self._released:
+                return False
+            self._released = True
+            manager._pending_count -= 1
+            return True
 
 
 def _utc_now_rfc3339() -> str:
@@ -99,10 +118,10 @@ class JobManager:
         *,
         max_workers: int = 4,
         ttl_seconds: int = 3600,
-        queue_size: int | None = None,
         store_path: object = None,  # Path or None; None disables persistence
     ):
         self.max_workers = max_workers
+        self.pending_capacity = pending_capacity(max_workers)
         self.ttl_seconds = ttl_seconds
         self._jobs: dict[str, Job] = {}
         # Lock order is persistence mutex -> state lock. Lifecycle callers always
@@ -112,8 +131,8 @@ class JobManager:
         self._persist_lock = threading.Lock()
         self._persist_dirty = False
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
-        self._inflight = 0
-        self._queue_size = queue_size
+        self._pending_count = 0
+        self._accepting = True
         self._store_path = Path(store_path) if store_path else None
         self._attempt_base = (
             self._store_path.parent
@@ -122,6 +141,19 @@ class JobManager:
         )
         if self._store_path is not None:
             self._load_from_store()
+
+    @property
+    def pending_count(self) -> int:
+        with self._lock:
+            return self._pending_count
+
+    def _reserve_locked(self) -> _AdmissionLease:
+        if not self._accepting:
+            raise RuntimeError("job manager is shut down")
+        if self._pending_count >= self.pending_capacity:
+            raise QueueFullError("download queue full")
+        self._pending_count += 1
+        return _AdmissionLease(self)
 
     def _load_from_store(self) -> None:
         from jobs_store import load_jobs
@@ -295,6 +327,7 @@ class JobManager:
         target: Callable[[Job], object],
         *,
         queued_start: bool,
+        reservation: _AdmissionLease,
     ) -> None:
         try:
             if queued_start:
@@ -351,17 +384,26 @@ class JobManager:
             if accepted:
                 self._persist()
         finally:
-            # Cleanup and lease release share the state lock.  A resume cannot
-            # observe _worker_active=False and reuse the path until the old
-            # worker has either preserved (PAUSED) or cleaned its staging root.
-            with self._lock:
-                current = self._jobs.get(job.id)
-                if current is job:
-                    if current.status is not JobStatus.PAUSED and current._staging_root:
-                        cleanup_attempt(current._staging_root)
-                    current.process = None
-                    current._worker_active = False
-                self._inflight -= 1
+            try:
+                # Cleanup and worker release share the state lock.  A resume
+                # cannot reuse the path until the old attempt has preserved or
+                # cleaned its staging root.
+                with self._lock:
+                    current = self._jobs.get(job.id)
+                    if current is job:
+                        if current.status is not JobStatus.PAUSED and current._staging_root:
+                            try:
+                                cleanup_attempt(current._staging_root)
+                            except Exception:
+                                logging.getLogger(__name__).warning(
+                                    "download attempt cleanup failed for %s",
+                                    current.id,
+                                    exc_info=True,
+                                )
+                        current.process = None
+                        current._worker_active = False
+            finally:
+                reservation.release()
 
     def submit(
         self,
@@ -380,28 +422,49 @@ class JobManager:
             auto_transcribe=auto_transcribe, thumbnail=thumbnail,
             format_choice=format_choice, format_id=format_id,
         )
-        with self._lock:
-            if self._queue_size == 0 and self._inflight >= self.max_workers:
-                raise RuntimeError("pool full")
-            self._ensure_download_staging_locked(job)
-            job._attempt += 1
-            attempt = job._attempt
-            job._worker_active = True
-            self._jobs[job_id] = job
-            self._inflight += 1
-        self._persist()
+        reservation = None
         try:
-            self._executor.submit(
-                self._run_attempt, job, attempt, target, queued_start=True,
-            )
-        except Exception:
             with self._lock:
-                self._jobs.pop(job_id, None)
-                self._inflight -= 1
-                job._worker_active = False
-                cleanup_attempt(job._staging_root)
+                reservation = self._reserve_locked()
+                try:
+                    self._ensure_download_staging_locked(job)
+                    job._attempt += 1
+                    attempt = job._attempt
+                    job._worker_active = True
+                    self._jobs[job_id] = job
+                    self._executor.submit(
+                        self._run_attempt,
+                        job,
+                        attempt,
+                        target,
+                        queued_start=True,
+                        reservation=reservation,
+                    )
+                except Exception:
+                    self._jobs.pop(job_id, None)
+                    job._worker_active = False
+                    if job._staging_root:
+                        try:
+                            cleanup_attempt(job._staging_root)
+                        except Exception:
+                            logging.getLogger(__name__).warning(
+                                "failed to clean rejected download %s",
+                                job_id,
+                                exc_info=True,
+                            )
+                    reservation.release()
+                    raise
+        except (QueueFullError, RuntimeError):
+            # Admission rejection touches neither state nor persistence. An
+            # executor RuntimeError happens after provisional state and must
+            # persist the rollback; distinguish it by whether a lease existed.
+            if reservation is not None:
+                self._persist()
+            raise
+        except Exception:
             self._persist()
             raise
+        self._persist()
         return job_id
 
     def get(self, job_id: str) -> Job | None:
@@ -511,28 +574,43 @@ class JobManager:
                 return True  # idempotent — already running
             if job._worker_active:
                 raise AttemptUnwindingError("paused attempt is still unwinding")
-            self._ensure_download_staging_locked(job)
-            job._attempt += 1
-            attempt = job._attempt
-            job.status = JobStatus.DOWNLOADING
-            job._was_paused = False
-            job.error_category = None
-            job.error_message = None
-            job._worker_active = True
-            self._inflight += 1
-        self._persist()
-        try:
-            self._executor.submit(
-                self._run_attempt, job, attempt, target, queued_start=False,
-            )
-        except Exception:
-            with self._lock:
-                job.status = JobStatus.PAUSED
-                job._was_paused = True
-                job._worker_active = False
-                self._inflight -= 1
+            reservation = self._reserve_locked()
+            before = {
+                field_name: getattr(job, field_name)
+                for field_name in (
+                    "_attempt", "status", "_was_paused", "error_category",
+                    "error_message", "_worker_active", "_staging_root",
+                    "out_template",
+                )
+            }
+            try:
+                self._ensure_download_staging_locked(job)
+                job._attempt += 1
+                attempt = job._attempt
+                job.status = JobStatus.DOWNLOADING
+                job._was_paused = False
+                job.error_category = None
+                job.error_message = None
+                job._worker_active = True
+                self._executor.submit(
+                    self._run_attempt,
+                    job,
+                    attempt,
+                    target,
+                    queued_start=False,
+                    reservation=reservation,
+                )
+            except Exception as exc:
+                for field_name, value in before.items():
+                    setattr(job, field_name, value)
+                reservation.release()
+                submit_error = exc
+            else:
+                submit_error = None
+        if submit_error is not None:
             self._persist()
-            raise
+            raise submit_error
+        self._persist()
         return True
 
     def sweep(self) -> int:
@@ -566,4 +644,10 @@ class JobManager:
         t.start()
 
     def shutdown(self, wait: bool = False) -> None:
+        with self._lock:
+            self._accepting = False
         self._executor.shutdown(wait=wait)
+        if wait:
+            with self._lock:
+                if self._pending_count != 0:
+                    raise RuntimeError("job manager shutdown left pending work")

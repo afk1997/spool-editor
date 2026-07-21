@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 import pytest
 
+from job_capacity import QueueFullError
 from jobs import Job, JobManager, JobStatus
 from jobs_store import dump_jobs, load_jobs, persist_atomic
 
@@ -116,7 +117,19 @@ def test_concurrent_submits_never_drop_a_persisted_job(tmp_path):
     mgr = JobManager(max_workers=4, store_path=store)
     def hammer(n):
         for i in range(50):
-            mgr.submit(target=lambda j: None, title=f"t{n}-{i}", url=f"u{n}-{i}")
+            while True:
+                try:
+                    mgr.submit(
+                        target=lambda j: None,
+                        title=f"t{n}-{i}",
+                        url=f"u{n}-{i}",
+                    )
+                    break
+                except QueueFullError:
+                    # This test stresses persistence, not overflow. Wait for an
+                    # admitted wrapper to drain, then keep the original 200-job
+                    # concurrency contract.
+                    time.sleep(0.001)
     threads = [threading.Thread(target=hammer, args=(n,)) for n in range(4)]
     for t in threads: t.start()
     for t in threads: t.join()
@@ -129,6 +142,7 @@ def test_concurrent_submits_never_drop_a_persisted_job(tmp_path):
     mgr._persist()  # one final settled write
     data = json.loads(store.read_text())
     assert len(data["jobs"]) == 200
+    mgr.shutdown(wait=True)
 
 
 def test_cancel_done_job_is_false_noop_without_deadlock(tmp_path):
