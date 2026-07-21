@@ -17,7 +17,7 @@ paste a link, get the file. transcribe it. edit the transcript like a doc. all l
 - **edit the transcript like a doc** — contenteditable paragraphs, click-to-edit words, autosave, paragraph split/merge, find + replace, undo/redo, bookmarks, highlights, notes.
 - **speakers** — optional automatic speaker labels via local diarization (no HuggingFace login). rename inline; the rename propagates everywhere.
 - **video stays in view** — side-rail with the video, compact player (play/scrub/speed), speakers list, bookmarks. single sticky topbar.
-- **CLI + MCP** *(both alpha — see notes below)* — drive everything from your terminal, or expose Trove as MCP tools to Claude Desktop / Cursor / Replit Agent.
+- **CLI + MCP** *(both alpha — see notes below)* — use the CLI for manual operations. During Phase 0, MCP executes read-only inspection tools only; advertised mutations fail closed with `agent_mutation_disabled`.
 - **single Python process, single Docker container, no Node.** mobile-friendly. light only — riso paper is the brand.
 
 | ![download in progress](docs/screenshots/download.png) | ![download complete](docs/screenshots/done.png) |
@@ -114,7 +114,7 @@ models live at `<trove>/models/ggml-*.bin`. swap or remove via the same setup pa
 docker run -v ./models:/app/models -v ./downloads:/app/downloads -p 8899:8899 trove
 ```
 
-**network policy:** the only outbound calls trove makes are (1) yt-dlp fetching the original media, and (2) the model download from huggingface during the setup wizard. transcription itself is 100% local.
+**network policy:** the only enabled outbound paths in Phase 0 are (1) yt-dlp fetching user-requested media and (2) user-started model downloads from Hugging Face. Remote reasoning is unavailable and fails closed until a supported zero-tool transport exists. Offline mode blocks all non-loopback egress; transcription and rendering remain local.
 
 ## transcript editor
 
@@ -220,7 +220,7 @@ Run `python cli.py --help` for the full command list.
 
 > **Status: unstable alpha.** Same caveats as the CLI. Tested only against the contract; not yet exercised in real agent workflows.
 
-`trove-mcp` exposes Trove's HTTP surface as [Model Context Protocol](https://modelcontextprotocol.io) tools so a coding agent (Claude Desktop, Cursor, Replit Agent, etc.) can drive Trove end-to-end — queue downloads, poll status, transcribe, edit transcripts, search, replace, manage models. Transport: stdio.
+In Phase 0, `trove-mcp` executes only the explicit read-only inspection allowlist over HTTP. Mutation schemas remain advertised for contract compatibility, but every mutation returns `agent_mutation_disabled` before any `TroveClient` call. Manual mutations remain available through the authenticated UI, REST API, and CLI. Transport: stdio.
 
 Wire it into your MCP client config:
 
@@ -241,7 +241,7 @@ Wire it into your MCP client config:
 
 The Trove server itself must already be running on the URL the MCP client points at. Each tool returns a clear error if the server is unreachable so the agent knows to prompt the user to start it (`python cli.py serve`).
 
-Tool surface mirrors the CLI 1:1 (intentional — there's a parity check in the test suite that fails if either side adds a tool the other doesn't have).
+The MCP catalog is contract-tested: read-only tools execute; every advertised mutation is centrally rejected until the Phase 4 approval and undo contract ships.
 
 ## stack
 
