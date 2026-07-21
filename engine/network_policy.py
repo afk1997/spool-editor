@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from threading import RLock
+from threading import RLock, get_ident
 from typing import Iterator
 
 
@@ -21,6 +21,21 @@ class NetworkPolicyError(RuntimeError):
         else:
             message = code
         super().__init__(message)
+
+
+class _EgressLease:
+    """Owner-thread token proving launch admission belongs to a live lease."""
+
+    def __init__(self, policy: "NetworkPolicy", purpose: str):
+        self._policy = policy
+        self._purpose = purpose
+        self._owner_ident = get_ident()
+        self._active = True
+
+    @contextmanager
+    def launch_admission(self) -> Iterator[None]:
+        with self._policy._launch_admission(self):
+            yield
 
 
 class NetworkPolicy:
@@ -48,17 +63,43 @@ class NetworkPolicy:
             return self._active_leases
 
     @contextmanager
-    def egress(self, purpose: str) -> Iterator[None]:
+    def egress(self, purpose: str) -> Iterator[_EgressLease]:
         purpose = str(purpose).strip() or "network"
         with self._lock:
             if self._offline:
                 raise NetworkPolicyError("offline_network_disabled", purpose=purpose)
             self._active_leases += 1
+            lease = _EgressLease(self, purpose)
         try:
-            yield
+            yield lease
         finally:
             with self._lock:
-                self._active_leases -= 1
+                if lease._active:
+                    lease._active = False
+                    self._active_leases -= 1
+
+    @contextmanager
+    def _launch_admission(self, lease: _EgressLease) -> Iterator[None]:
+        """Linearize a final live privacy check with remote process launch.
+
+        Callers enter this only while holding an ``egress()`` lease. The same mutex
+        guards ``transition()``, so the lock order is consistently policy then any
+        caller-owned settings lock. Keep this section short: check live settings and
+        create the process, then release it before waiting on remote work.
+        """
+        self._lock.acquire()
+        try:
+            if lease._policy is not self or not lease._active:
+                raise RuntimeError("launch admission requires an active egress lease")
+            if lease._owner_ident != get_ident():
+                raise RuntimeError("launch admission requires the lease's owning thread")
+            if self._offline:
+                raise NetworkPolicyError(
+                    "offline_network_disabled", purpose=lease._purpose
+                )
+            yield
+        finally:
+            self._lock.release()
 
     @contextmanager
     def transition(self, offline: bool | None) -> Iterator[None]:

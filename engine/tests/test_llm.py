@@ -6,9 +6,13 @@ mocked and we assert the ``codex exec`` argv/stdin contract + the offline guard.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+import logging
 import os
 import signal
+import shutil as stdlib_shutil
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -16,6 +20,7 @@ import pytest
 
 from clip import llm
 from network_policy import NetworkPolicy
+from settings import SettingsStore
 
 
 class _FakeProc:
@@ -407,6 +412,266 @@ def test_codex_rechecks_consent_after_local_setup_immediately_before_spawn(
     assert policy.active_leases == 0
 
 
+def _consented_settings(tmp_path):
+    store = SettingsStore(tmp_path / "settings.json")
+    store.update({
+        "reasoning_provider": "codex",
+        "reasoning_egress_consent": True,
+    })
+    return store
+
+
+def _commit_settings(policy, store, changes):
+    requested_offline = changes["offline"] if "offline" in changes else None
+    with policy.transition(requested_offline):
+        return store.update(changes)
+
+
+def test_revocation_that_commits_before_launch_guard_runs_zero_process(
+    tmp_path, monkeypatch,
+):
+    policy = NetworkPolicy()
+    store = _consented_settings(tmp_path)
+    discovery_entered = threading.Event()
+    release_discovery = threading.Event()
+    spawns = []
+    outcome = []
+
+    def blocking_discovery(_bin):
+        discovery_entered.set()
+        assert release_discovery.wait(2), "CLI discovery was not released"
+        return "/usr/local/bin/codex"
+
+    monkeypatch.setattr(llm.shutil, "which", blocking_discovery)
+    monkeypatch.setattr(
+        llm.subprocess,
+        "Popen",
+        lambda *args, **kwargs: spawns.append((args, kwargs)) or _FakeProc(),
+    )
+    provider = llm.CodexProvider(
+        network_policy=policy,
+        privacy_state=store.get,
+        cwd=str(tmp_path),
+    )
+
+    def complete():
+        try:
+            outcome.append(provider.complete("transcript"))
+        except BaseException as exc:
+            outcome.append(exc)
+
+    worker = threading.Thread(target=complete)
+    worker.start()
+    assert discovery_entered.wait(2), "provider never reached local setup"
+
+    _commit_settings(policy, store, {"reasoning_egress_consent": False})
+    release_discovery.set()
+    worker.join(2)
+
+    assert not worker.is_alive()
+    assert len(outcome) == 1 and isinstance(outcome[0], llm.EgressConsentError)
+    assert outcome[0].error_category == "egress_consent_required"
+    assert spawns == []
+    assert policy.active_leases == 0
+
+
+def test_launch_guard_wins_before_revocation_without_deadlock(tmp_path, monkeypatch):
+    policy = NetworkPolicy()
+    store = _consented_settings(tmp_path)
+    spawn_entered = threading.Event()
+    release_spawn = threading.Event()
+    communicate_entered = threading.Event()
+    release_complete = threading.Event()
+    patch_attempted = threading.Event()
+    patch_acquired = threading.Event()
+    patch_done = threading.Event()
+    outcome = []
+
+    class BlockingProcess(_FakeProc):
+        def __init__(self, argv, **kwargs):
+            super().__init__()
+            self.argv = argv
+            spawn_entered.set()
+            assert release_spawn.wait(2), "Popen construction was not released"
+
+        def communicate(self, input=None, timeout=None):
+            communicate_entered.set()
+            assert release_complete.wait(2), "Codex completion was not released"
+            _write_o(self.argv, "RESULT")
+            return "", ""
+
+    monkeypatch.setattr(llm.shutil, "which", lambda _bin: "/usr/local/bin/codex")
+    monkeypatch.setattr(llm.subprocess, "Popen", BlockingProcess)
+    provider = llm.CodexProvider(
+        network_policy=policy,
+        privacy_state=store.get,
+        cwd=str(tmp_path),
+    )
+
+    real_transition = policy.transition
+
+    @contextmanager
+    def observed_transition(offline):
+        patch_attempted.set()
+        with real_transition(offline):
+            patch_acquired.set()
+            yield
+
+    monkeypatch.setattr(policy, "transition", observed_transition)
+
+    provider_thread = threading.Thread(
+        target=lambda: outcome.append(provider.complete("transcript"))
+    )
+    provider_thread.start()
+    patch_thread = None
+    try:
+        assert spawn_entered.wait(2), "provider never entered Popen"
+
+        patch_thread = threading.Thread(
+            target=lambda: (
+                _commit_settings(policy, store, {"reasoning_egress_consent": False}),
+                patch_done.set(),
+            )
+        )
+        patch_thread.start()
+        assert patch_attempted.wait(2), "settings patch never attempted the policy lock"
+        assert patch_acquired.wait(0.1) is False
+
+        release_spawn.set()
+        assert communicate_entered.wait(2), "provider never left launch admission"
+        assert patch_acquired.wait(2), "settings patch never acquired after Popen linearized"
+        assert patch_done.wait(2), "settings patch deadlocked after Popen linearized"
+        assert store.get()["reasoning_egress_consent"] is False
+    finally:
+        release_spawn.set()
+        release_complete.set()
+        provider_thread.join(2)
+        if patch_thread is not None:
+            patch_thread.join(2)
+
+    assert not provider_thread.is_alive() and not patch_thread.is_alive()
+    assert outcome == ["RESULT"]
+    assert policy.active_leases == 0
+
+
+def test_generic_egress_completion_is_atomic_with_privacy_revocation(monkeypatch):
+    policy = NetworkPolicy()
+    state = _privacy()
+    provider_entered = threading.Event()
+    release_provider = threading.Event()
+    patch_attempted = threading.Event()
+    patch_acquired = threading.Event()
+    patch_done = threading.Event()
+    outcome = []
+
+    def remote(_prompt, *, system=None):
+        provider_entered.set()
+        assert release_provider.wait(2), "generic provider was not released"
+        return "ok"
+
+    real_transition = policy.transition
+
+    @contextmanager
+    def observed_transition(offline):
+        patch_attempted.set()
+        with real_transition(offline):
+            patch_acquired.set()
+            yield
+
+    monkeypatch.setattr(policy, "transition", observed_transition)
+
+    completion_thread = threading.Thread(
+        target=lambda: outcome.append(llm.complete(
+            "transcript",
+            provider=llm.CallableProvider(remote, name="remote", egress=True),
+            network_policy=policy,
+            privacy_state=lambda: dict(state),
+        ))
+    )
+    completion_thread.start()
+    patch_thread = None
+    try:
+        assert provider_entered.wait(2), "generic provider never entered complete"
+
+        def revoke():
+            with policy.transition(None):
+                state["reasoning_egress_consent"] = False
+            patch_done.set()
+
+        patch_thread = threading.Thread(target=revoke)
+        patch_thread.start()
+        assert patch_attempted.wait(2), "revocation never attempted the policy lock"
+        assert patch_acquired.wait(0.1) is False
+    finally:
+        release_provider.set()
+        completion_thread.join(2)
+        if patch_thread is not None:
+            patch_thread.join(2)
+
+    assert not completion_thread.is_alive() and not patch_thread.is_alive()
+    assert outcome == ["ok"]
+    assert patch_acquired.is_set() and patch_done.is_set()
+    assert state["reasoning_egress_consent"] is False
+    assert policy.active_leases == 0
+
+
+def test_codex_logs_output_temp_cleanup_failure(tmp_path, monkeypatch, caplog):
+    policy = NetworkPolicy()
+    real_unlink = llm.os.unlink
+    output_paths = []
+
+    def fake_popen(argv, **kwargs):
+        _write_o(argv, "RESULT")
+        return _FakeProc()
+
+    def failed_unlink(path):
+        output_paths.append(path)
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(llm.shutil, "which", lambda _bin: "/usr/local/bin/codex")
+    monkeypatch.setattr(llm.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(llm.os, "unlink", failed_unlink)
+
+    try:
+        with caplog.at_level(logging.WARNING, logger=llm.__name__):
+            assert _codex(policy=policy, cwd=str(tmp_path)).complete("transcript") == "RESULT"
+        assert "could not remove Codex output temp" in caplog.text
+        assert "permission denied" in caplog.text
+    finally:
+        for path in output_paths:
+            try:
+                real_unlink(path)
+            except FileNotFoundError:
+                pass
+
+
+def test_codex_logs_scratch_cleanup_failure(monkeypatch, caplog):
+    policy = NetworkPolicy()
+    real_rmtree = stdlib_shutil.rmtree
+    scratch_paths = []
+
+    def fake_popen(argv, **kwargs):
+        scratch_paths.append(kwargs["cwd"])
+        _write_o(argv, "RESULT")
+        return _FakeProc()
+
+    def failed_rmtree(path, **kwargs):
+        raise OSError("scratch busy")
+
+    monkeypatch.setattr(llm.shutil, "which", lambda _bin: "/usr/local/bin/codex")
+    monkeypatch.setattr(llm.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(llm.shutil, "rmtree", failed_rmtree)
+
+    try:
+        with caplog.at_level(logging.WARNING, logger=llm.__name__):
+            assert _codex(policy=policy).complete("transcript") == "RESULT"
+        assert "could not remove Codex scratch directory" in caplog.text
+        assert "scratch busy" in caplog.text
+    finally:
+        for path in scratch_paths:
+            real_rmtree(path, ignore_errors=True)
+
+
 @pytest.mark.parametrize("failure", ["spawn", "timeout", "nonzero"])
 def test_codex_removes_output_temp_on_every_failure(tmp_path, monkeypatch, failure):
     policy = NetworkPolicy()
@@ -478,7 +743,7 @@ def test_codex_timeout_kills_real_descendant_before_releasing_lease(
     child_pid = None
     try:
         with pytest.raises(llm.subprocess.TimeoutExpired):
-            _codex(policy=policy, bin=str(bridge), timeout=1.0).complete("transcript")
+            _codex(policy=policy, bin=str(bridge), timeout=3.0).complete("transcript")
         for _ in range(100):
             if child_pid_file.exists():
                 child_pid = int(child_pid_file.read_text())

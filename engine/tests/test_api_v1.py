@@ -2572,7 +2572,9 @@ def test_agent_route_surfaces_last_moment_privacy_denials_as_exact_409(
     assert response.get_json() == {"error": expected_code}
 
 
-def test_active_reasoning_lease_blocks_offline_persistence_until_completion(client):
+def test_active_reasoning_lease_blocks_offline_persistence_until_completion(
+    client, monkeypatch,
+):
     from clip import llm
 
     app, c = client
@@ -2583,17 +2585,30 @@ def test_active_reasoning_lease_blocks_offline_persistence_until_completion(clie
     release = threading.Event()
     outcomes = []
 
-    def remote(_prompt, *, system=None):
-        assert policy.active_leases == 1
-        entered.set()
-        assert release.wait(2), "reasoning completion was not released"
-        return "ok"
+    class BlockingCodexProcess:
+        returncode = 0
+
+        def __init__(self, argv, **kwargs):
+            self.argv = argv
+
+        def communicate(self, input=None, timeout=None):
+            assert policy.active_leases == 1
+            entered.set()
+            assert release.wait(2), "reasoning completion was not released"
+            Path(self.argv[self.argv.index("-o") + 1]).write_text("ok")
+            return "", ""
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(llm.shutil, "which", lambda _bin: "/usr/local/bin/codex")
+    monkeypatch.setattr(llm.subprocess, "Popen", BlockingCodexProcess)
 
     def complete():
         try:
             outcomes.append(llm.complete(
                 "transcript",
-                provider=llm.CallableProvider(remote, name="remote", egress=True),
+                provider="codex",
                 network_policy=policy,
                 privacy_state=settings.get,
             ))

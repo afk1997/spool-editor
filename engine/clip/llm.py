@@ -22,6 +22,7 @@ a local provider would still run offline. Egress providers declare ``egress = Tr
 """
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import shutil
@@ -31,6 +32,8 @@ import time
 from typing import Callable, Mapping, Protocol, runtime_checkable
 
 from network_policy import NetworkPolicy, NetworkPolicyError
+
+_log = logging.getLogger(__name__)
 
 # Configurable knobs (env). New Spool functionality → ``SPOOL_*`` namespace.
 DEFAULT_PROVIDER = "none"
@@ -281,17 +284,19 @@ class CodexProvider:
     def complete(self, prompt: str, *, system: str | None = None) -> str:
         _require_remote_reasoning(self.privacy_state(), provider_name=self.name)
         try:
-            with self.network_policy.egress("codex_reasoning"):
+            with self.network_policy.egress("codex_reasoning") as lease:
                 # Re-read after lease admission: a queued caller must not execute using
                 # the provider/consent snapshot that was true when it was submitted.
                 _require_remote_reasoning(self.privacy_state(), provider_name=self.name)
-                return self._complete_leased(prompt, system=system)
+                return self._complete_leased(prompt, system=system, lease=lease)
         except NetworkPolicyError as exc:
             raise OfflineError(
                 "LLM provider 'codex' needs network egress, but offline mode is on."
             ) from exc
 
-    def _complete_leased(self, prompt: str, *, system: str | None = None) -> str:
+    def _complete_leased(
+        self, prompt: str, *, system: str | None = None, lease
+    ) -> str:
         if shutil.which(self.bin) is None:
             raise ProviderUnavailableError(
                 f"the Codex CLI ({self.bin!r}) was not found on PATH. Install it "
@@ -318,18 +323,22 @@ class CodexProvider:
                 argv += ["-c", f"model_reasoning_effort={self.reasoning}"]
             argv += ["-"]
 
-            # Local CLI discovery and scratch setup can take time. This final live read
-            # is intentionally adjacent to spawn so revocation during setup wins.
-            _require_remote_reasoning(self.privacy_state(), provider_name=self.name)
             try:
-                proc = _spawn_reasoning_process(
-                    argv,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    cwd=scratch,
-                )
+                # The final live read and process creation linearize against every
+                # settings patch on the shared policy lock. Communication remains
+                # outside this short guard while the egress lease stays active.
+                with lease.launch_admission():
+                    _require_remote_reasoning(
+                        self.privacy_state(), provider_name=self.name
+                    )
+                    proc = _spawn_reasoning_process(
+                        argv,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        cwd=scratch,
+                    )
             except FileNotFoundError as e:  # race: vanished between which() and spawn
                 raise ProviderUnavailableError(
                     f"the Codex CLI ({self.bin!r}) could not be run: {e}"
@@ -350,18 +359,26 @@ class CodexProvider:
         finally:
             if out_path is not None:
                 self._cleanup(out_path)
-            try:
-                if not self.cwd:
-                    shutil.rmtree(scratch, ignore_errors=True)
-            except OSError:
-                pass
+            if not self.cwd:
+                try:
+                    shutil.rmtree(scratch)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    _log.warning(
+                        "could not remove Codex scratch directory %s: %s",
+                        scratch,
+                        exc,
+                    )
 
     @staticmethod
     def _cleanup(path: str) -> None:
         try:
             os.unlink(path)
-        except OSError:
+        except FileNotFoundError:
             pass
+        except OSError as exc:
+            _log.warning("could not remove Codex output temp %s: %s", path, exc)
 
 
 class NoneProvider:
@@ -456,9 +473,13 @@ def complete(
     state = _privacy_getter(privacy_state, env)
     _require_remote_reasoning(state(), provider_name=p.name)
     try:
-        with network_policy.egress("codex_reasoning"):
-            _require_remote_reasoning(state(), provider_name=p.name)
-            return p.complete(prompt, system=system)
+        with network_policy.egress("codex_reasoning") as lease:
+            # Arbitrary egress providers expose no process-launch seam. Hold the
+            # admission lock across their complete call so consent/provider changes
+            # cannot land between the final check and opaque network execution.
+            with lease.launch_admission():
+                _require_remote_reasoning(state(), provider_name=p.name)
+                return p.complete(prompt, system=system)
     except NetworkPolicyError as exc:
         raise OfflineError(
             f"LLM provider {p.name!r} needs network egress, but offline mode is on."

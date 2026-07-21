@@ -151,3 +151,66 @@ def test_disabling_offline_reopens_egress():
     with policy.egress("watch_listing"):
         assert policy.offline is False
         assert policy.active_leases == 1
+
+
+def test_launch_admission_holds_the_transition_lock_inside_an_active_lease():
+    policy = NetworkPolicy()
+    transition_started = threading.Event()
+    transition_done = threading.Event()
+
+    def transition_settings():
+        transition_started.set()
+        with policy.transition(None):
+            pass
+        transition_done.set()
+
+    with policy.egress("codex_reasoning") as lease:
+        with lease.launch_admission():
+            worker = threading.Thread(target=transition_settings)
+            worker.start()
+            assert transition_started.wait(1)
+            assert transition_done.wait(0.05) is False
+        assert transition_done.wait(1)
+
+    worker.join(timeout=1)
+    assert not worker.is_alive()
+    assert policy.active_leases == 0
+
+
+def test_launch_admission_rejects_a_lease_borrowed_by_another_thread():
+    policy = NetworkPolicy()
+    lease_ready = threading.Event()
+    release_lease = threading.Event()
+    leases = []
+
+    def own_lease():
+        with policy.egress("codex_reasoning") as lease:
+            leases.append(lease)
+            lease_ready.set()
+            assert release_lease.wait(1)
+
+    owner = threading.Thread(target=own_lease)
+    owner.start()
+    assert lease_ready.wait(1)
+
+    try:
+        with pytest.raises(RuntimeError, match="owning thread"):
+            with leases[0].launch_admission():
+                raise AssertionError("a foreign thread cannot borrow launch admission")
+    finally:
+        release_lease.set()
+        owner.join(timeout=1)
+
+    assert not owner.is_alive()
+    assert policy.active_leases == 0
+
+
+def test_launch_admission_rejects_an_inactive_lease_token():
+    policy = NetworkPolicy()
+
+    with policy.egress("codex_reasoning") as lease:
+        pass
+
+    with pytest.raises(RuntimeError, match="active egress lease"):
+        with lease.launch_admission():
+            raise AssertionError("a released lease cannot launch")
