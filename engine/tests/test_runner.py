@@ -399,6 +399,290 @@ def test_blocking_communicate_error_reaps_fake_process_before_lease_release(
     assert policy.active_leases == 0
 
 
+def test_blocking_timeout_waits_for_group_quiescence_while_lease_is_active(
+    monkeypatch, tmp_path,
+):
+    policy = NetworkPolicy()
+    events = []
+    probes = 0
+
+    class FakeOwnedParent:
+        pid = 424242
+        returncode = None
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd="yt-dlp", timeout=timeout)
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            raise AssertionError("group signal should own cleanup")
+
+        def wait(self, timeout=None):
+            assert policy.active_leases == 1
+            events.append("parent_reaped")
+            self.returncode = -9
+            return self.returncode
+
+    def fake_killpg(pgid, sig):
+        nonlocal probes
+        assert pgid == FakeOwnedParent.pid
+        assert policy.active_leases == 1
+        if sig != 0:
+            events.append("group_signalled")
+            return
+        probes += 1
+        events.append(f"group_probe_{probes}")
+        if probes < 3:
+            return
+        raise ProcessLookupError
+
+    monkeypatch.setattr(runner.subprocess, "Popen", FakeOwnedParent)
+    monkeypatch.setattr(runner.os, "killpg", fake_killpg)
+    monkeypatch.setattr(runner.time, "sleep", lambda _seconds: None)
+
+    result = run_download(
+        url="https://example.com/v",
+        out_template=str(tmp_path / "x.%(ext)s"),
+        format_choice="video",
+        format_id=None,
+        network_policy=policy,
+        timeout=1,
+    )
+
+    assert result.error_category == "timeout"
+    assert events == [
+        "group_signalled", "parent_reaped",
+        "group_probe_1", "group_probe_2", "group_probe_3",
+    ]
+    assert policy.active_leases == 0
+
+
+@pytest.mark.parametrize(
+    ("method", "signal_name"),
+    [("kill", "SIGKILL"), ("terminate", "SIGTERM")],
+)
+def test_missing_process_group_falls_back_to_underlying_handle(
+    monkeypatch, method, signal_name,
+):
+    events = []
+
+    class FakeShim:
+        pid = 515151
+
+        def kill(self):
+            events.append("fallback_kill")
+
+        def terminate(self):
+            events.append("fallback_terminate")
+
+    process = runner._OwnedDownloadProcess(FakeShim(), owns_group=True)
+
+    def missing_group(pgid, sig):
+        assert pgid == FakeShim.pid
+        assert sig == getattr(signal, signal_name)
+        raise ProcessLookupError
+
+    monkeypatch.setattr(runner.os, "killpg", missing_group)
+
+    getattr(process, method)()
+
+    assert events == [f"fallback_{method}"]
+
+
+def test_group_quiescence_timeout_surfaces_instead_of_hanging(monkeypatch):
+    clock = [0.0]
+
+    class FakeShim:
+        pid = 616161
+
+    process = runner._OwnedDownloadProcess(FakeShim(), owns_group=True)
+    monkeypatch.setattr(runner.os, "killpg", lambda _pgid, _sig: None)
+    monkeypatch.setattr(runner.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(runner.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+    with pytest.raises(RuntimeError, match="process group did not exit"):
+        process.wait_for_group_exit(timeout=0.05)
+
+
+def test_exceptional_cleanup_waits_for_group_when_parent_already_exited(
+    monkeypatch, tmp_path,
+):
+    policy = NetworkPolicy()
+    probes = 0
+
+    class ExitedParentWithLiveGroup:
+        pid = 717171
+        returncode = 0
+
+        def __init__(self, *_args, **_kwargs):
+            self.stdout = iter([])
+            self.stderr = iter([])
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            assert policy.active_leases == 1
+            return self.returncode
+
+        def kill(self):
+            raise AssertionError("an exited parent must not be killed")
+
+    def group_probe(pgid, sig):
+        nonlocal probes
+        assert pgid == ExitedParentWithLiveGroup.pid
+        assert sig == 0
+        assert policy.active_leases == 1
+        probes += 1
+        if probes > 1:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(runner.subprocess, "Popen", ExitedParentWithLiveGroup)
+    monkeypatch.setattr(runner.os, "killpg", group_probe)
+    monkeypatch.setattr(runner.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(RuntimeError, match="register failed"):
+        run_download(
+            url="https://example.com/v",
+            out_template=str(tmp_path / "x.%(ext)s"),
+            format_choice="video",
+            format_id=None,
+            network_policy=policy,
+            register_process=lambda _proc: (_ for _ in ()).throw(RuntimeError("register failed")),
+        )
+
+    assert probes == 2
+    assert policy.active_leases == 0
+
+
+def test_confirmed_group_exit_disarms_late_kill_and_terminate(monkeypatch):
+    raw_events = []
+    group_events = []
+
+    class ExitedShim:
+        pid = 818181
+
+        def kill(self):
+            raw_events.append("kill")
+
+        def terminate(self):
+            raw_events.append("terminate")
+
+    process = runner._OwnedDownloadProcess(ExitedShim(), owns_group=True)
+
+    def missing_group(pgid, sig):
+        group_events.append((pgid, sig))
+        raise ProcessLookupError
+
+    monkeypatch.setattr(runner.os, "killpg", missing_group)
+
+    process.wait_for_group_exit()
+    process.kill()
+    process.terminate()
+
+    assert group_events == [(ExitedShim.pid, 0)]
+    assert raw_events == []
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_blocking_completion_waits_for_group_quiescence_before_lease_release(
+    monkeypatch, tmp_path, returncode,
+):
+    policy = NetworkPolicy()
+    probes = 0
+
+    class CompletedParent:
+        pid = 919191
+
+        def __init__(self, *_args, **_kwargs):
+            self.returncode = returncode
+
+        def communicate(self, timeout=None):
+            return "", "boom" if returncode else ""
+
+        def wait(self, timeout=None):
+            assert policy.active_leases == 1
+            return self.returncode
+
+    def group_probe(_pgid, sig):
+        nonlocal probes
+        assert sig == 0
+        assert policy.active_leases == 1
+        probes += 1
+        if probes > 1:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(runner.subprocess, "Popen", CompletedParent)
+    monkeypatch.setattr(runner.os, "killpg", group_probe)
+    monkeypatch.setattr(runner.time, "sleep", lambda _seconds: None)
+    if returncode == 0:
+        (tmp_path / "x.mp4").write_bytes(b"media")
+
+    result = run_download(
+        url="https://example.com/v",
+        out_template=str(tmp_path / "x.%(ext)s"),
+        format_choice="video",
+        format_id=None,
+        network_policy=policy,
+    )
+
+    assert probes == 2
+    assert policy.active_leases == 0
+    assert (result.error_category is None) is (returncode == 0)
+
+
+def test_streaming_completion_waits_for_group_quiescence_before_lease_release(
+    monkeypatch, tmp_path,
+):
+    policy = NetworkPolicy()
+    probes = 0
+
+    class CompletedStreamingParent:
+        pid = 929292
+        returncode = 1
+
+        def __init__(self, *_args, **_kwargs):
+            self.stdout = iter([])
+            self.stderr = iter(["boom\n"])
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            assert policy.active_leases == 1
+            return self.returncode
+
+    def group_probe(_pgid, sig):
+        nonlocal probes
+        assert sig == 0
+        assert policy.active_leases == 1
+        probes += 1
+        if probes > 1:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(runner.subprocess, "Popen", CompletedStreamingParent)
+    monkeypatch.setattr(runner.os, "killpg", group_probe)
+    monkeypatch.setattr(runner.time, "sleep", lambda _seconds: None)
+
+    result = run_download(
+        url="https://example.com/v",
+        out_template=str(tmp_path / "x.%(ext)s"),
+        format_choice="video",
+        format_id=None,
+        network_policy=policy,
+        progress_cb=lambda *_args: None,
+    )
+
+    assert result.error_category == "unknown"
+    assert probes == 2
+    assert policy.active_leases == 0
+
+
 def test_streaming_download_keeps_lease_until_spawned_process_is_reaped_on_callback_error(
     monkeypatch, tmp_path,
 ):
@@ -560,6 +844,13 @@ def _cleanup_test_pids(pids):
     _wait_for_pids_gone(pids)
 
 
+def _read_test_pids(pid_file):
+    try:
+        return [int(value) for value in pid_file.read_text().split()]
+    except (FileNotFoundError, ValueError):
+        return []
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group regression")
 def test_blocking_timeout_terminates_real_download_process_tree_before_lease_release(
     monkeypatch, tmp_path,
@@ -597,12 +888,14 @@ def test_blocking_timeout_terminates_real_download_process_tree_before_lease_rel
             network_policy=policy,
             timeout=10,
         )
-        pids = [int(value) for value in pid_file.read_text().split()]
+        pids = _read_test_pids(pid_file)
 
         assert result.error_category == "timeout"
         assert policy.active_leases == 0
         assert _wait_for_pids_gone(pids)
     finally:
+        if not pids:
+            pids = _read_test_pids(pid_file)
         _cleanup_test_pids(pids)
 
 
@@ -641,7 +934,7 @@ def test_registered_streaming_handle_kills_real_process_tree_before_lease_releas
             was_paused_check=lambda: True,
         )
         killer.join(timeout=2)
-        pids = [int(value) for value in pid_file.read_text().split()]
+        pids = _read_test_pids(pid_file)
 
         assert result.error_category == "cancelled"
         assert policy.active_leases == 0
@@ -649,6 +942,8 @@ def test_registered_streaming_handle_kills_real_process_tree_before_lease_releas
     finally:
         if killer is not None:
             killer.join(timeout=2)
+        if not pids:
+            pids = _read_test_pids(pid_file)
         _cleanup_test_pids(pids)
 
 

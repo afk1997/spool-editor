@@ -205,6 +205,7 @@ class _OwnedDownloadProcess:
     def __init__(self, process, *, owns_group: bool):
         self._process = process
         self._pgid = process.pid if owns_group and hasattr(process, "pid") else None
+        self._tree_exited = False
 
     def __getattr__(self, name):
         return getattr(self._process, name)
@@ -215,18 +216,45 @@ class _OwnedDownloadProcess:
                 os.killpg(self._pgid, sig)
                 return
             except ProcessLookupError:
-                return
+                pass
             except (AttributeError, OSError):
                 pass
         fallback()
 
+    def wait_for_group_exit(self, *, timeout: float = 5.0) -> None:
+        """Wait until no live or zombie member keeps the owned group present."""
+        if self._pgid is None:
+            self._tree_exited = True
+            return
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                os.killpg(self._pgid, 0)
+            except ProcessLookupError:
+                self._pgid = None
+                self._tree_exited = True
+                return
+            except AttributeError:
+                self._pgid = None
+                self._tree_exited = True
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"download process group did not exit within {timeout:g}s"
+                )
+            time.sleep(0.01)
+
     def kill(self) -> None:
+        if self._tree_exited:
+            return
         if self._pgid is None:
             self._process.kill()
             return
         self._signal_tree(getattr(signal, "SIGKILL", signal.SIGTERM), self._process.kill)
 
     def terminate(self) -> None:
+        if self._tree_exited:
+            return
         if self._pgid is None:
             self._process.terminate()
             return
@@ -255,11 +283,14 @@ def _cleanup_glob(out_template: str) -> None:
 
 
 def _wait_until_reaped(proc) -> None:
-    """Confirm process exit; a slow post-kill reap may outlast the grace period."""
+    """Confirm direct-parent reap and owned-group quiescence."""
     try:
         proc.wait(timeout=2)
     except subprocess.TimeoutExpired:
         proc.wait()
+    wait_for_group_exit = getattr(proc, "wait_for_group_exit", None)
+    if wait_for_group_exit is not None:
+        wait_for_group_exit()
 
 
 def _reap_if_running(proc) -> None:
@@ -269,6 +300,7 @@ def _reap_if_running(proc) -> None:
     except Exception:
         running = True
     if not running:
+        _wait_until_reaped(proc)
         return
     try:
         proc.kill()
@@ -434,6 +466,7 @@ def _run_download_leased(
         except BaseException:
             _reap_if_running(proc)
             raise
+        _wait_until_reaped(proc)
         if proc.returncode != 0:
             _cleanup_glob(out_template)
             stripped = (stderr or "").strip()
@@ -537,6 +570,8 @@ def _run_download_leased(
     except BaseException:
         _reap_if_running(proc)
         raise
+
+    _wait_until_reaped(proc)
 
     out_thread.join(timeout=3)
     err_thread.join(timeout=3)
