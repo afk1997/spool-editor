@@ -84,8 +84,8 @@ export interface AgentMessage {
   confirmFor?: { text: string; tool: string };
 }
 
-const INITIAL_AGENT: AgentMessage[] = [
-  { role: "agent", text: "Hi — I'm your read-only clip assistant. I can inspect your sources, transcripts, clips, and render queue, then explain what is happening. Changes stay in your hands." },
+export const INITIAL_AGENT: AgentMessage[] = [
+  { role: "agent", text: "Hi — I'm your text-only clip assistant. I can answer from your message and any attached transcript. I can't inspect your library, queues, watches, models, storage, files, or other local app state." },
 ];
 
 function originOf(url: string | null | undefined): string | undefined {

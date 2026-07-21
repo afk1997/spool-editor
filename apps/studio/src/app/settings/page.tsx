@@ -198,7 +198,7 @@ export default function SettingsScreen() {
               </SettingCard>
               <SettingCard title="Moment-finding LLM">
                 <Row l="Provider" r={mono(providerName)} sub="Choose the remote reasoning provider in Privacy. None disables moment-finding reasoning." />
-                <Row l="Transcript egress" r={mono(egressState, egressState === "consented" ? "var(--warn)" : "var(--text-dim)")} sub="Codex remote reasoning sends transcript text only after explicit consent; media files are not sent to Codex." />
+                <Row l="Codex text egress" r={mono(egressState, egressState === "consented" ? "var(--warn)" : "var(--text-dim)")} sub="Codex remote reasoning sends your message and any attached transcript text only after explicit consent; media files and local app state are not sent." />
               </SettingCard>
             </div>
           )}
@@ -224,7 +224,7 @@ export default function SettingsScreen() {
                 <Row l="Transport"
                   r={<Seg value={s?.mcp_transport ?? "stdio"} onChange={(v) => save({ mcp_transport: v })} disabled={settingDisabled("mcp_transport")} options={[{ value: "stdio", label: "stdio" }, { value: "streamable-http", label: "HTTP" }]} />}
                   sub="stdio for Claude Desktop / Code; HTTP for headless or self-host. Applies on restart." />
-                <Row l="Phase 0 access" r={mono("read-only inspection", "var(--warn)")} sub="Agent and MCP mutation requests are rejected by the runtime safety fuse." />
+                <Row l="MCP Phase 0 access" r={mono("read-only local inspection", "var(--warn)")} sub="MCP can inspect its local read allowlist. Mutation requests are rejected by the runtime safety fuse." />
               </SettingCard>
               <SettingCard title="Mutation schemas · writes disabled">
                 <div className="mono" style={{ fontSize: 11.5, color: "var(--warn)", lineHeight: 1.6, marginBottom: 10 }}>These schemas remain discoverable for client compatibility. Calling one returns <b>agent_mutation_disabled</b>; no write is executed.</div>
@@ -252,16 +252,20 @@ export default function SettingsScreen() {
                     options={[{ value: "none", label: "None" }, { value: "codex", label: "Codex" }]}
                   />}
                   sub="None disables moment-finding reasoning. Codex is remote and requires explicit consent." />
+                <Row
+                  l="Codex Agent access"
+                  r={mono("message + transcript only", "var(--warn)")}
+                  sub="Codex cannot inspect your library, queues, watches, models, storage, files, or other local app state, and it cannot run local Agent tools." />
                 {s?.reasoning_provider === "codex" && (
                   <Row
-                    l="Codex transcript consent"
+                    l="Codex text consent"
                     r={<Switch
-                      label="Allow transcript text to leave this machine for Codex"
+                      label="Allow your message and any attached transcript text to leave this machine for Codex"
                       on={s.reasoning_egress_consent}
                       disabled={settingDisabled("reasoning_provider", "reasoning_egress_consent")}
                       onClick={() => save({ reasoning_egress_consent: !s.reasoning_egress_consent })}
                     />}
-                    sub="When enabled, transcript text leaves this machine and is sent to Codex for remote reasoning. Media files are not sent to Codex." />
+                    sub="When enabled, the text you send and any attached transcript text are sent to Codex for remote reasoning. Media files and local app state are not sent." />
                 )}
               </SettingCard>
               <SettingCard title="What leaves your machine">
@@ -272,9 +276,9 @@ export default function SettingsScreen() {
                     ? s?.offline
                       ? <span style={{ color: "var(--warn)" }}>blocked by Offline · no current egress</span>
                       : s?.reasoning_provider === "codex" && s.reasoning_egress_consent
-                        ? <span style={{ color: "var(--warn)" }}>transcript text → Codex (consented)</span>
+                        ? <span style={{ color: "var(--warn)" }}>your message + attached transcript text → Codex (consented)</span>
                         : s?.reasoning_provider === "codex"
-                          ? "Codex selected · transcript egress blocked until consent"
+                          ? "Codex selected · message and transcript egress blocked until consent"
                           : "disabled"
                     : "settings unavailable"}</div>
                 </div>

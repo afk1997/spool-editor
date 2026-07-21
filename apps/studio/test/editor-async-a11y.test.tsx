@@ -606,13 +606,13 @@ describe("editor controls expose their real accessible actions", () => {
     expect(screen.getByRole("button", { name: "Close agent panel" })).toBeInTheDocument();
   });
 
-  it("keeps read-only Agent clarifications answerable and blocks only mutation confirmations", () => {
+  it("keeps text-only Agent clarifications answerable and blocks mutation confirmations", () => {
     const answerElicit = vi.fn();
     const clarification = {
       role: "elicit" as const,
       id: "clarify-1",
       kind: "enum" as const,
-      q: "Which source should I inspect?",
+      q: "Which supplied passage do you mean?",
       options: ["Interview", "Keynote"],
     };
     harness.ctx = baseCtx({
@@ -635,7 +635,7 @@ describe("editor controls expose their real accessible actions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Keynote" }));
     expect(answerElicit).toHaveBeenCalledWith(clarification, "Keynote");
     expect(screen.getByText("Allow delete_recipe?")).toBeInTheDocument();
-    expect(screen.getAllByText(/Agent mutations are unavailable in Phase 0/)).toHaveLength(1);
+    expect(screen.getAllByText(/Agent changes are unavailable in Phase 0/)).toHaveLength(1);
     expect(screen.queryByRole("button", { name: "Confirm" })).not.toBeInTheDocument();
   });
 
@@ -648,7 +648,7 @@ describe("editor controls expose their real accessible actions", () => {
           role: "elicit",
           id: "clarify-busy",
           kind: "enum",
-          q: "Which source should I inspect?",
+          q: "Which supplied passage do you mean?",
           options: ["Interview", "Keynote"],
         },
       ],

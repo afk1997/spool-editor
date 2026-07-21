@@ -60,6 +60,7 @@ vi.mock("@/components/spool/context", async (importOriginal) => {
 });
 
 import {
+  INITIAL_AGENT,
   buildTranscript,
   mapClips,
   mapDownloads,
@@ -81,11 +82,13 @@ import CaptionScreen from "@/app/clips/[id]/caption/page";
 import EditorScreen from "@/app/clips/[id]/page";
 import ReframeScreen from "@/app/clips/[id]/reframe/page";
 import ClipsScreen from "@/app/clips/page";
+import HomeScreen from "@/app/page";
 import ImportPage from "@/app/import/page";
 import LibraryScreen from "@/app/library/page";
 import QueueScreen from "@/app/queue/page";
 import RecipesScreen from "@/app/recipes/page";
 import SettingsScreen from "@/app/settings/page";
+import OnboardingScreen from "@/app/onboarding/page";
 import ProjectScreen from "@/app/sources/[id]/page";
 import WatchesScreen from "@/app/watches/page";
 
@@ -840,32 +843,135 @@ describe("product truth: visible control inventory", () => {
     render(<SettingsScreen />);
     fireEvent.click(screen.getByRole("button", { name: "MCP server" }));
 
+    expect(screen.getByText("MCP Phase 0 access")).toBeInTheDocument();
+    expect(screen.getByText("read-only local inspection")).toBeInTheDocument();
+    expect(screen.getByText(/MCP can inspect its local read allowlist/i)).toBeInTheDocument();
     expect(screen.getByText("Mutation schemas · writes disabled")).toBeInTheDocument();
     expect(screen.getByText(/agent_mutation_disabled/)).toBeInTheDocument();
     expect(screen.queryByText("Tool allow-list")).not.toBeInTheDocument();
     expect(screen.queryByText(/manual mode and agent mode never diverge/i)).not.toBeInTheDocument();
   });
 
-  it("renders the agent as inspection-only and submits a plain-language query", () => {
+  it("states the exact Codex message and transcript egress boundary in Privacy", () => {
+    importHarness.queryData = {
+      doctor: { tools: {}, machine: {}, encoders: [] },
+      getSettings: {
+        reasoning_provider: "codex",
+        reasoning_egress_consent: true,
+        offline: false,
+      },
+      listModels: { models: [], active: "" },
+    };
+    importHarness.ctx = baseCtx({
+      settings: settingsFixture({
+        reasoning_provider: "codex",
+        reasoning_egress_consent: true,
+      }),
+      reasoningProvider: "codex",
+      reasoningEgressConsent: true,
+    });
+    render(<SettingsScreen />);
+    fireEvent.click(screen.getByRole("button", { name: "Privacy" }));
+
+    expect(screen.getByText("Codex Agent access")).toBeInTheDocument();
+    expect(screen.getByText("message + transcript only")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Codex cannot inspect your library, queues, watches, models, storage, files, or other local app state/i,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", {
+        name: "Allow your message and any attached transcript text to leave this machine for Codex",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/the text you send and any attached transcript text are sent to Codex/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/your message \+ attached transcript text → Codex \(consented\)/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("transcript text → Codex (consented)")).not.toBeInTheDocument();
+  });
+
+  it("inventories onboarding as message-plus-transcript egress, not local inspection", () => {
+    importHarness.queryData = {
+      doctor: { tools: {}, machine: {}, encoders: [] },
+    };
+    importHarness.ctx = baseCtx({
+      reasoningProvider: "codex",
+      reasoningEgressConsent: true,
+      settings: settingsFixture({
+        reasoning_provider: "codex",
+        reasoning_egress_consent: true,
+      }),
+    });
+    render(<OnboardingScreen />);
+
+    expect(
+      screen.getByText("Codex reasoning is enabled for messages and attached transcripts."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Codex receives only the message you send and any attached transcript text/i,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/media and local app state are not sent/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Let’s set up" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(
+      screen.getByText(
+        "Codex remote reasoning · your message + attached transcript text leave with consent",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the Codex agent as text-only and submits a plain-language query", () => {
+    expect(INITIAL_AGENT).toEqual([
+      {
+        role: "agent",
+        text: "Hi — I'm your text-only clip assistant. I can answer from your message and any attached transcript. I can't inspect your library, queues, watches, models, storage, files, or other local app state.",
+      },
+    ]);
     const askAgent = vi.fn();
     importHarness.ctx = baseCtx({
       agentOpen: true,
       askAgent,
-      agentMessages: [{ role: "agent", text: "I can inspect current engine state." }],
+      agentMessages: [{ role: "agent", text: "I can answer from supplied text only." }],
     });
     render(<AgentPanel />);
 
-    expect(screen.getByText("Agent · read-only")).toBeInTheDocument();
-    expect(screen.getByText("Inspection only")).toBeInTheDocument();
+    expect(screen.getByText("Agent · text-only")).toBeInTheDocument();
+    expect(screen.getByText("Message + attached transcript only")).toBeInTheDocument();
     const input = screen.getByPlaceholderText(
-      "Ask about sources, clips, transcripts, or queue status…",
+      "Ask about supplied text or the attached transcript…",
     );
-    fireEvent.change(input, { target: { value: "Which jobs are queued?" } });
+    fireEvent.change(input, { target: { value: "What does this passage mean?" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(askAgent).toHaveBeenCalledWith("Which jobs are queued?");
+    expect(askAgent).toHaveBeenCalledWith("What does this passage mean?");
     expect(input).toHaveValue("");
+    expect(screen.queryByText("Agent · read-only")).not.toBeInTheDocument();
+    expect(screen.queryByText("Inspection only")).not.toBeInTheDocument();
     for (const fake of ["Undo last agent action", "Detected 2 speakers", "Run recipe"])
       expect(screen.queryByText(fake)).not.toBeInTheDocument();
+  });
+
+  it("describes the home Agent as supplied-text only, never local inspection", () => {
+    importHarness.ctx = baseCtx();
+    render(<HomeScreen />);
+
+    expect(screen.getByText("Import media or ask from supplied text")).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText(
+        "Paste a URL, or ask about supplied text or an attached transcript…",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Ask" })).toBeInTheDocument();
+    expect(
+      screen.getByText("Codex sees your message and attached transcript—not local app state"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/agent inspection is read-only/i)).not.toBeInTheDocument();
   });
 
   it("renders only the supported URL import and format controls", () => {
@@ -1061,11 +1167,13 @@ describe("product truth: structured action errors", () => {
     origin_forbidden: "That source is blocked by the engine's origin policy.",
     agent_mutation_disabled:
       "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
+    remote_agent_tools_disabled:
+      "Remote Agent tools are disabled. Codex receives only your message and attached transcript text; it cannot inspect local app state.",
     offline_network_disabled: "Turn off Offline mode before using this network action.",
     network_work_active: "Wait for active network work to finish before turning on Offline mode.",
     reasoning_provider_required: "Select Codex as the reasoning provider before using this action.",
     egress_consent_required:
-      "Allow transcript text to be sent to Codex before using remote reasoning.",
+      "Allow your message and any attached transcript text to be sent to Codex before using remote reasoning.",
     egress_consent_requires_codex: "Select Codex before granting remote-reasoning consent.",
     settings_persist_failed:
       "The engine could not save settings. Your confirmed settings were kept.",

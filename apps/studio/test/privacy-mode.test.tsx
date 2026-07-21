@@ -313,7 +313,9 @@ describe("privacy settings UI", () => {
     expect(codex).toBeDisabled();
     expect(screen.getByRole("switch", { name: "Offline mode" })).toBeDisabled();
     expect(
-      screen.queryByRole("switch", { name: /Allow transcript text to leave/i }),
+      screen.queryByRole("switch", {
+        name: /Allow your message and any attached transcript text to leave/i,
+      }),
     ).not.toBeInTheDocument();
   });
 
@@ -330,7 +332,9 @@ describe("privacy settings UI", () => {
     expect(screen.getByRole("button", { name: "None" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "Codex" })).toBeDisabled();
     expect(
-      screen.queryByRole("switch", { name: /Allow transcript text to leave/i }),
+      screen.queryByRole("switch", {
+        name: /Allow your message and any attached transcript text to leave/i,
+      }),
     ).not.toBeInTheDocument();
 
     await act(async () => {
@@ -340,10 +344,12 @@ describe("privacy settings UI", () => {
 
     expect(screen.getByRole("button", { name: "Codex" })).toHaveAttribute("aria-pressed", "true");
     expect(
-      screen.getByRole("switch", { name: /Allow transcript text to leave/i }),
+      screen.getByRole("switch", {
+        name: /Allow your message and any attached transcript text to leave/i,
+      }),
     ).not.toBeChecked();
     expect(
-      screen.getByText(/transcript text leaves this machine and is sent to Codex/i),
+      screen.getByText(/the text you send and any attached transcript text are sent to Codex/i),
     ).toBeInTheDocument();
   });
 
@@ -356,7 +362,9 @@ describe("privacy settings UI", () => {
     });
     client.updateSettings.mockReturnValue(write.promise);
     await renderPrivacySettings(initial);
-    const consent = screen.getByRole("switch", { name: /Allow transcript text to leave/i });
+    const consent = screen.getByRole("switch", {
+      name: /Allow your message and any attached transcript text to leave/i,
+    });
 
     fireEvent.click(consent);
 
@@ -368,7 +376,11 @@ describe("privacy settings UI", () => {
       write.resolve(canonical);
       await write.promise;
     });
-    expect(screen.getByRole("switch", { name: /Allow transcript text to leave/i })).toBeChecked();
+    expect(
+      screen.getByRole("switch", {
+        name: /Allow your message and any attached transcript text to leave/i,
+      }),
+    ).toBeChecked();
   });
 
   it("uses the provider PATCH response to reset and hide consent", async () => {
@@ -386,7 +398,11 @@ describe("privacy settings UI", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "None" }));
     expect(screen.getByRole("button", { name: "Codex" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("switch", { name: /Allow transcript text to leave/i })).toBeChecked();
+    expect(
+      screen.getByRole("switch", {
+        name: /Allow your message and any attached transcript text to leave/i,
+      }),
+    ).toBeChecked();
 
     await act(async () => {
       write.resolve(canonical);
@@ -394,7 +410,9 @@ describe("privacy settings UI", () => {
     });
     expect(screen.getByRole("button", { name: "None" })).toHaveAttribute("aria-pressed", "true");
     expect(
-      screen.queryByRole("switch", { name: /Allow transcript text to leave/i }),
+      screen.queryByRole("switch", {
+        name: /Allow your message and any attached transcript text to leave/i,
+      }),
     ).not.toBeInTheDocument();
   });
 
@@ -412,7 +430,11 @@ describe("privacy settings UI", () => {
       expect(screen.getByRole("alert")).toHaveTextContent(/confirmed settings were kept/i),
     );
     expect(screen.getByRole("button", { name: "Codex" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("switch", { name: /Allow transcript text to leave/i })).toBeChecked();
+    expect(
+      screen.getByRole("switch", {
+        name: /Allow your message and any attached transcript text to leave/i,
+      }),
+    ).toBeChecked();
     expect(screen.getByRole("button", { name: "None" })).toBeEnabled();
   });
 });
@@ -472,7 +494,7 @@ describe("canonical privacy status label", () => {
 });
 
 describe("truthful privacy copy", () => {
-  it("states that provider None disables reasoning while keeping Codex egress transcript-only", async () => {
+  it("states that provider None disables reasoning while limiting Codex to message and transcript text", async () => {
     settingsQuery = { data: engineSettings(), loading: false, reload: vi.fn() };
     renderWithProvider(<SettingsScreen />);
 
@@ -486,7 +508,7 @@ describe("truthful privacy copy", () => {
     );
     expect(
       screen.getByText(
-        "Codex remote reasoning sends transcript text only after explicit consent; media files are not sent to Codex.",
+        "Codex remote reasoning sends your message and any attached transcript text only after explicit consent; media files and local app state are not sent.",
         { exact: true },
       ),
     ).toBeInTheDocument();
@@ -506,7 +528,7 @@ describe("truthful privacy copy", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("discloses network downloads and consented Codex transcript egress during onboarding", async () => {
+  it("discloses network downloads and consented Codex message and transcript egress during onboarding", async () => {
     settingsQuery = {
       data: engineSettings({ reasoning_provider: "codex", reasoning_egress_consent: true }),
       loading: false,
@@ -517,9 +539,10 @@ describe("truthful privacy copy", () => {
     expect(screen.getByText(/URL downloads use the network/i)).toBeInTheDocument();
     expect(
       screen.getByText(
-        /Codex receives transcript text only when remote reasoning is selected and consented/i,
+        /Codex receives only the message you send and any attached transcript text when remote reasoning is selected and consented/i,
       ),
     ).toBeInTheDocument();
+    expect(screen.getByText(/media and local app state are not sent/i)).toBeInTheDocument();
     expect(screen.queryByText(/Everything runs on your machine/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/entirely on your machine/i)).not.toBeInTheDocument();
   });
@@ -541,7 +564,9 @@ describe("truthful privacy copy", () => {
     expect(
       screen.getByText("blocked by Offline · no current egress", { exact: true }),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/transcript text → Codex \(consented\)/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/your message \+ attached transcript text → Codex \(consented\)/i),
+    ).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Models" }));
     expect(screen.getByText("blocked by Offline", { exact: true })).toBeInTheDocument();
     settingsView.unmount();
@@ -552,13 +577,13 @@ describe("truthful privacy copy", () => {
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 
     expect(
-      screen.getByText("Codex configured with consent · no current transcript egress", {
+      screen.getByText("Codex configured with consent · no current message or transcript egress", {
         exact: true,
       }),
     ).toBeInTheDocument();
     expect(screen.getByText("blocked by Offline", { exact: true })).toBeInTheDocument();
     expect(
-      screen.queryByText(/transcript text leaves this machine with consent/i),
+      screen.queryByText(/your message \+ attached transcript text leave with consent/i),
     ).not.toBeInTheDocument();
     expect(screen.queryByText("enabled", { exact: true })).not.toBeInTheDocument();
   });
@@ -570,7 +595,9 @@ describe("privacy action error copy", () => {
     network_work_active: "Wait for active network work to finish before turning on Offline mode.",
     reasoning_provider_required: "Select Codex as the reasoning provider before using this action.",
     egress_consent_required:
-      "Allow transcript text to be sent to Codex before using remote reasoning.",
+      "Allow your message and any attached transcript text to be sent to Codex before using remote reasoning.",
+    remote_agent_tools_disabled:
+      "Remote Agent tools are disabled. Codex receives only your message and attached transcript text; it cannot inspect local app state.",
     egress_consent_requires_codex: "Select Codex before granting remote-reasoning consent.",
     settings_persist_failed:
       "The engine could not save settings. Your confirmed settings were kept.",

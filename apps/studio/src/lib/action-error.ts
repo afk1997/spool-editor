@@ -11,11 +11,13 @@ const ACTION_ERROR_COPY: Readonly<Record<string, string>> = {
   origin_forbidden: "That source is blocked by the engine's origin policy.",
   agent_mutation_disabled:
     "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
+  remote_agent_tools_disabled:
+    "Remote Agent tools are disabled. Codex receives only your message and attached transcript text; it cannot inspect local app state.",
   offline_network_disabled: "Turn off Offline mode before using this network action.",
   network_work_active: "Wait for active network work to finish before turning on Offline mode.",
   reasoning_provider_required: "Select Codex as the reasoning provider before using this action.",
   egress_consent_required:
-    "Allow transcript text to be sent to Codex before using remote reasoning.",
+    "Allow your message and any attached transcript text to be sent to Codex before using remote reasoning.",
   egress_consent_requires_codex: "Select Codex before granting remote-reasoning consent.",
   settings_persist_failed: "The engine could not save settings. Your confirmed settings were kept.",
   not_resumable: "This job cannot be resumed. Start it again instead.",
