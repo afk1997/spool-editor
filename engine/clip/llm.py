@@ -433,7 +433,8 @@ class CodexProvider:
             os.close(out_fd)
             argv = [
                 self.bin, "exec", "--sandbox", "read-only", "--skip-git-repo-check",
-                "--ephemeral", "--color", "never", "-C", scratch, "-o", out_path,
+                "--ephemeral", "--ignore-user-config", "--color", "never",
+                "-C", scratch, "-o", out_path,
             ]
             if self.model:
                 argv += ["-m", self.model]

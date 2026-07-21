@@ -117,6 +117,24 @@ def test_codex_builds_read_only_exec_argv(monkeypatch):
     assert "you are a producer" in captured["input"]
 
 
+def test_codex_ignores_user_config_but_keeps_explicit_model(monkeypatch):
+    captured = {}
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        _write_o(argv, "RESULT")
+        return _FakeProc()
+
+    monkeypatch.setattr(llm.shutil, "which", lambda binary: binary)
+    monkeypatch.setattr(llm.subprocess, "Popen", fake_popen)
+
+    assert _codex(model="gpt-explicit").complete("transcript") == "RESULT"
+
+    argv = captured["argv"]
+    assert "--ignore-user-config" in argv
+    assert argv[argv.index("-m") + 1] == "gpt-explicit"
+
+
 def test_codex_includes_model_flag_when_configured(monkeypatch):
     captured = {}
     monkeypatch.setattr(llm.shutil, "which", lambda b: "/usr/local/bin/codex")
