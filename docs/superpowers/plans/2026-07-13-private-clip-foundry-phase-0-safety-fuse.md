@@ -1091,14 +1091,19 @@ git commit -m "fix(engine): bound worker admission"
 - Create: `apps/studio/src/lib/engine-proxy.ts`
 - Create: `apps/studio/src/app/api/engine/[...path]/route.ts`
 - Create: `apps/studio/test/engine-proxy.test.ts`
+- Create: `apps/studio/test/local-proxy-config.test.ts`
+- Create: `apps/studio/scripts/phase0-e2e.sh`
+- Create: `apps/studio/.env.example`
 - Modify: `apps/studio/src/lib/engine.ts`
-- Modify: `apps/studio/.env.example`
 - Modify: `apps/studio/e2e/url-to-clip.spec.ts`
 - Modify: `apps/studio/playwright.config.ts`
+- Modify: `apps/studio/package.json`
+- Modify: `apps/studio/scripts/smoke.mjs`
 - Modify: `apps/studio/test/api-client.test.ts`
 - Modify: `packages/api-client/src/index.ts`
+- Modify: `README.md`
 
-- [ ] **Step 1: Write proxy unit tests with a fetch spy**
+- [x] **Step 1: Write proxy unit tests with a fetch spy**
 
 Cover all of these before implementing the proxy:
 
@@ -1114,15 +1119,15 @@ Cover all of these before implementing the proxy:
 10. the API client preserves `Accept: text/event-stream` on SSE instead of overwriting it with `application/json`.
 11. upstream redirects are returned without automatic following, so a redirect cannot carry the server token to another origin.
 
-- [ ] **Step 2: Observe the new proxy tests fail**
+- [x] **Step 2: Observe the new proxy tests fail**
 
 ```bash
 pnpm --filter @spool/studio exec vitest run test/engine-proxy.test.ts test/api-client.test.ts
 ```
 
-- [ ] **Step 3: Implement one testable forwarding function**
+- [x] **Step 3: Implement one testable forwarding function**
 
-`engine-proxy.ts` owns configuration validation, URL joining, Origin policy, header filtering, bearer injection, and streaming `Response` construction. First require the parsed incoming Next request URL to use `localhost`, `127.0.0.0/8`, or `::1`; a spoofed public `Host` cannot define a trusted origin. For every request with an `Origin`, require that parsed Origin to be loopback and exactly match the incoming Next request's own origin before token injection, including `GET`/`HEAD`; reject other-loopback, hostile, and `null` values. When `Origin` is missing, allow only `GET`/`HEAD` so DOM media works without opening originless mutations. Build the upstream path by percent-encoding each catch-all segment, append only the incoming `URLSearchParams`, and assert the resulting `origin` equals the parsed configured engine origin before adding Authorization. Reject traversal, slash/backslash, scheme-relative, or absolute-URL segments instead of normalizing them. Set upstream fetch `redirect: "manual"`; never automatically follow an engine redirect while holding its bearer token.
+`engine-proxy.ts` owns configuration validation, URL joining, Origin policy, header filtering, bearer injection, and streaming `Response` construction. First require the parsed incoming Next request URL to use `localhost`, `127.0.0.0/8`, or `::1`; a public request URL cannot become trusted through a spoofed `Host`. Next derives the effective browser-facing origin from the request protocol plus a strictly parsed, canonical loopback `Host` authority when that header is present, falling back to the request URL origin only when it is absent. This handles Next's internal `request.url` hostname normalization without accepting an arbitrary loopback alias. For every request with an `Origin`, require that parsed Origin to be loopback and exactly match this effective incoming origin before token injection, including `GET`/`HEAD`; reject malformed, non-loopback, other-loopback, and `null` values. When `Origin` is missing, allow only `GET`/`HEAD` so DOM media works without opening originless mutations. Build the upstream path by percent-encoding each catch-all segment, append only the incoming `URLSearchParams`, and assert the resulting `origin` equals the parsed configured engine origin before adding Authorization. Reject traversal, slash/backslash, scheme-relative, or absolute-URL segments instead of normalizing them. Set upstream fetch `redirect: "manual"`; never automatically follow an engine redirect while holding its bearer token.
 
 Build the outbound request from this explicit allowlist only: `Accept`, `Content-Type`, `Range`, `If-Range`, `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`, `Idempotency-Key`, and `Last-Event-ID`. Validate browser Origin locally and then strip it rather than forwarding it to Flask. Add only the configured bearer. In addition to the fixed hop-by-hop set, parse `Connection` tokens case-insensitively and remove each nominated header in both directions. Never forward browser cookies or emit engine `Set-Cookie`; strip every downstream `Access-Control-*` header because the browser-facing route is same-origin and owns its own boundary.
 
@@ -1132,7 +1137,7 @@ Pass the incoming `ReadableStream` directly; on Node, set the request-init `dupl
 
 Default `SPOOL_ENGINE_URL` to `http://127.0.0.1:8899`. Treat an empty `SPOOL_ENGINE_TOKEN` as unauthenticated loopback development, but require the token in the authenticated acceptance test. Never use a `NEXT_PUBLIC_*` token.
 
-- [ ] **Step 4: Point the browser client at same-origin `/api/engine`**
+- [x] **Step 4: Point the browser client at same-origin `/api/engine`**
 
 Construct the singleton as:
 
@@ -1151,7 +1156,7 @@ SPOOL_ENGINE_URL=http://127.0.0.1:8899
 # SPOOL_ENGINE_TOKEN=replace-with-the-engine-token
 ```
 
-- [ ] **Step 5: Token-enable the existing Playwright golden flow**
+- [x] **Step 5: Token-enable the existing Playwright golden flow**
 
 Start Flask with token auth enabled and Studio with the same server-only token. Add bearer auth to direct test-helper polling that intentionally bypasses Studio. At the beginning of the UI flow, open Settings, select Codex, acknowledge transcript egress, save successfully, and assert the `Remote reasoning enabled` label before starting discovery. Then drive import through Studio and verify:
 
@@ -1161,11 +1166,11 @@ Start Flask with token auth enabled and Studio with the same server-only token. 
 - the rendered download succeeds through the proxy;
 - direct unauthenticated Flask equivalents return 401.
 
-Update the Playwright config/header comment to name the external token harness below and `E2E_ENGINE_API_URL`; do not add a second implicit server launcher that can race the explicit isolated-state processes. Set the Playwright test timeout to `900_000`: the existing sequential poll budgets total 690 seconds before ordinary UI assertions, so the current 360-second cap cannot represent the documented flow.
+Update the Playwright config/header comment to name the external token harness below and `E2E_ENGINE_API_URL`; do not add a second implicit server launcher that can race the explicit isolated-state processes. Set the Playwright test timeout to `1_800_000`: the explicit sequential job polls total 780 seconds, the UI can spend another 300 seconds admitting the final render after reframe and caption work, and ordinary UI assertions still need headroom.
 
-- [ ] **Step 6: Verify unit, build, and authenticated E2E**
+- [x] **Step 6: Verify unit, build, and authenticated E2E**
 
-Use isolated engine state and launch both servers with one shared token. Rename the E2E helper variable to `E2E_ENGINE_API_URL`; `SPOOL_ENGINE_URL` is reserved for the Studio server's engine origin and must not include `/api/v1`.
+The checked-in runner is the canonical acceptance gate. It builds Studio for production, verifies every external prerequisite, refuses occupied ports, generates one shared token, launches Flask and `next start` against isolated state with explicit loopback binds, neutralizes inherited privacy/watch variables, forces local probes to bypass inherited HTTP proxies, performs bounded readiness and socket checks, and stops captured process trees with a bounded TERM grace period plus recursive KILL escalation. It preserves both server logs on failure. The Playwright process receives `E2E_ENGINE_API_URL`; `SPOOL_ENGINE_URL` remains the Studio server's engine origin and never includes `/api/v1`.
 
 ```bash
 set -euo pipefail
@@ -1176,89 +1181,21 @@ pnpm --filter @spool/studio typecheck
 pnpm --filter @spool/studio lint
 pnpm --filter @spool/api-client lint
 pnpm --filter @spool/studio build
-
-TOKEN="phase0-e2e-$(openssl rand -hex 16)"
-RUN_DIR="$(mktemp -d /tmp/spool-phase0-e2e.XXXXXX)"
-ENGINE_LOG="$RUN_DIR/engine.log"
-STUDIO_LOG="$RUN_DIR/studio.log"
-
-cleanup_phase0_e2e() {
-  for PID in "${STUDIO_PID:-}" "${ENGINE_PID:-}"; do
-    test -n "$PID" || continue
-    pkill -TERM -P "$PID" 2>/dev/null || true
-    kill "$PID" 2>/dev/null || true
-  done
-  wait "${STUDIO_PID:-}" "${ENGINE_PID:-}" 2>/dev/null || true
-  rm -rf "$RUN_DIR"
-}
-trap cleanup_phase0_e2e EXIT INT TERM
-
-test -z "$(lsof -nP -iTCP:8899 -sTCP:LISTEN -t 2>/dev/null)"
-test -z "$(lsof -nP -iTCP:3000 -sTCP:LISTEN -t 2>/dev/null)"
-test -L engine/models
-test -f "engine/models/$(tr -d '\r\n' <engine/models/ACTIVE)"
-codex login status >/dev/null
-
-(
-  cd engine
-  exec env TROVE_TOKEN="$TOKEN" TROVE_RATE_LIMIT=0 \
-    TROVE_DOWNLOAD_DIR="$RUN_DIR/data" .venv/bin/python app.py
-) >"$ENGINE_LOG" 2>&1 &
-ENGINE_PID=$!
-
-(
-  cd apps/studio
-  exec env SPOOL_ENGINE_URL="http://127.0.0.1:8899" \
-    SPOOL_ENGINE_TOKEN="$TOKEN" \
-    ./node_modules/.bin/next dev --hostname 127.0.0.1 --port 3000
-) >"$STUDIO_LOG" 2>&1 &
-STUDIO_PID=$!
-
-for _ in {1..120}; do
-  kill -0 "$ENGINE_PID"
-  curl -fsS -H "Authorization: Bearer $TOKEN" \
-    http://127.0.0.1:8899/api/v1/health >/dev/null && break
-  sleep 0.25
-done
-curl -fsS -H "Authorization: Bearer $TOKEN" \
-  http://127.0.0.1:8899/api/v1/health >/dev/null
-
-for _ in {1..120}; do
-  kill -0 "$STUDIO_PID"
-  curl -fsS http://127.0.0.1:3000/import >/dev/null && break
-  sleep 0.25
-done
-curl -fsS http://127.0.0.1:3000/import >/dev/null
-
-AUTH_CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
-  -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8899/api/v1/jobs)"
-NO_AUTH_CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
-  http://127.0.0.1:8899/api/v1/jobs)"
-PROXY_CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
-  http://127.0.0.1:3000/api/engine/api/v1/jobs)"
-test "$AUTH_CODE" = 200
-test "$NO_AUTH_CODE" = 401
-test "$PROXY_CODE" = 200
-
-E2E_ENGINE_API_URL="http://127.0.0.1:8899/api/v1" \
-TROVE_TOKEN="$TOKEN" SPOOL_STUDIO_URL="http://127.0.0.1:3000" \
-  pnpm --filter @spool/studio e2e -- e2e/url-to-clip.spec.ts
+apps/studio/scripts/phase0-e2e.sh
 ```
 
-The E2E requires the repository's documented Chrome, ffmpeg, yt-dlp, network, and linked active Whisper-model prerequisites. `TROVE_RATE_LIMIT=0` disables throttling only for this isolated acceptance process so UI/SSE/polling traffic cannot make the flow flaky. A missing prerequisite is reported separately from a behavioral test failure.
+The E2E requires the repository's documented Chrome, ffmpeg/ffprobe, yt-dlp, network, linked active Whisper model, and Codex login. `TROVE_RATE_LIMIT=0` is scoped to the isolated acceptance process so UI/SSE/polling traffic cannot make the flow flaky. A missing prerequisite is reported separately from a behavioral failure, and a failed run prints the retained artifact directory instead of deleting the evidence.
 
-- [ ] **Step 7: Commit Slice 0E**
+- [x] **Step 7: Commit Slice 0E**
 
 ```bash
-git add apps/studio/src/lib/engine-proxy.ts \
-  'apps/studio/src/app/api/engine/[...path]/route.ts' \
-  apps/studio/test/engine-proxy.test.ts apps/studio/src/lib/engine.ts \
-  apps/studio/.env.example apps/studio/e2e/url-to-clip.spec.ts \
-  apps/studio/playwright.config.ts apps/studio/test/api-client.test.ts \
-  packages/api-client/src/index.ts
+git add apps/studio/e2e/url-to-clip.spec.ts \
+  apps/studio/playwright.config.ts apps/studio/scripts/phase0-e2e.sh \
+  apps/studio/test/local-proxy-config.test.ts \
+  docs/superpowers/plans/2026-07-13-private-clip-foundry-phase-0-safety-fuse.md
 git diff --cached --check
 git diff --cached --name-only
-git commit -m "fix(studio): proxy authenticated engine traffic"
+git commit -m "test(studio): authenticate golden proxy flow"
 ```
 
 ## 12. Task 6 — Slice 0F: make one contract pass across every client
