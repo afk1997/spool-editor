@@ -27,6 +27,7 @@ import watcher
 import settings as settings_store_mod
 import transcript_index as transcript_index_mod
 import clip_runner
+from clip import llm as clip_llm
 from network_policy import NetworkPolicy, NetworkPolicyError
 import time as _time
 from util import link_or_copy, sanitize_filename
@@ -124,6 +125,8 @@ def create_app() -> Flask:
 
     network_policy = NetworkPolicy(offline=settings_store.get()["offline"])
     app.extensions["trove.network_policy"] = network_policy
+    reasoning_processes = clip_llm.reasoning_process_registry(network_policy)
+    app.extensions["trove.reasoning_processes"] = reasoning_processes
 
     def _apply_settings(values: dict) -> None:
         if values.get("offline"):
@@ -958,12 +961,35 @@ def create_app() -> Flask:
                 _reconcile_all()
         threading.Thread(target=_poll, name="watch-poller", daemon=True).start()
 
+    # One lifecycle boundary owns every worker created by this app.  Calls are
+    # serialized because SIGTERM can race the normal ``app.run`` finally path;
+    # each underlying shutdown operation is intentionally safe to repeat.
+    _shutdown_lock = threading.RLock()
+
+    def _shutdown(*, wait: bool = False) -> None:
+        failures = []
+        with _shutdown_lock:
+            try:
+                reasoning_processes.shutdown(timeout=5.0)
+            except BaseException as exc:  # ensure queue workers still close
+                failures.append(exc)
+            for manager in (job_manager, transcribe_manager, clip_manager):
+                try:
+                    manager.shutdown(wait=wait)
+                except BaseException as exc:  # ensure every manager is attempted
+                    failures.append(exc)
+        if failures:
+            raise failures[0]
+
+    app.extensions["trove.shutdown"] = _shutdown
+
     return app
 
 
 if __name__ == "__main__":
     from config import DEFAULT_HOST, DEFAULT_PORT, assert_safe_bind
+    from lifecycle import run_flask_app
     # Refuse to start on a public bind without auth — see config.py.
     assert_safe_bind(DEFAULT_HOST)
     app = create_app()
-    app.run(host=DEFAULT_HOST, port=DEFAULT_PORT)
+    run_flask_app(app, host=DEFAULT_HOST, port=DEFAULT_PORT)

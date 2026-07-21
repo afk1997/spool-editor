@@ -241,9 +241,16 @@ def cmd_serve(args) -> int:
     # Raises UnauthenticatedPublicBindError with a helpful message.
     assert_safe_bind(args.host)
     from app import create_app
+    from lifecycle import run_flask_app
     app = create_app()
     _print_banner(subtitle=f"self-hosted media · serving on http://{args.host}:{args.port}")
-    app.run(host=args.host, port=args.port, debug=False, use_reloader=False)
+    run_flask_app(
+        app,
+        host=args.host,
+        port=args.port,
+        debug=False,
+        use_reloader=False,
+    )
     return 0
 
 
