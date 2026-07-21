@@ -491,6 +491,7 @@ class JobManager:
             return list(self._jobs.values())
 
     def cancel(self, job_id: str) -> bool:
+        cleanup_root = None
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
@@ -503,13 +504,23 @@ class JobManager:
             job._was_paused = False
             job.status = JobStatus.CANCELLED
             if not job._worker_active:
-                cleanup_attempt(job._staging_root)
+                cleanup_root = job._staging_root
+        if not self._persist():
+            raise RuntimeError("failed to persist download cancellation")
         if proc is not None and hasattr(proc, "kill"):
             try:
                 proc.kill()
             except Exception:
                 pass
-        self._persist()
+        if cleanup_root is not None:
+            try:
+                cleanup_attempt(cleanup_root)
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "failed to clean cancelled download %s",
+                    job_id,
+                    exc_info=True,
+                )
         return True
 
     def dismiss(self, job_id: str) -> bool:

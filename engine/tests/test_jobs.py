@@ -388,6 +388,94 @@ def test_cancel_from_paused_removes_partial_files_but_preserves_published_file(t
     jm.shutdown()
 
 
+def test_cancel_paused_persists_before_best_effort_cleanup(tmp_path, monkeypatch):
+    """A cleanup failure cannot resurrect a durably cancelled paused job."""
+    import jobs
+
+    store = tmp_path / "jobs.json"
+    manager = JobManager(max_workers=1, ttl_seconds=60, store_path=store)
+    paused = Job(
+        id="paused-cleanup-failure",
+        url="https://x",
+        title="paused",
+        status=JobStatus.PAUSED,
+    )
+    paused._was_paused = True
+    with manager._lock:
+        manager._ensure_download_staging_locked(paused)
+        manager._jobs[paused.id] = paused
+    partial = Path(paused.out_template.replace("%(ext)s", "mp4.part"))
+    partial.write_bytes(b"resume-bytes")
+    assert manager._persist() is True
+
+    cleanup_calls = []
+
+    def fail_cleanup(root):
+        cleanup_calls.append(root)
+        raise OSError("forced cleanup failure")
+
+    monkeypatch.setattr(jobs, "cleanup_attempt", fail_cleanup)
+
+    assert manager.cancel(paused.id) is True
+    assert manager.get(paused.id).status is JobStatus.CANCELLED
+    assert cleanup_calls == [paused._staging_root]
+    assert partial.read_bytes() == b"resume-bytes"
+    manager.shutdown(wait=True)
+
+    restarted = JobManager(max_workers=1, ttl_seconds=60, store_path=store)
+    try:
+        assert restarted.get(paused.id).status is JobStatus.CANCELLED
+    finally:
+        restarted.shutdown(wait=True)
+
+
+def test_cancel_paused_persist_failure_raises_without_cleanup(tmp_path, monkeypatch):
+    """An undurable cancellation is an error and preserves resumable bytes."""
+    import jobs
+    import jobs_store
+
+    store = tmp_path / "jobs.json"
+    manager = JobManager(max_workers=1, ttl_seconds=60, store_path=store)
+    paused = Job(
+        id="paused-persist-failure",
+        url="https://x",
+        title="paused",
+        status=JobStatus.PAUSED,
+    )
+    paused._was_paused = True
+    with manager._lock:
+        manager._ensure_download_staging_locked(paused)
+        manager._jobs[paused.id] = paused
+    partial = Path(paused.out_template.replace("%(ext)s", "mp4.part"))
+    partial.write_bytes(b"resume-bytes")
+    assert manager._persist() is True
+
+    cleanup_calls = []
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            jobs_store,
+            "persist_atomic",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("forced persist failure")
+            ),
+        )
+        patch.setattr(jobs, "cleanup_attempt", cleanup_calls.append)
+
+        with pytest.raises(RuntimeError, match="persist download cancellation"):
+            manager.cancel(paused.id)
+
+    assert cleanup_calls == []
+    assert partial.read_bytes() == b"resume-bytes"
+    manager.shutdown(wait=True)
+
+    restarted = JobManager(max_workers=1, ttl_seconds=60, store_path=store)
+    try:
+        assert restarted.get(paused.id).status is JobStatus.PAUSED
+    finally:
+        restarted.shutdown(wait=True)
+
+
 def test_stale_attempt_success_after_pause_does_not_publish(tmp_path):
     """Pause linearizes before publication, so the captured attempt stays stale.
 
