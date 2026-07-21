@@ -20,10 +20,12 @@ Which keys apply when:
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 import tempfile
 import threading
+from typing import Callable, Iterator
 
 # The full set of writable keys + their defaults. Defaults mirror the engine's existing
 # env/arg defaults (TROVE_CLIP_WORKERS=2, TROVE_MAX_WORKERS=4, exporter fast=True,
@@ -73,7 +75,8 @@ class SettingsStore:
             loaded["reasoning_egress_consent"] = False
         return loaded
 
-    def _save(self, overrides: dict) -> None:
+    def _stage(self, overrides: dict) -> str:
+        """Durably write ``overrides`` beside the store without publishing it."""
         parent = os.path.dirname(self.path) or "."
         prefix = os.path.basename(self.path) + "."
         fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=parent)
@@ -82,12 +85,17 @@ class SettingsStore:
                 json.dump(overrides, f)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp, self.path)
-        finally:
+            return tmp
+        except BaseException:
             try:
                 os.unlink(tmp)
             except FileNotFoundError:
                 pass
+            raise
+
+    def _save(self, overrides: dict) -> str:
+        """Prepare a durable candidate file for the transactional publish."""
+        return self._stage(overrides)
 
     def get(self) -> dict:
         """Every key: defaults merged with the user's overrides (a fresh copy)."""
@@ -99,8 +107,14 @@ class SettingsStore:
         with self._lock:
             return dict(self._overrides)
 
-    def update(self, data: dict) -> dict:
-        """Merge the whitelisted keys of ``data`` into the overrides, persist, return ``get()``."""
+    @contextmanager
+    def staged_update(self, data: dict) -> Iterator[dict]:
+        """Yield the next values, publishing them only after the caller succeeds.
+
+        The store lock stays held across the caller's short runtime apply.  The
+        candidate JSON is fully written and fsynced first, but ``os.replace`` and
+        the in-memory swap happen only when the context exits successfully.
+        """
         clean = {k: data[k] for k in _FIELDS if k in (data or {})}
         if (
             "reasoning_provider" in clean
@@ -113,26 +127,48 @@ class SettingsStore:
         ):
             raise ValueError("invalid reasoning_egress_consent")
         with self._lock:
-            if clean:
-                current = {**DEFAULTS, **self._overrides}
-                next_overrides = {**self._overrides, **clean}
-                next_provider = next_overrides.get(
-                    "reasoning_provider", DEFAULTS["reasoning_provider"]
-                )
-                provider_changed = (
-                    "reasoning_provider" in clean
-                    and clean["reasoning_provider"] != current["reasoning_provider"]
-                )
-                if provider_changed and "reasoning_egress_consent" not in clean:
-                    next_overrides["reasoning_egress_consent"] = False
-                if next_provider == "none" and (
-                    "reasoning_provider" in clean
-                    or "reasoning_egress_consent" in clean
-                    or current["reasoning_egress_consent"] is True
-                ):
-                    next_overrides["reasoning_egress_consent"] = False
+            if not clean:
+                yield {**DEFAULTS, **self._overrides}
+                return
 
-                # Copy-on-write: persistence must succeed before the live in-memory view changes.
-                self._save(next_overrides)
+            current = {**DEFAULTS, **self._overrides}
+            next_overrides = {**self._overrides, **clean}
+            next_provider = next_overrides.get(
+                "reasoning_provider", DEFAULTS["reasoning_provider"]
+            )
+            provider_changed = (
+                "reasoning_provider" in clean
+                and clean["reasoning_provider"] != current["reasoning_provider"]
+            )
+            if provider_changed and "reasoning_egress_consent" not in clean:
+                next_overrides["reasoning_egress_consent"] = False
+            if next_provider == "none" and (
+                "reasoning_provider" in clean
+                or "reasoning_egress_consent" in clean
+                or current["reasoning_egress_consent"] is True
+            ):
+                next_overrides["reasoning_egress_consent"] = False
+
+            tmp = self._save(next_overrides)
+            try:
+                yield {**DEFAULTS, **next_overrides}
+                os.replace(tmp, self.path)
                 self._overrides = next_overrides
-            return {**DEFAULTS, **self._overrides}
+            finally:
+                try:
+                    os.unlink(tmp)
+                except FileNotFoundError:
+                    pass
+
+    def update(
+        self,
+        data: dict,
+        *,
+        apply: Callable[[dict], None] | None = None,
+    ) -> dict:
+        """Apply runtime state, then atomically publish and return new values."""
+        with self.staged_update(data) as values:
+            if apply is not None:
+                apply(values)
+            result = values
+        return result

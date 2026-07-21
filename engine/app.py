@@ -146,8 +146,36 @@ def create_app() -> Flask:
     def _commit_settings(changes: dict) -> dict:
         requested_offline = changes["offline"] if "offline" in changes else None
         with network_policy.transition(requested_offline):
-            values = settings_store.update(changes)
-            _apply_settings(values)
+            privacy_keys = (
+                "SPOOL_OFFLINE",
+                "SPOOL_LLM_PROVIDER",
+                "SPOOL_LLM_EGRESS_CONSENT",
+            )
+            missing = object()
+            previous_env = {
+                key: os.environ[key] if key in os.environ else missing
+                for key in privacy_keys
+            }
+            try:
+                # The candidate file is staged while both the settings and policy
+                # locks are held. Runtime state applies first; persistence and the
+                # in-memory store publish only after that succeeds.
+                values = settings_store.update(changes, apply=_apply_settings)
+            except BaseException:
+                rollback_failures = []
+                for key, value in previous_env.items():
+                    try:
+                        if value is missing:
+                            os.environ.pop(key, None)
+                        else:
+                            os.environ[key] = value
+                    except BaseException as exc:
+                        rollback_failures.append(exc)
+                if rollback_failures:
+                    raise RuntimeError(
+                        "failed to roll back runtime privacy settings"
+                    ) from rollback_failures[0]
+                raise
             return values
 
     app.extensions["trove.commit_settings"] = _commit_settings

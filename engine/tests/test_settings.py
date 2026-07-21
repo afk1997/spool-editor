@@ -7,6 +7,8 @@ what was explicitly written (so ``create_app`` can prefer a UI-set value over th
 without confusing "user set 2" with "default 2")."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from settings import SettingsStore, DEFAULTS
@@ -128,3 +130,71 @@ def test_load_sanitizes_impossible_reasoning_consent(tmp_path):
 
     assert loaded.get()["reasoning_provider"] == "none"
     assert loaded.get()["reasoning_egress_consent"] is False
+
+
+def test_failed_runtime_apply_rolls_back_store_environment_and_policy(
+    tmp_path, monkeypatch,
+):
+    import app as app_module
+    from clip import llm
+
+    class FailConsentOnce(dict):
+        def __init__(self, values):
+            super().__init__(values)
+            self._failed = False
+
+        def __setitem__(self, key, value):
+            if key == "SPOOL_LLM_EGRESS_CONSENT" and not self._failed:
+                self._failed = True
+                raise OSError("injected environment write failure")
+            super().__setitem__(key, value)
+
+    monkeypatch.setattr(app_module, "DOWNLOAD_DIR", tmp_path)
+    monkeypatch.delenv("SPOOL_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("SPOOL_LLM_EGRESS_CONSENT", raising=False)
+    monkeypatch.delenv("SPOOL_OFFLINE", raising=False)
+    application = app_module.create_app()
+    try:
+        store = application.extensions["trove.settings"]
+        store.update({"fast_default": False})
+        path = tmp_path / "settings.json"
+        before_values = store.get()
+        before_overrides = store.overrides()
+        before_bytes = path.read_bytes()
+        policy = application.extensions["trove.network_policy"]
+
+        live_env = FailConsentOnce({
+            "SPOOL_LLM_PROVIDER": "none",
+            "UNRELATED": "preserved",
+        })
+        before_env = dict(live_env)
+        monkeypatch.setattr(app_module, "os", SimpleNamespace(environ=live_env))
+
+        with pytest.raises(OSError, match="injected environment write failure"):
+            application.extensions["trove.commit_settings"]({
+                "offline": True,
+                "reasoning_provider": "codex",
+                "reasoning_egress_consent": True,
+            })
+
+        assert policy.offline is False
+        assert store.get() == before_values
+        assert store.overrides() == before_overrides
+        assert path.read_bytes() == before_bytes
+        assert SettingsStore(path).get() == before_values
+        assert live_env == before_env
+
+        monkeypatch.setattr(
+            llm.subprocess,
+            "Popen",
+            lambda *_args, **_kwargs: pytest.fail("rolled-back settings launched Codex"),
+        )
+        provider = llm.CodexProvider(
+            network_policy=policy,
+            privacy_state=store.get,
+            bin="codex",
+        )
+        with pytest.raises(llm.ReasoningDisabledError):
+            provider.complete("transcript")
+    finally:
+        application.extensions["trove.shutdown"](wait=True)
