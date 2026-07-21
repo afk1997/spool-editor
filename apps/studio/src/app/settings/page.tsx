@@ -197,7 +197,7 @@ export default function SettingsScreen() {
                 <Row l="Engine" r={mono(`whisper.cpp ${ver("whisper_cpp")} · on-device`)} />
               </SettingCard>
               <SettingCard title="Moment-finding LLM">
-                <Row l="Provider" r={mono(providerName)} sub="Choose the remote reasoning provider in Privacy. None keeps transcript reasoning on this machine." />
+                <Row l="Provider" r={mono(providerName)} sub="Choose the remote reasoning provider in Privacy. None disables moment-finding reasoning." />
                 <Row l="Transcript egress" r={mono(egressState, egressState === "consented" ? "var(--warn)" : "var(--text-dim)")} sub="Codex remote reasoning sends transcript text only after explicit consent; media files are not sent to Codex." />
               </SettingCard>
             </div>
@@ -251,7 +251,7 @@ export default function SettingsScreen() {
                     }}
                     options={[{ value: "none", label: "None" }, { value: "codex", label: "Codex" }]}
                   />}
-                  sub="None keeps transcript reasoning on this machine. Codex is remote and requires explicit consent." />
+                  sub="None disables moment-finding reasoning. Codex is remote and requires explicit consent." />
                 {s?.reasoning_provider === "codex" && (
                   <Row
                     l="Codex transcript consent"

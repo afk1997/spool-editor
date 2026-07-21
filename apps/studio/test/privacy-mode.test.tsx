@@ -472,6 +472,40 @@ describe("canonical privacy status label", () => {
 });
 
 describe("truthful privacy copy", () => {
+  it("states that provider None disables reasoning while keeping Codex egress transcript-only", async () => {
+    settingsQuery = { data: engineSettings(), loading: false, reload: vi.fn() };
+    renderWithProvider(<SettingsScreen />);
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          "Choose the remote reasoning provider in Privacy. None disables moment-finding reasoning.",
+          { exact: true },
+        ),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText(
+        "Codex remote reasoning sends transcript text only after explicit consent; media files are not sent to Codex.",
+        { exact: true },
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/None keeps transcript reasoning on this machine/i),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Privacy" }));
+    expect(
+      screen.getByText(
+        "None disables moment-finding reasoning. Codex is remote and requires explicit consent.",
+        { exact: true },
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/None keeps transcript reasoning on this machine/i),
+    ).not.toBeInTheDocument();
+  });
+
   it("discloses network downloads and consented Codex transcript egress during onboarding", async () => {
     settingsQuery = {
       data: engineSettings({ reasoning_provider: "codex", reasoning_egress_consent: true }),
