@@ -349,6 +349,44 @@ def test_supplied_codex_rejects_a_different_call_level_privacy_source(
     assert policy.active_leases == 0
 
 
+def test_supplied_codex_cannot_disguise_callback_authority_as_shared_env(
+    tmp_path, monkeypatch,
+):
+    policy = NetworkPolicy()
+    shared_env = {
+        "SPOOL_OFFLINE": "1",
+        "SPOOL_LLM_PROVIDER": "codex",
+        "SPOOL_LLM_EGRESS_CONSENT": "1",
+    }
+    launches = []
+
+    def fake_popen(argv, **kwargs):
+        launches.append((argv, kwargs))
+        _write_o(argv, "UNSAFE")
+        return _FakeProc()
+
+    provider = llm.CodexProvider(
+        network_policy=policy,
+        privacy_state=lambda: _privacy(),
+        env=shared_env,
+        cwd=str(tmp_path),
+    )
+    monkeypatch.setattr(llm.shutil, "which", lambda binary: binary)
+    monkeypatch.setattr(llm.subprocess, "Popen", fake_popen)
+
+    with pytest.raises(llm.OfflineError) as denied:
+        llm.complete(
+            "transcript",
+            provider=provider,
+            env=shared_env,
+            network_policy=policy,
+        )
+
+    assert denied.value.error_category == "offline_network_disabled"
+    assert launches == []
+    assert policy.active_leases == 0
+
+
 def test_call_level_offline_policy_precedes_a_supplied_codex_policy(monkeypatch):
     owned_policy = NetworkPolicy()
     shared_policy = NetworkPolicy(offline=True)

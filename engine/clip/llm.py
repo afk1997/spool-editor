@@ -113,6 +113,16 @@ def _privacy_getter(
     return lambda: _env_privacy_state(live_env)
 
 
+def _privacy_authority(
+    privacy_state: PrivacyState | None,
+    env: Mapping[str, object] | None,
+) -> tuple[str, object]:
+    """Identify the one source actually consulted by :func:`_privacy_getter`."""
+    if privacy_state is not None:
+        return "state", privacy_state
+    return "env", os.environ if env is None else env
+
+
 def _require_remote_reasoning(state: Mapping[str, object], *, provider_name: str) -> None:
     """Validate the current applied privacy state, with Offline always strongest."""
     if state.get("offline") is True:
@@ -372,8 +382,9 @@ class CodexProvider:
                  timeout: int | None = None, cwd: str | None = None,
                  reasoning: str | None = None):
         self.network_policy = network_policy
-        self._privacy_state_source = privacy_state
-        self._privacy_env_source = env
+        self._privacy_authority_kind, self._privacy_authority_source = (
+            _privacy_authority(privacy_state, env)
+        )
         self.privacy_state = _privacy_getter(privacy_state, env)
         shared_registry = reasoning_process_registry(network_policy)
         if process_registry is not None and process_registry is not shared_registry:
@@ -587,22 +598,18 @@ def complete(
             raise ProviderUnavailableError(
                 "the supplied Codex provider is not bound to the shared network policy"
             )
-        if privacy_state is not None and privacy_state is not p._privacy_state_source:
-            _require_remote_reasoning(
-                _privacy_getter(privacy_state, env)(), provider_name=p.name
-            )
-            raise ProviderUnavailableError(
-                "the supplied Codex provider is not bound to the shared privacy state"
-            )
-        if (
-            privacy_state is None
-            and env is not None
-            and env is not p._privacy_env_source
-        ):
-            _require_remote_reasoning(_env_privacy_state(env), provider_name=p.name)
-            raise ProviderUnavailableError(
-                "the supplied Codex provider is not bound to the shared privacy state"
-            )
+        if privacy_state is not None or env is not None:
+            authority_kind, authority_source = _privacy_authority(privacy_state, env)
+            if (
+                authority_kind != p._privacy_authority_kind
+                or authority_source is not p._privacy_authority_source
+            ):
+                _require_remote_reasoning(
+                    _privacy_getter(privacy_state, env)(), provider_name=p.name
+                )
+                raise ProviderUnavailableError(
+                    "the supplied Codex provider is not bound to the shared privacy state"
+                )
         return p.complete(prompt, system=system)
 
     if network_policy is None:
