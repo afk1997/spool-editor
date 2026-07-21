@@ -409,6 +409,26 @@ def test_phase_zero_signal_reads_disable_durable_cache(monkeypatch):
     ]
 
 
+def test_phase_zero_transcript_search_disables_index_backfill(monkeypatch):
+    import mcp_server
+
+    calls = []
+
+    class CountingClient:
+        def search_transcripts(self, query, **kwargs):
+            calls.append((query, kwargs))
+            return {"query": query, "matches": [], "returned": 0}
+
+    monkeypatch.setattr(mcp_server, "_client", CountingClient())
+    server = mcp_server._build_server()
+
+    asyncio.run(server.call_tool("search_transcripts", {"query": "hello"}))
+
+    assert calls == [
+        ("hello", {"limit": 50, "context": 60, "backfill_index": False})
+    ]
+
+
 def test_contract_fixture_mcp_word_edit_and_bulk_schemas_make_zero_client_calls(
     monkeypatch,
 ):

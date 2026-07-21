@@ -266,7 +266,7 @@ def _build_server():
         ``start_seconds`` and ``end_seconds`` so the agent can deep-link.
         """
         return _safe("search_transcripts", lambda: _client.search_transcripts(
-            query, limit=limit, context=context))
+            query, limit=limit, context=context, backfill_index=False))
 
     @mcp.tool()
     def get_transcript_status(transcript_id: str) -> dict:

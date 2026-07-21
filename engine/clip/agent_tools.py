@@ -77,7 +77,9 @@ TOOLS: list[Tool] = [
          lambda c, a: c.cancel_transcribe(a["transcript_id"]), writes=True),
     Tool("search_transcripts", "Substring search across completed transcripts.",
          {"query": "str", "limit": "optional int"},
-         lambda c, a: c.search_transcripts(a["query"], limit=_i(a.get("limit"), 25))),
+         lambda c, a: c.search_transcripts(
+             a["query"], limit=_i(a.get("limit"), 25), backfill_index=False,
+         )),
 
     # ---- discovery / ranking -------------------------------------------------
     Tool("find_moments", "Find clip-worthy moments in a source's transcript (starts a job).",

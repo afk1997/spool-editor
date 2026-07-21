@@ -1858,6 +1858,14 @@ def test_storage_attributes_files_to_jobs(client, tmp_path):
 
 # ---- transcript search ---------------------------------------------
 
+def _durable_filesystem_snapshot(root: Path) -> dict[str, tuple[bytes, int]]:
+    return {
+        str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
 def test_search_requires_query(client):
     _, c = client
     r = c.get("/api/v1/transcripts/search")
@@ -1905,6 +1913,34 @@ def test_search_returns_matches_with_snippet(client, tmp_path):
     assert m["title"] == "ML clip"
     assert "machine" in m["snippet"].lower()
     assert m["start_seconds"] == pytest.approx(0.5)
+
+
+def test_search_no_backfill_returns_matches_without_sqlite_or_filesystem_delta(
+    client, tmp_path
+):
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())
+    idx = app.extensions["trove.transcript_index"]
+    assert idx.indexed_ids() == set()
+    download_dir = app.extensions["trove.download_dir"]
+    before = _durable_filesystem_snapshot(download_dir)
+
+    response = c.get("/api/v1/transcripts/search?q=machine&backfill_index=0")
+
+    assert response.status_code == 200
+    assert response.get_json()["returned"] == 1
+    assert idx.indexed_ids() == set()
+    assert _durable_filesystem_snapshot(download_dir) == before
+
+
+def test_search_default_rest_path_keeps_index_backfill(client, tmp_path):
+    app, c = client
+    _seed_done_transcript(app, tmp_path, words_data=_editable_words())
+    idx = app.extensions["trove.transcript_index"]
+
+    assert c.get("/api/v1/transcripts/search?q=machine").get_json()["returned"] == 1
+
+    assert idx.indexed_ids() == {"t1"}
 
 
 def test_search_stays_correct_after_a_word_edit(client, tmp_path):

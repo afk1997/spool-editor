@@ -1095,6 +1095,9 @@ def search_transcripts():
     except ValueError:
         ctx = 60
     ctx = max(0, min(400, ctx))
+    backfill_index = str(request.args.get("backfill_index", "1")).strip().lower() not in {
+        "0", "false", "no", "off",
+    }
 
     needle = q.lower()
     matches = []
@@ -1124,10 +1127,10 @@ def search_transcripts():
         # Flat text + per-char → word-position map (shared builder), so a string-match offset
         # converts back to the word range and thence to start/end timestamps for deep-linking.
         flat, char_to_widx = transcript_io.flat_text(words, data.get("segments") or [])
-        # Self-healing backfill: index any DONE transcript we had to scan because it wasn't yet
-        # indexed (pre-existing library, or completed before this feature) — so the next search
-        # can skip it. Best-effort; the store swallows its own errors.
-        if idx is not None and tj.id not in indexed:
+        # Normal REST reads self-heal any DONE transcript they had to scan because it wasn't yet
+        # indexed (pre-existing library, or completed before this feature). Agent/MCP requests
+        # explicitly disable this durable optimization; correctness still comes from the scan.
+        if backfill_index and idx is not None and tj.id not in indexed:
             idx.index(tj.id, flat)
         if not flat:
             continue

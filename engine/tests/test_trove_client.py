@@ -169,6 +169,17 @@ def test_search_transcripts_url_encodes_query(captured, monkeypatch):
     )
 
 
+def test_search_transcripts_can_disable_index_backfill(captured, monkeypatch):
+    monkeypatch.setenv("TROVE_URL", "http://x")
+
+    TroveClient().search_transcripts("hello", backfill_index=False)
+
+    assert captured[0]["url"] == (
+        "http://x/api/v1/transcripts/search"
+        "?q=hello&limit=50&context=60&backfill_index=0"
+    )
+
+
 def test_export_transcript_rejects_unknown_format(monkeypatch):
     monkeypatch.setenv("TROVE_URL", "http://x")
     with pytest.raises(ValueError):

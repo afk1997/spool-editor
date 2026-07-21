@@ -221,6 +221,27 @@ def test_phase_zero_source_energy_agent_read_disables_durable_cache():
     ]
 
 
+def test_phase_zero_transcript_search_agent_read_disables_index_backfill():
+    calls = []
+
+    class Client:
+        def search_transcripts(self, query, **kwargs):
+            calls.append((query, kwargs))
+            return {"query": query, "matches": [], "returned": 0}
+
+    out = agent.run_agent(
+        "search for hello",
+        client=Client(),
+        provider=_provider(
+            json.dumps({"tool": "search_transcripts", "args": {"query": "hello"}}),
+            json.dumps({"final": {"reply": "done"}}),
+        ),
+    )
+
+    assert out["reply"] == "done"
+    assert calls == [("hello", {"limit": 25, "backfill_index": False})]
+
+
 @pytest.mark.parametrize(
     "tool_name",
     sorted(set(agent_tools.CATALOG) - READ_ONLY_TOOL_NAMES),

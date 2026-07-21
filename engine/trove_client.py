@@ -334,9 +334,12 @@ class TroveClient:
         return self.get(f"/api/v1/transcripts/{tid}/chunk" + qs)
 
     def search_transcripts(self, query: str, *, limit: int = 50,
-                           context: int = 60) -> dict:
+                           context: int = 60,
+                           backfill_index: bool = True) -> dict:
         qs = (f"?q={urllib.parse.quote(query)}"
               f"&limit={int(limit)}&context={int(context)}")
+        if not backfill_index:
+            qs += "&backfill_index=0"
         return self.get("/api/v1/transcripts/search" + qs)
 
     # ----- clips (the render queue) -----------------------------------
