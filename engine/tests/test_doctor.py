@@ -46,11 +46,38 @@ def test_doctor_reports_machine_tools_encoders(client):
     assert isinstance(body["ok"], bool)
 
 
-def test_doctor_is_unauthenticated(monkeypatch, tmp_path):
-    """Reachable before a token exists — the onboarding screen depends on it."""
+@pytest.mark.parametrize("authorization", [None, "Bearer wrong-token"])
+def test_doctor_requires_configured_token(monkeypatch, tmp_path, authorization):
+    """A protected/public engine cannot leak its machine fingerprint."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TROVE_RATE_LIMIT", "0")
     monkeypatch.setenv("TROVE_TOKEN", "secret-xyz")
     app = create_app()
     c = app.test_client()
-    assert c.get("/api/v1/doctor").status_code == 200
+    headers = {"Authorization": authorization} if authorization is not None else {}
+    response = c.get("/api/v1/doctor", headers=headers)
+    assert response.status_code == 401
+    assert response.get_json() == {"error": "unauthorized"}
+
+
+def test_doctor_accepts_configured_token(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TROVE_RATE_LIMIT", "0")
+    monkeypatch.setenv("TROVE_TOKEN", "secret-xyz")
+    app = create_app()
+    c = app.test_client()
+    response = c.get(
+        "/api/v1/doctor",
+        headers={"Authorization": "Bearer secret-xyz"},
+    )
+    assert response.status_code == 200
+    assert "machine" in response.get_json()
+
+
+def test_openapi_marks_doctor_as_token_protected(client):
+    _, c = client
+    summary = c.get("/api/v1/openapi.json").get_json()["paths"]["/doctor"]["get"][
+        "summary"
+    ]
+    assert "token" in summary.lower()
+    assert "unauthenticated" not in summary.lower()

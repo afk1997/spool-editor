@@ -2,9 +2,9 @@
 
 Wraps the JobManager / TranscribeJobManager / models_store so external
 clients (the ``trove`` CLI and the ``trove-mcp`` MCP server) don't have
-to scrape HTML or reach into the on-disk JSON. Every route is JSON-in
-/ JSON-out and gated by the same ``token_required`` decorator as the
-rest of the API surface.
+to scrape HTML or reach into the on-disk JSON. Routes are JSON-in /
+JSON-out and token-protected when configured, except the narrow public
+metadata probes: health, capabilities, and OpenAPI.
 
 Complex actions (enqueue download / resume / start transcribe)
 delegate to closures stashed on ``app.extensions['trove.actions']`` by
@@ -688,13 +688,15 @@ def capabilities():
 # ----- dependency doctor ---------------------------------------------
 
 @api_v1_bp.get("/doctor")
+@token_required
 def doctor():
     """Dependency doctor: machine probe + presence/version of the external
     tools the pipeline needs (ffmpeg, yt-dlp, whisper.cpp, Python) plus the
     ffmpeg encoders available for hardware-aware export.
 
-    Unauthenticated by design — like ``/health`` and ``/capabilities``, the
-    onboarding screen calls this before any token exists. Read-only.
+    Token-protected when the engine has a token because the response fingerprints
+    the host. The Studio proxy supplies its server-side token; direct clients can
+    use the public capabilities probe to learn that authentication is required.
     """
     import importlib.metadata as ilm
     import platform
@@ -2659,7 +2661,7 @@ _OPENAPI_DOC = {
     "paths": {
         "/health":             {"get":  {"summary": "Liveness probe"}},
         "/capabilities":       {"get":  {"summary": "Server feature / limit / scope registry (unauthenticated)"}},
-        "/doctor":             {"get":  {"summary": "Dependency doctor: machine probe + tool presence/versions + encoders (unauthenticated)"}},
+        "/doctor":             {"get":  {"summary": "Dependency doctor: machine probe + tool presence/versions + encoders (token protected when configured)"}},
         "/jobs":               {
             "get":  {"summary": "List download jobs (paginated, filterable)",
                       "parameters": [

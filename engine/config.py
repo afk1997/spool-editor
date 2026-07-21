@@ -82,7 +82,8 @@ def assert_safe_bind(host: str, *, env: dict[str, str] | None = None) -> None:
 
     Allows the bind when either of the following is true:
       * host is loopback (127.0.0.1, ::1, localhost)
-      * TROVE_TOKEN is set (every /api/* request must authenticate)
+      * TROVE_TOKEN is set (API data and mutation routes authenticate;
+        only health, capabilities, and OpenAPI metadata stay public)
 
     `env` is injectable for unit tests; defaults to os.environ.
     """
