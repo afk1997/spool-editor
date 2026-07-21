@@ -1,6 +1,7 @@
 import socket
 
 import pytest
+import safety
 from safety import is_safe_url
 from network_policy import NetworkPolicy, NetworkPolicyError
 
@@ -256,6 +257,47 @@ def test_cors_allows_local_or_missing_origin_mutation(monkeypatch, origin):
     assert len(limiter._hits) == 1
 
 
+def test_resolve_client_ip_ignores_forwarded_header_by_default():
+    assert safety.resolve_client_ip(
+        "127.0.0.1",
+        "198.51.100.10, 203.0.113.7",
+        trusted_proxy_hops=0,
+    ) == "127.0.0.1"
+
+
+@pytest.mark.parametrize(
+    ("forwarded_for", "trusted_proxy_hops", "expected"),
+    [
+        ("198.51.100.10, 203.0.113.7", 1, "203.0.113.7"),
+        ("198.51.100.10, 203.0.113.7", 2, "198.51.100.10"),
+        ("198.51.100.10", 2, "127.0.0.1"),
+        ("not-an-ip", 1, "127.0.0.1"),
+        ("not-an-ip, 203.0.113.7", 1, "127.0.0.1"),
+        ("", 1, "127.0.0.1"),
+        (None, 1, "127.0.0.1"),
+        ("2001:0db8:0:0:0:0:0:1", 1, "2001:db8::1"),
+        ("::ffff:192.0.2.1", 1, "192.0.2.1"),
+    ],
+)
+def test_resolve_client_ip_uses_only_a_valid_trusted_chain(
+    forwarded_for, trusted_proxy_hops, expected,
+):
+    assert safety.resolve_client_ip(
+        "127.0.0.1",
+        forwarded_for,
+        trusted_proxy_hops=trusted_proxy_hops,
+    ) == expected
+
+
+def test_resolve_client_ip_canonicalizes_or_safely_defaults_remote_address():
+    assert safety.resolve_client_ip(
+        "2001:0db8:0:0:0:0:0:1", None, trusted_proxy_hops=0,
+    ) == "2001:db8::1"
+    assert safety.resolve_client_ip(
+        None, "198.51.100.10", trusted_proxy_hops=0,
+    ) == "unknown"
+
+
 import time
 
 
@@ -294,7 +336,6 @@ def test_rate_limiter_window_resets(monkeypatch):
 # ---------------------------------------------------------------------------
 # Signed-URL system: scope, expiry, and decorator-factory verification.
 # ---------------------------------------------------------------------------
-import safety
 from safety import (
     sign_resource, verify_signature, signed_query,
     token_or_sig_required,

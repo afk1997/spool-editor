@@ -28,6 +28,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.delenv("SPOOL_OFFLINE", raising=False)
     monkeypatch.delenv("SPOOL_LLM_PROVIDER", raising=False)
     monkeypatch.delenv("SPOOL_LLM_EGRESS_CONSENT", raising=False)
+    monkeypatch.delenv("TROVE_TRUST_PROXY_HOPS", raising=False)
     # Isolate download dir so storage / search tests don't see real
     # files (and don't write transcribe_jobs.json into the repo).
     import app as _app_module
@@ -1309,6 +1310,70 @@ def _swap_rate_limiter(app, rate=2, window=60):
                 patched += 1
     if patched == 0:
         raise RuntimeError("could not find rate_limiter closures to patch")
+
+
+def test_rate_limit_ignores_spoofed_forwarded_for_by_default(client):
+    app, c = client
+    _swap_rate_limiter(app, rate=1)
+
+    statuses = [
+        c.get(
+            "/api/v1/jobs/missing/file",
+            headers={"X-Forwarded-For": forwarded},
+            environ_overrides={"REMOTE_ADDR": "127.0.0.1"},
+        ).status_code
+        for forwarded in ("198.51.100.1", "198.51.100.2")
+    ]
+
+    assert statuses == [404, 429]
+    assert set(app.extensions["trove.rate_limiter"]._hits) == {"127.0.0.1"}
+
+
+def test_rate_limit_uses_valid_rightmost_trusted_proxy_hop(tmp_path, monkeypatch):
+    import app as app_module
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TROVE_TRUST_PROXY_HOPS", "1")
+    monkeypatch.delenv("TROVE_TOKEN", raising=False)
+    monkeypatch.setattr(app_module, "DOWNLOAD_DIR", tmp_path / "proxy-downloads")
+    created = app_module.create_app()
+    limiter = created.extensions["trove.rate_limiter"]
+    limiter.rate = 1
+    c = created.test_client()
+
+    try:
+        rightmost_statuses = [
+            c.get(
+                "/api/v1/jobs/missing/file",
+                headers={"X-Forwarded-For": forwarded},
+                environ_overrides={"REMOTE_ADDR": "127.0.0.1"},
+            ).status_code
+            for forwarded in (
+                "198.51.100.1, 203.0.113.9",
+                "198.51.100.2, 203.0.113.9",
+                "198.51.100.2, 203.0.113.10",
+            )
+        ]
+        malformed_statuses = [
+            c.get(
+                "/api/v1/jobs/missing/file",
+                headers={"X-Forwarded-For": forwarded},
+                environ_overrides={"REMOTE_ADDR": "127.0.0.1"},
+            ).status_code
+            for forwarded in ("not-an-ip", "also-not-an-ip")
+        ]
+
+        assert rightmost_statuses == [404, 429, 404]
+        assert malformed_statuses == [404, 429]
+        assert set(limiter._hits) == {
+            "127.0.0.1",
+            "203.0.113.9",
+            "203.0.113.10",
+        }
+    finally:
+        created.extensions["trove.jobs"].shutdown(wait=True)
+        created.extensions["trove.transcribe"].shutdown(wait=True)
+        created.extensions["trove.clips"].shutdown(wait=True)
 
 
 def test_rate_limit_exempts_status_polls(client):

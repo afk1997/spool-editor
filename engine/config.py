@@ -11,7 +11,11 @@ Everything that needs a host, port, or base URL imports from here.
 """
 from __future__ import annotations
 
+import logging
 import os
+
+
+_logger = logging.getLogger(__name__)
 
 
 DEFAULT_HOST: str = os.environ.get("HOST", "127.0.0.1")
@@ -33,6 +37,25 @@ class UnauthenticatedPublicBindError(RuntimeError):
 
 
 _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+
+def trusted_proxy_hops(*, env: dict[str, str] | None = None) -> int:
+    """Return the explicitly configured count of trusted right-most proxies."""
+    e = env if env is not None else os.environ
+    raw = e.get("TROVE_TRUST_PROXY_HOPS")
+    if raw is None:
+        return 0
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = -1
+    if value < 0:
+        _logger.warning(
+            "Invalid TROVE_TRUST_PROXY_HOPS=%r; defaulting to 0",
+            raw,
+        )
+        return 0
+    return value
 
 
 def assert_safe_bind(host: str, *, env: dict[str, str] | None = None) -> None:

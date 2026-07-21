@@ -35,14 +35,44 @@ _BLOCKED_NETWORKS = [
 ]
 
 
-def _is_blocked_ip(addr: str) -> bool:
+def _parse_ip_address(addr: str | None):
+    if not isinstance(addr, str) or not addr.strip():
+        return None
     try:
-        ip = ipaddress.ip_address(addr)
+        ip = ipaddress.ip_address(addr.strip())
     except ValueError:
-        return False
+        return None
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
+    return ip
+
+
+def _is_blocked_ip(addr: str) -> bool:
+    ip = _parse_ip_address(addr)
+    if ip is None:
+        return False
     return any(ip in net for net in _BLOCKED_NETWORKS)
+
+
+def resolve_client_ip(
+    remote_addr: str | None,
+    forwarded_for: str | None,
+    *,
+    trusted_proxy_hops: int,
+) -> str:
+    """Resolve a canonical limiter identity from an explicitly trusted XFF chain."""
+    remote_ip = _parse_ip_address(remote_addr)
+    fallback = str(remote_ip) if remote_ip is not None else "unknown"
+    if trusted_proxy_hops <= 0 or not forwarded_for:
+        return fallback
+
+    parts = [part.strip() for part in forwarded_for.split(",")]
+    if len(parts) < trusted_proxy_hops:
+        return fallback
+    parsed = [_parse_ip_address(part) for part in parts]
+    if any(address is None for address in parsed):
+        return fallback
+    return str(parsed[-trusted_proxy_hops])
 
 
 def _url_host_if_safe_shape(url: str) -> str | None:

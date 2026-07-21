@@ -92,3 +92,21 @@ def test_error_message_lists_three_remedies():
         assert "TROVE_ALLOW_UNAUTH_PUBLIC" in msg
     else:
         pytest.fail("expected UnauthenticatedPublicBindError")
+
+
+def test_trusted_proxy_hops_defaults_to_zero_and_accepts_nonnegative_values():
+    assert config.trusted_proxy_hops(env={}) == 0
+    assert config.trusted_proxy_hops(env={"TROVE_TRUST_PROXY_HOPS": "0"}) == 0
+    assert config.trusted_proxy_hops(env={"TROVE_TRUST_PROXY_HOPS": " 2 "}) == 2
+
+
+@pytest.mark.parametrize("value", ["not-an-int", "-1", ""])
+def test_invalid_trusted_proxy_hops_falls_back_with_warning(caplog, value):
+    with caplog.at_level("WARNING"):
+        result = config.trusted_proxy_hops(
+            env={"TROVE_TRUST_PROXY_HOPS": value},
+        )
+
+    assert result == 0
+    assert "TROVE_TRUST_PROXY_HOPS" in caplog.text
+    assert "defaulting to 0" in caplog.text

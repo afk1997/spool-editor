@@ -5,7 +5,11 @@ import threading
 from pathlib import Path
 from flask import Flask, jsonify, request
 
-from safety import RateLimiter, attach_cors, attach_security_headers, is_safe_url
+from safety import (
+    RateLimiter, attach_cors, attach_security_headers, is_safe_url,
+    resolve_client_ip,
+)
+from config import trusted_proxy_hops
 from runner import run_download, run_info
 from jobs import AttemptUnwindingError, JobManager, Job, JobStatus
 from attempt_staging import AttemptOutcome, Promotion
@@ -57,6 +61,7 @@ def create_app() -> Flask:
     app = Flask(__name__)
     attach_security_headers(app)
     attach_cors(app)
+    trusted_hops = trusted_proxy_hops()
 
     @app.errorhandler(AttemptUnwindingError)
     def _attempt_unwinding(_error):
@@ -280,7 +285,11 @@ def create_app() -> Flask:
         # Stash IP on g so the after-request hook can attach
         # X-RateLimit-* headers without recomputing.
         from flask import g as _g
-        ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+        ip = resolve_client_ip(
+            request.remote_addr,
+            request.headers.get("X-Forwarded-For"),
+            trusted_proxy_hops=trusted_hops,
+        )
         _g.trove_rl_ip = ip
         if _is_poll_exempt():
             return None
