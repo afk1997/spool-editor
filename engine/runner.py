@@ -50,6 +50,8 @@ def build_info_argv(url: str) -> list[str]:
     _check_url_shape(url)
     return [
         _ytdlp_bin(),
+        "--ignore-config",
+        "--no-plugin-dirs",
         "--no-playlist",
         "-j",
         *_cookie_args(),
@@ -82,6 +84,8 @@ def build_download_argv(
     concurrent_fragments = max(1, min(32, _cf))
     argv: list[str] = [
         _ytdlp_bin(),
+        "--ignore-config",
+        "--no-plugin-dirs",
         "--no-playlist",
         "--concurrent-fragments", str(concurrent_fragments),
         "--retries", "5",

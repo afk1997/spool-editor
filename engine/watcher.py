@@ -195,7 +195,8 @@ def list_playlist_items(url: str, *, network_policy: NetworkPolicy,
             return list(hit["items"])
         try:
             out = _run_listing_process(
-                [ytdlp, "--flat-playlist", "--print", "url",
+                [ytdlp, "--ignore-config", "--no-plugin-dirs",
+                 "--flat-playlist", "--print", "url",
                  "--playlist-end", str(int(limit)), "--", target],
                 timeout=timeout,
             ).stdout

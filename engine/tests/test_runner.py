@@ -29,6 +29,11 @@ def test_info_argv_dash_dash_separator():
     assert "-j" in argv
 
 
+def test_info_argv_disables_user_config_and_plugins_immediately_after_binary():
+    argv = build_info_argv("https://example.com/video")
+    assert argv[1:3] == ["--ignore-config", "--no-plugin-dirs"]
+
+
 def test_info_argv_injects_cookies_when_env_set(monkeypatch):
     monkeypatch.setenv("TROVE_COOKIES_FROM_BROWSER", "safari")
     argv = build_info_argv("https://example.com/video")
@@ -53,6 +58,16 @@ def test_download_argv_audio_mode(tmp_path):
     assert "--audio-format" in argv
     assert argv[argv.index("--audio-format") + 1] == "mp3"
     assert argv[-2:] == ["--", "https://example.com/v"]
+
+
+def test_download_argv_disables_user_config_and_plugins_immediately_after_binary(tmp_path):
+    argv = build_download_argv(
+        url="https://example.com/v",
+        out_template=str(tmp_path / "out.%(ext)s"),
+        format_choice="video",
+        format_id=None,
+    )
+    assert argv[1:3] == ["--ignore-config", "--no-plugin-dirs"]
 
 
 def test_download_argv_video_with_format_id(tmp_path):

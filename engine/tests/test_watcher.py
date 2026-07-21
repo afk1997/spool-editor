@@ -41,6 +41,27 @@ def test_list_playlist_items_returns_canonical_urls_not_bare_ids(monkeypatch):
     assert items == ["https://site/watch?v=aaa", "https://site/watch?v=bbb"]
 
 
+def test_playlist_listing_disables_user_config_and_plugins_immediately_after_binary(monkeypatch):
+    captured = {}
+
+    def fake_run(argv, **_kwargs):
+        captured["argv"] = argv
+        return types.SimpleNamespace(stdout="", returncode=0)
+
+    monkeypatch.setattr(watcher, "_run_listing_process", fake_run)
+    list_playlist_items(
+        "https://site/playlist",
+        ytdlp="custom-yt-dlp",
+        network_policy=NetworkPolicy(),
+    )
+
+    assert captured["argv"][:3] == [
+        "custom-yt-dlp",
+        "--ignore-config",
+        "--no-plugin-dirs",
+    ]
+
+
 def _ok_status(_job):
     return "done"
 
