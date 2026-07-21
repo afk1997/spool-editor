@@ -8,7 +8,7 @@
 
 **Stack (decided).** Backend: keep trove's **Python 3.12 + Flask** headless JSON API (`routes/api_v1.py`). Persistence: trove's **atomic JSON job store** now → **SQLite (FTS5)** in Phase 2. Transcription: **whisper.cpp** (`pywhispercpp`) — drop `openai-whisper`. MCP: **extend trove's FastMCP stdio server**. UI: **Next.js + Tailwind + shadcn** (own), over HTTP + a progress stream (SSE/WS). Packaging: trove's Docker + script (docker-first; Tauri later). Diarization (PyTorch via resemblyzer, ~1.3 GB) stays **opt-in**.
 
-**Golden rule.** The UI and the MCP server are **two clients of the same JSON API → same engine → same job store → same files on disk.** Agent mode and manual mode never diverge.
+**Golden target.** The UI and the MCP server are **two clients of the same JSON API → same engine → same job store → same files on disk.** Phase 0 already shares read state, but deliberately blocks agent mutations; manual/agent mutation parity starts only after the Phase 4 approval and undo contract ships.
 
 **Read with:** `Spool_00_Product-Overview.md` (vision, features, risks), `Spool_Design-Brief.md` (UI direction), `Spool_Design-Review.md` (review of the approved demo), and the demo itself, **`Spool (standalone) (1).html`**. **The build order is the phased roadmap in §5; the front-end build + engineering standards are in §6.**
 
@@ -63,12 +63,12 @@ URL/file ─[trove download job]→ 16k WAV → whisper.cpp words → VAD realig
 
 ## 2. The agentic model
 
-Two ways to drive one engine (Overview §3):
+The target product has two ways to drive one engine (Overview §3):
 
 - **Agent mode** — the LLM calls MCP tools and pauses for **elicitation** at human-judgment points (which candidates? 9:16/16:9/1:1? pan vs split? confirm ROI? caption style?). Rendered as inline cards in the UI *or* answered in chat.
 - **Manual mode** — the user clicks through the studio; the engine runs deterministically.
 
-Both call the **same engine functions over the same API**. The MCP layer is trove's `mcp_server.py` **extended** with the clip tools (§4) — never a parallel implementation.
+Both ultimately use the **same engine functions over the same API**. The MCP layer is trove's Python `mcp_server.py` **extended** with the clip tools (§4) — never a parallel implementation. During Phase 0, external MCP is read-only and every mutation returns `agent_mutation_disabled`; mutation parity begins only after the Phase 4 approval and undo contract ships.
 
 ---
 
@@ -121,14 +121,14 @@ Each phase is independently shippable. Format: **Goal · Reuse (already built) �
 - **Goal:** stand trove up as Spool's headless backend; strip its UI; confirm the API + MCP drive the front half.
 - **Reuse:** the entire `Keep` column of §1.1 — downloader, jobs, transcription, diarization, models, security, MCP, Docker, tests.
 - **Build:** remove `templates/static/styles/transcript_editor` (htmx); confirm `api_v1` exposes everything the UI needs (jobs, transcripts, models, storage, capabilities) + a progress stream (SSE/WS); fold trove into the Spool monorepo (or as a package dep); standardize on **whisper.cpp** (remove any `openai-whisper`); a **dependency-doctor** endpoint (`machine.probe` + ffmpeg/yt-dlp/whisper.cpp checks).
-- **Done-when:** from a clean checkout, `docker compose up` → POST a URL to `api_v1` → file downloads with live progress → transcribe yields `words.json` + `.srt`; the **same flow works from Claude Desktop via the MCP server**; no htmx anywhere.
+- **Done-when:** from a clean checkout, `docker compose up` → POST a URL to `api_v1` → file downloads with live progress → transcribe yields `words.json` + `.srt`; Claude Desktop can inspect that same state through the Python MCP server, while MCP mutations fail closed with the Phase 0 envelope and make zero underlying calls; no htmx anywhere.
 
 ### Phase 1 — Core clip loop + own UI (MVP)
 - **Goal:** the end-to-end "paste → clip," in Spool's own UI **and** via the agent. This is the demo.
 - **Reuse:** trove ingest/transcribe/jobs/MCP/diarization; base engine `analyze.py`/`build_pan.py`/`build_ass.py`.
 - **Build — engine:** new modules `moments.py` (LLM moment-finding over `words.json`), `cutter.py` (`ffmpeg -c copy` trim), `reframe.py` (detect ROIs on a sample frame; build the **diar⊕ROI** speaker timeline; wrap `build_pan.py`; pan/split/center), `captioner.py` (`build_ass.py` fed from `words.json` sliced to the clip; opus/karaoke/minimal), `exporter.py` (final mp4 + platform preset); register clip/render job types.
 - **Build — MCP:** add the clip tools + elicitation + `spool://` resources (§4).
-- **Build — UI (own Next.js; rebuilt from the approved demo `Spool (standalone) (1).html`):** the Phase-1 screens — S0 Onboarding/Dependency-Doctor, S1 Home, **S2 Import/Downloader**, S3 Library, S4 Project/Transcript, S5 Clip Discovery, S7 Reframe (basic), S8 Caption Studio (presets), S10 Render Queue, S11 Clips Library — plus the global **Agent panel**, **⌘K**, and the **status/queue bar**. **Strip every bit of the demo's dummy data and wire each screen to `api_v1` + the progress stream; the Agent panel to the extended MCP** (§6). Follow the front-end standards in §6 (componentized, typed clients, no in-browser Babel, perf budget).
+- **Build — UI (own Next.js; rebuilt from the approved demo `Spool (standalone) (1).html`):** the Phase-1 screens — S0 Onboarding/Dependency-Doctor, S1 Home, **S2 Import/Downloader**, S3 Library, S4 Project/Transcript, S5 Clip Discovery, S7 Reframe (basic), S8 Caption Studio (presets), S10 Render Queue, S11 Clips Library — plus the global **Agent panel**, **⌘K**, and the **status/queue bar**. **Strip every bit of the demo's dummy data and wire each screen to `api_v1` + the progress stream; the Agent panel uses REST `/api/v1/agent`, while external MCP clients use the Python stdio server** (§6). Follow the front-end standards in §6 (componentized, typed clients, no in-browser Babel, perf budget).
 - **Done-when:** paste a YouTube URL → download → transcribe → agent proposes candidates → user picks (card *or* chat) → a 2-person 16:9 moment renders to **9:16 with a working diar⊕ROI speaker-pan + opus captions** → lands in the Clips library as a real `.mp4`; achievable **both** via the UI **and** via one agent sentence; works **offline** after the download.
 
 ### Phase 2 — Studios + editor
@@ -147,7 +147,7 @@ Each phase is independently shippable. Format: **Goal · Reuse (already built) �
 - **Build:** publish/schedule to TikTok/Reels/Shorts/LinkedIn/X (OAuth tokens in the OS keychain); content calendar; per-platform caption/hashtags; analytics (views/retention/likes); feed performance back into ranking weights. Optional light multi-seat/agency.
 - **Done-when:** schedule a clip from the calendar, see its performance, and watch the ranking adapt.
 
-**Cross-phase invariants:** keep yt-dlp on master + updater; diarization opt-in (one-click enable); UI action ⇄ MCP tool parity at every step; everything inspectable, undoable, offline-capable.
+**Cross-phase invariants:** keep yt-dlp on master + updater; diarization opt-in (one-click enable); UI and MCP read the same state; everything inspectable, undoable, offline-capable. Mutation parity is gated on the Phase 4 approval and undo contract and fails closed until then.
 
 ---
 
@@ -163,10 +163,10 @@ The demo is a single ~1.6 MB HTML file that compiles React with the **in-browser
 
 ### 6.2 Strip ALL dummy content & wire everything up *(core directive)*
 The demo is full of hard-coded sample data (fake projects like "Ep.42 — Why Local-First…", fake clips/jobs, scores 92/88, "talking-head/interview" cards). **Remove all of it.** Nothing ships with mock data baked in.
-- Every screen pulls **live data** from trove's **`api_v1`** (and the **MCP** tools for the agent surface). No placeholder arrays, no lorem, no `setTimeout` fake progress.
-- Every control invokes a **real endpoint/tool**.
+- Every screen pulls **live data** from trove's **`api_v1`**. External MCP clients read the same engine through the Python FastMCP server. No placeholder arrays, no lorem, no `setTimeout` fake progress.
+- Every enabled manual control invokes a **real endpoint**. Phase 0 agent mutations remain explicitly disabled until the approval and undo contract exists.
 - **Loading / empty / error / progress** states are driven by **real** job + request state (the SSE/WS progress stream), not fakery.
-- Wire the **Agent panel** to the extended MCP server and render **elicitation** requests as the inline cards.
+- Wire the Studio **Agent panel** to REST `/api/v1/agent`; in Phase 0 it renders the structured `agent_mutation_disabled` response. A later gated mutation phase adds approval and inline elicitation.
 
 **Screen → wiring map**
 
@@ -181,7 +181,7 @@ The demo is full of hard-coded sample data (fake projects like "Ep.42 — Why Lo
 | Render Queue | `jobs.*` + progress stream |
 | Clips Library | `library.query` |
 | Settings | `models.*`, `server_capabilities`, config |
-| Agent panel | extended MCP tools + elicitation |
+| Agent panel | REST `/api/v1/agent` (Phase 0 mutation-disabled; gated execution + elicitation are future work) |
 
 ### 6.3 Modularization & architecture
 - **Monorepo** (pnpm + turbo): `apps/studio` (Next.js), `packages/ui` (design system), `packages/api-client` (typed REST client mirroring `trove_client`), and `packages/types` (shared TS types ↔ the engine's data model in §3), alongside the Python `engine`. Agent integrations use the working FastMCP stdio server in `engine/mcp_server.py`, which delegates through `trove_client.py` to the same JSON API; there is no TypeScript MCP transport package.

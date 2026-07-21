@@ -1,7 +1,8 @@
 # Spool
 
 **Local-first, open-source clip studio** — turn any long video into platform-ready vertical
-clips, driven by an agent, running entirely on your machine. No per-clip credits, no uploads.
+clips on your machine, with editor-grade manual control and a gated agent surface. No per-clip
+credits, no uploads.
 
 Spool pairs a deterministic offline engine
 
@@ -9,13 +10,15 @@ Spool pairs a deterministic offline engine
 URL/file → download → transcribe → find moments → cut → reframe → caption → export
 ```
 
-with two equal front-ends over **one** JSON API:
+with two local clients over **one** JSON API:
 
-- a **Next.js studio** — manual, editor-grade control, and
-- a **local MCP server** — agent mode (Claude Desktop/Code, Cursor, any MCP client).
+- a **Next.js studio** — manual, editor-grade control over the authenticated REST API, and
+- a **Python FastMCP stdio server** — read-only inspection for Claude Desktop/Code, Cursor,
+  and other MCP clients during Phase 0.
 
-> **Golden rule:** the UI and the MCP server are two clients of the same JSON API → same
-> engine → same job store → same files on disk. Agent mode and manual mode never diverge.
+> **Phase 0 safety boundary:** both clients read the same engine, job store, and files, but
+> agent mutations fail closed with `agent_mutation_disabled`. Mutation parity remains future
+> work until the Phase 4 approval and undo contract ships.
 
 The defensible bit: reframe follows the active speaker with **no face-detection model** —
 it fuses audio diarization (who's talking) with cheap ffmpeg ROI motion (where each face is),

@@ -94,7 +94,14 @@ describe("SpoolApiClient transcript lifecycle", () => {
 describe("Phase 0 canonical contract", () => {
   it("sends canonical w word edits and returns the typed word response", async () => {
     const { client, calls } = clientReturning(phase0Contract.word_edit.response_subset);
-    const request = phase0Contract.word_edit.request as WordEditRequest;
+    expect(phase0Contract.word_edit.request).toEqual({ op: "set_text", w: "corrected" });
+    if (phase0Contract.word_edit.request.op !== "set_text") {
+      throw new Error("Phase 0 word-edit fixture must use set_text");
+    }
+    const request: WordEditRequest = {
+      op: phase0Contract.word_edit.request.op,
+      w: phase0Contract.word_edit.request.w,
+    };
 
     const response = await client.editWord("tx_1", 7, request);
 
