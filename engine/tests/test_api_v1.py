@@ -1940,6 +1940,8 @@ def test_search_no_backfill_returns_matches_without_sqlite_or_filesystem_delta(
     _seed_done_transcript(app, tmp_path, words_data=_editable_words())
     idx = app.extensions["trove.transcript_index"]
     assert idx.indexed_ids() == set()
+    index_path = Path(idx.path)
+    index_path.unlink()
     download_dir = app.extensions["trove.download_dir"]
     before = _durable_filesystem_snapshot(download_dir)
 
@@ -1947,8 +1949,8 @@ def test_search_no_backfill_returns_matches_without_sqlite_or_filesystem_delta(
 
     assert response.status_code == 200
     assert response.get_json()["returned"] == 1
-    assert idx.indexed_ids() == set()
     assert _durable_filesystem_snapshot(download_dir) == before
+    assert not index_path.exists()
 
 
 def test_search_default_rest_path_keeps_index_backfill(client, tmp_path):

@@ -1105,7 +1105,10 @@ def search_transcripts():
     # transcripts that may contain `needle` (or None = "can't help, scan everything"). We only
     # skip a transcript that is BOTH indexed AND not a candidate (so it definitely can't match);
     # anything unindexed is always scanned, so a missing/lagging index can never drop a hit.
-    idx = _txidx()
+    # A SQLite "read" opened through the normal read-write connection can recreate a missing
+    # database file. Agent/MCP's no-backfill mode therefore bypasses the optional index entirely
+    # and full-scans; normal REST keeps both candidate filtering and self-healing backfill.
+    idx = _txidx() if backfill_index else None
     candidates = idx.search_candidates(needle) if idx is not None else None
     indexed = idx.indexed_ids() if idx is not None else set()
     for tj in _tm().snapshot_jobs():
