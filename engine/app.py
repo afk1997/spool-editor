@@ -832,7 +832,12 @@ def create_app() -> Flask:
     def _watch_items(watch: dict):
         if watch.get("kind") == "folder":
             return watcher.list_folder_items(watch.get("target", ""))
-        return watcher.list_playlist_items(watch.get("target", ""))
+        return watcher.list_playlist_items(
+            watch.get("target", ""), network_policy=network_policy,
+        )
+
+    def _remote_watch(watch: dict) -> bool:
+        return watch.get("kind") in ("channel", "playlist")
 
     # Per-watch locks so the background poller and concurrent /scan threads can't double-ingest the
     # SAME watch (its get→reconcile→set_state was a read-modify-write race: last-writer-wins lost
@@ -866,15 +871,29 @@ def create_app() -> Flask:
         w = watch_store.get(watch_id)
         if w is None:
             return None
-        # Manual scan = explicit "look again now": bypass the listing TTL for this target.
-        watcher.invalidate_listing(w.get("target"))
+        if _remote_watch(w):
+            # Hold admission across cache invalidation, listing, ingest, and state commit.
+            # An Offline rejection therefore cannot erase a warm cache or advance retry
+            # state, and an accepted scan prevents Offline from becoming visible mid-tick.
+            with network_policy.egress("watch_scan"):
+                # Manual scan = explicit "look again now": bypass the listing TTL.
+                watcher.invalidate_listing(w.get("target"))
+                return _reconcile_one(w)
         return _reconcile_one(w)
 
     def _reconcile_all() -> None:
         for w in watch_store.list():
             if w.get("enabled", True):
                 try:
-                    _reconcile_one(w)
+                    if _remote_watch(w):
+                        # Denial happens before the reconciler can list, ingest, or
+                        # persist state. It is an expected Offline skip, not poller noise.
+                        with network_policy.egress("watch_poll"):
+                            _reconcile_one(w)
+                    else:
+                        _reconcile_one(w)
+                except NetworkPolicyError:
+                    continue
                 except Exception:
                     app.logger.warning("watch reconcile failed for %s", w.get("id"), exc_info=True)
 

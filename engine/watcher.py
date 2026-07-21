@@ -12,6 +12,8 @@ import os
 import subprocess
 import time
 
+from network_policy import NetworkPolicy, NetworkPolicyError
+
 _VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi")
 
 _SETTLE_SECONDS = 30.0
@@ -63,12 +65,14 @@ def invalidate_listing(target: str | None) -> None:
         _listing_cache.pop(k, None)
 
 
-def list_playlist_items(url: str, *, limit: int = 30, ytdlp: str = "yt-dlp",
+def list_playlist_items(url: str, *, network_policy: NetworkPolicy,
+                        limit: int = 30, ytdlp: str = "yt-dlp",
                         now: float | None = None) -> list[str]:
     """Canonical video URLs on a channel/playlist via a yt-dlp FLAT listing (metadata only, no
     download), newest-first and capped. We print ``url`` (the per-entry webpage URL), NOT the bare
     ``id`` — the reconciler hands each item straight to ``enqueue_download(url=…)`` and a bare id is
-    not a reliable download target across extractors. Failures (offline / bad URL) degrade to [].
+    not a reliable download target across extractors. Ordinary yt-dlp failures degrade to [];
+    Offline raises the structured policy denial so callers cannot mistake it for an empty feed.
 
     The target is user-controlled config: reject option-shaped values and pass it after ``--``
     so it can never be parsed as a yt-dlp flag (mirrors runner.build_*_argv — the original
@@ -81,27 +85,34 @@ def list_playlist_items(url: str, *, limit: int = 30, ytdlp: str = "yt-dlp",
     target = (url or "").strip()
     if not target or target.startswith("-"):
         return []
-    t = time.time() if now is None else now
-    key = (target, int(limit))
-    hit = _listing_cache.get(key)
-    if hit is not None and t < hit["expires"]:
-        return list(hit["items"])
-    try:
-        out = subprocess.run(
-            [ytdlp, "--flat-playlist", "--print", "url",
-             "--playlist-end", str(int(limit)), "--", target],
-            capture_output=True, text=True, timeout=90,
-        ).stdout
-        items = [ln.strip() for ln in out.splitlines() if ln.strip()]
-    except Exception:
-        items = []
-    if items:
-        _listing_cache[key] = {"items": items, "expires": t + _LISTING_TTL, "fails": 0}
-    else:
-        fails = (hit or {}).get("fails", 0) + 1
-        backoff = min(_LISTING_BACKOFF_MAX, _LISTING_TTL * (2 ** (fails - 1)))
-        _listing_cache[key] = {"items": [], "expires": t + backoff, "fails": fails}
-    return list(items)
+    # The lease starts before the cache lookup: Offline is literal even with a warm
+    # listing, and switching Offline cannot race a listing already in progress. Keep
+    # it through result parsing + cache publication so every observable remote-listing
+    # side effect belongs to the admitted operation.
+    with network_policy.egress("watch_listing"):
+        t = time.time() if now is None else now
+        key = (target, int(limit))
+        hit = _listing_cache.get(key)
+        if hit is not None and t < hit["expires"]:
+            return list(hit["items"])
+        try:
+            out = subprocess.run(
+                [ytdlp, "--flat-playlist", "--print", "url",
+                 "--playlist-end", str(int(limit)), "--", target],
+                capture_output=True, text=True, timeout=90,
+            ).stdout
+            items = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        except NetworkPolicyError:
+            raise
+        except Exception:
+            items = []
+        if items:
+            _listing_cache[key] = {"items": items, "expires": t + _LISTING_TTL, "fails": 0}
+        else:
+            fails = (hit or {}).get("fails", 0) + 1
+            backoff = min(_LISTING_BACKOFF_MAX, _LISTING_TTL * (2 ** (fails - 1)))
+            _listing_cache[key] = {"items": [], "expires": t + backoff, "fails": fails}
+        return list(items)
 
 
 # A produce job that ERRORs is retried (codex/network hiccups are transient), but bounded so a

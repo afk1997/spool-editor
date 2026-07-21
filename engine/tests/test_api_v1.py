@@ -16,6 +16,7 @@ from app import create_app
 from jobs import Job, JobStatus
 import transcribe_jobs
 import safety
+import watcher
 
 
 @pytest.fixture()
@@ -442,6 +443,91 @@ def test_offline_remote_watch_target_validation_denies_before_dns(client, monkey
     assert response.get_json() == {"error": "offline_network_disabled"}
     assert app.extensions["trove.watches"].list() == []
     assert dns_calls == []
+
+
+def test_offline_remote_watch_update_is_denied_before_store_mutation(client, monkeypatch):
+    app, c = client
+    created = c.post("/api/v1/watches", json={
+        "name": "remote",
+        "kind": "playlist",
+        "target": "https://93.184.216.34/playlist",
+    }).get_json()
+    watch_id = created["id"]
+    store_path = Path(app.extensions["trove.download_dir"]) / "watches.json"
+    before_record = app.extensions["trove.watches"].get(watch_id)
+    before_bytes = store_path.read_bytes()
+    dns_calls = []
+    monkeypatch.setattr(safety.socket, "getaddrinfo", lambda *args: dns_calls.append(args))
+    app.extensions["trove.network_policy"].enable_offline()
+
+    response = c.patch(f"/api/v1/watches/{watch_id}", json={"name": "changed"})
+
+    assert response.status_code == 409
+    assert response.get_json() == {"error": "offline_network_disabled"}
+    assert app.extensions["trove.watches"].get(watch_id) == before_record
+    assert store_path.read_bytes() == before_bytes
+    assert dns_calls == []
+
+
+def test_offline_folder_watch_cannot_be_repointed_to_remote(client, tmp_path, monkeypatch):
+    app, c = client
+    folder = tmp_path / "local-watch"
+    folder.mkdir()
+    created = c.post("/api/v1/watches", json={
+        "name": "local", "kind": "folder", "target": str(folder),
+    }).get_json()
+    watch_id = created["id"]
+    store_path = Path(app.extensions["trove.download_dir"]) / "watches.json"
+    before_record = app.extensions["trove.watches"].get(watch_id)
+    before_bytes = store_path.read_bytes()
+    dns_calls = []
+    monkeypatch.setattr(safety.socket, "getaddrinfo", lambda *args: dns_calls.append(args))
+    app.extensions["trove.network_policy"].enable_offline()
+
+    response = c.patch(f"/api/v1/watches/{watch_id}", json={
+        "kind": "playlist", "target": "https://example.com/list",
+    })
+
+    assert response.status_code == 409
+    assert response.get_json() == {"error": "offline_network_disabled"}
+    assert app.extensions["trove.watches"].get(watch_id) == before_record
+    assert store_path.read_bytes() == before_bytes
+    assert dns_calls == []
+
+
+def test_offline_remote_watch_scan_rejects_before_cache_invalidation_or_state(client, monkeypatch):
+    app, c = client
+    target = "https://93.184.216.34/playlist"
+    created = c.post("/api/v1/watches", json={
+        "name": "remote", "kind": "playlist", "target": target,
+    }).get_json()
+    watch_id = created["id"]
+    store_path = Path(app.extensions["trove.download_dir"]) / "watches.json"
+    before_record = app.extensions["trove.watches"].get(watch_id)
+    before_bytes = store_path.read_bytes()
+    watcher.clear_listing_cache()
+    cache_key = (target, 30)
+    watcher._listing_cache[cache_key] = {
+        "items": ["https://youtu.be/cached"], "expires": float("inf"), "fails": 0,
+    }
+    before_cache = {key: dict(value) for key, value in watcher._listing_cache.items()}
+    listing_calls = []
+    monkeypatch.setattr(
+        watcher, "list_playlist_items", lambda *a, **kw: listing_calls.append((a, kw)) or [],
+    )
+    app.extensions["trove.network_policy"].enable_offline()
+
+    try:
+        response = c.post(f"/api/v1/watches/{watch_id}/scan")
+
+        assert response.status_code == 409
+        assert response.get_json() == {"error": "offline_network_disabled"}
+        assert listing_calls == []
+        assert watcher._listing_cache == before_cache
+        assert app.extensions["trove.watches"].get(watch_id) == before_record
+        assert store_path.read_bytes() == before_bytes
+    finally:
+        watcher.clear_listing_cache()
 
 
 def test_resume_offline_leaves_paused_job_and_persisted_snapshot_unchanged(
@@ -2626,6 +2712,75 @@ def test_watch_scan_ingests_new_folder_videos(client, tmp_path, monkeypatch):
     assert r.status_code == 200 and len(r.get_json()["ingested"]) == 1     # the new file ingested
     assert "talk.mp4" in c.get(f"/api/v1/watches/{wid}").get_json()["seen"]
     assert c.post(f"/api/v1/watches/{wid}/scan").get_json()["ingested"] == []   # nothing new the 2nd scan
+
+
+def test_offline_folder_watch_create_update_and_scan_remain_local(client, tmp_path, monkeypatch):
+    monkeypatch.setattr("clip.moments.find_moments", lambda *a, **k: [])
+    app, c = client
+    inbox = tmp_path / "offline-inbox"
+    inbox.mkdir()
+    video = inbox / "local.mp4"
+    video.write_bytes(b"local")
+    old = time.time() - 3600
+    os.utime(video, (old, old))
+    app.extensions["trove.network_policy"].enable_offline()
+
+    created = c.post("/api/v1/watches", json={
+        "name": "Local", "kind": "folder", "target": str(inbox),
+    })
+    assert created.status_code == 201
+    watch_id = created.get_json()["id"]
+    updated = c.patch(f"/api/v1/watches/{watch_id}", json={"name": "Still local"})
+    assert updated.status_code == 200
+    assert updated.get_json()["name"] == "Still local"
+
+    scanned = c.post(f"/api/v1/watches/{watch_id}/scan")
+    assert scanned.status_code == 200
+    assert len(scanned.get_json()["ingested"]) == 1
+    assert "local.mp4" in c.get(f"/api/v1/watches/{watch_id}").get_json()["seen"]
+
+
+def test_offline_background_reconcile_skips_remote_and_continues_local(client, tmp_path, monkeypatch):
+    app, c = client
+    remote = c.post("/api/v1/watches", json={
+        "name": "Remote", "kind": "channel", "target": "https://93.184.216.34/@remote",
+    }).get_json()
+    folder = tmp_path / "empty-local-folder"
+    folder.mkdir()
+    local = c.post("/api/v1/watches", json={
+        "name": "Local", "kind": "folder", "target": str(folder),
+    }).get_json()
+    remote_before = app.extensions["trove.watches"].get(remote["id"])
+    playlist_calls = []
+    folder_calls = []
+    set_state_ids = []
+    warning_calls = []
+    store = app.extensions["trove.watches"]
+    real_set_state = store.set_state
+
+    monkeypatch.setattr(
+        watcher, "list_playlist_items", lambda *a, **kw: playlist_calls.append((a, kw)) or [],
+    )
+    monkeypatch.setattr(
+        watcher, "list_folder_items", lambda path, **kw: folder_calls.append(path) or [],
+    )
+
+    def record_set_state(watch_id, **state):
+        set_state_ids.append(watch_id)
+        return real_set_state(watch_id, **state)
+
+    monkeypatch.setattr(store, "set_state", record_set_state)
+    monkeypatch.setattr(app.logger, "warning", lambda *a, **kw: warning_calls.append((a, kw)))
+    app.extensions["trove.network_policy"].enable_offline()
+
+    app.extensions["trove.watch_reconcile_all"]()
+
+    assert playlist_calls == []
+    assert folder_calls == [str(folder)]
+    assert remote["id"] not in set_state_ids
+    assert local["id"] in set_state_ids
+    assert store.get(remote["id"]) == remote_before
+    assert warning_calls == []
 
 
 def test_watch_scan_unknown_404(client):

@@ -9,6 +9,7 @@ import types
 
 import pytest
 import watcher
+from network_policy import NetworkPolicy, NetworkPolicyError
 from watcher import reconcile_watch, list_folder_items, list_playlist_items
 
 
@@ -30,7 +31,8 @@ def test_list_playlist_items_returns_canonical_urls_not_bare_ids(monkeypatch):
         return _Result(data.get(field, ""))
 
     monkeypatch.setattr(watcher.subprocess, "run", fake_run)
-    items = list_playlist_items("https://site/playlist", limit=10)
+    items = list_playlist_items("https://site/playlist", limit=10,
+                                network_policy=NetworkPolicy())
 
     assert captured["field"] == "url"                       # asks yt-dlp for the URL, not the id
     assert items == ["https://site/watch?v=aaa", "https://site/watch?v=bbb"]
@@ -228,14 +230,15 @@ def test_list_playlist_items_uses_separator_and_rejects_option_shaped(monkeypatc
         return types.SimpleNamespace(stdout="https://youtu.be/x\n", returncode=0)
     monkeypatch.setattr(watcher.subprocess, "run", fake_run)
 
-    items = watcher.list_playlist_items("https://example.com/playlist")
+    policy = NetworkPolicy()
+    items = watcher.list_playlist_items("https://example.com/playlist", network_policy=policy)
     assert items == ["https://youtu.be/x"]
     argv = calls[0]
     sep = argv.index("--")
     assert argv[sep + 1] == "https://example.com/playlist"  # target can never parse as a flag
 
     # an option-shaped target (e.g. --config-location=...) must never reach a subprocess
-    assert watcher.list_playlist_items("--config-location=/tmp/evil") == []
+    assert watcher.list_playlist_items("--config-location=/tmp/evil", network_policy=policy) == []
     assert len(calls) == 1
 
 
@@ -268,10 +271,12 @@ def test_playlist_listing_is_cached_within_ttl(monkeypatch):
         return types.SimpleNamespace(stdout="https://youtu.be/a\n", returncode=0)
     monkeypatch.setattr(watcher.subprocess, "run", fake_run)
     url = "https://93.184.216.34/list"
-    assert watcher.list_playlist_items(url, now=1000.0) == ["https://youtu.be/a"]
-    assert watcher.list_playlist_items(url, now=1100.0) == ["https://youtu.be/a"]
+    policy = NetworkPolicy()
+    assert watcher.list_playlist_items(url, now=1000.0, network_policy=policy) == ["https://youtu.be/a"]
+    assert watcher.list_playlist_items(url, now=1100.0, network_policy=policy) == ["https://youtu.be/a"]
     assert len(calls) == 1                                  # second tick hit the cache
-    watcher.list_playlist_items(url, now=1000.0 + watcher._LISTING_TTL + 1)
+    watcher.list_playlist_items(url, now=1000.0 + watcher._LISTING_TTL + 1,
+                                network_policy=policy)
     assert len(calls) == 2                                  # expired → refetched
 
 
@@ -283,13 +288,16 @@ def test_failed_listing_backs_off_exponentially(monkeypatch):
     monkeypatch.setattr(watcher.subprocess, "run", fake_run)
     url = "https://93.184.216.34/dead"
     t0 = 1000.0
-    assert watcher.list_playlist_items(url, now=t0) == []
-    assert watcher.list_playlist_items(url, now=t0 + 10) == []
+    policy = NetworkPolicy()
+    assert watcher.list_playlist_items(url, now=t0, network_policy=policy) == []
+    assert watcher.list_playlist_items(url, now=t0 + 10, network_policy=policy) == []
     assert len(calls) == 1                                  # inside the first backoff window
-    watcher.list_playlist_items(url, now=t0 + watcher._LISTING_TTL + 1)   # window over → retry
+    watcher.list_playlist_items(url, now=t0 + watcher._LISTING_TTL + 1,
+                                network_policy=policy)   # window over → retry
     assert len(calls) == 2
     # second consecutive failure doubles the window
-    watcher.list_playlist_items(url, now=t0 + watcher._LISTING_TTL + 2)
+    watcher.list_playlist_items(url, now=t0 + watcher._LISTING_TTL + 2,
+                                network_policy=policy)
     assert len(calls) == 2
 
 
@@ -300,7 +308,110 @@ def test_invalidate_listing_forces_a_fresh_fetch(monkeypatch):
         return types.SimpleNamespace(stdout="https://youtu.be/a\n", returncode=0)
     monkeypatch.setattr(watcher.subprocess, "run", fake_run)
     url = "https://93.184.216.34/list"
-    watcher.list_playlist_items(url, now=1000.0)
+    policy = NetworkPolicy()
+    watcher.list_playlist_items(url, now=1000.0, network_policy=policy)
     watcher.invalidate_listing(url)
-    watcher.list_playlist_items(url, now=1001.0)
+    watcher.list_playlist_items(url, now=1001.0, network_policy=policy)
     assert len(calls) == 2
+
+
+def test_playlist_listing_holds_lease_before_cache_and_through_cache_update(monkeypatch):
+    policy = NetworkPolicy()
+    events = []
+
+    class _LeaseCheckedCache(dict):
+        def get(self, key, default=None):
+            events.append(("get", policy.active_leases))
+            return super().get(key, default)
+
+        def __setitem__(self, key, value):
+            events.append(("set", policy.active_leases))
+            return super().__setitem__(key, value)
+
+    monkeypatch.setattr(watcher, "_listing_cache", _LeaseCheckedCache())
+
+    def fake_run(*_args, **_kwargs):
+        events.append(("run", policy.active_leases))
+        with pytest.raises(NetworkPolicyError) as blocked:
+            policy.enable_offline()
+        assert blocked.value.code == "network_work_active"
+        return types.SimpleNamespace(stdout="https://youtu.be/a\n", returncode=0)
+
+    monkeypatch.setattr(watcher.subprocess, "run", fake_run)
+
+    assert watcher.list_playlist_items(
+        "https://93.184.216.34/list", network_policy=policy,
+    ) == ["https://youtu.be/a"]
+    assert events == [("get", 1), ("run", 1), ("set", 1)]
+    assert policy.active_leases == 0
+
+
+def test_offline_playlist_listing_rejects_before_warm_cache_or_subprocess(monkeypatch):
+    policy = NetworkPolicy(offline=True)
+    target = "https://93.184.216.34/list"
+
+    class _ObservedCache(dict):
+        reads = 0
+
+        def get(self, key, default=None):
+            self.reads += 1
+            return super().get(key, default)
+
+    cache = _ObservedCache({
+        (target, 30): {"items": ["https://youtu.be/cached"], "expires": float("inf"), "fails": 0},
+    })
+    before = {key: dict(value) for key, value in cache.items()}
+    subprocess_calls = []
+    monkeypatch.setattr(watcher, "_listing_cache", cache)
+    monkeypatch.setattr(
+        watcher.subprocess, "run", lambda *a, **kw: subprocess_calls.append((a, kw)),
+    )
+
+    with pytest.raises(NetworkPolicyError) as denied:
+        watcher.list_playlist_items(target, network_policy=policy)
+
+    assert denied.value.code == "offline_network_disabled"
+    assert denied.value.purpose == "watch_listing"
+    assert cache.reads == 0
+    assert cache == before
+    assert subprocess_calls == []
+    assert policy.active_leases == 0
+
+
+def test_playlist_listing_reraises_policy_denial_and_releases_outer_lease(monkeypatch):
+    policy = NetworkPolicy()
+    denial = NetworkPolicyError("offline_network_disabled", purpose="nested_test")
+    monkeypatch.setattr(watcher.subprocess, "run", lambda *_a, **_kw: (_ for _ in ()).throw(denial))
+
+    with pytest.raises(NetworkPolicyError) as raised:
+        watcher.list_playlist_items(
+            "https://93.184.216.34/list", network_policy=policy,
+        )
+
+    assert raised.value is denial
+    assert watcher._listing_cache == {}
+    assert policy.active_leases == 0
+
+
+def test_failed_playlist_listing_releases_lease_and_updates_backoff_inside_it(monkeypatch):
+    policy = NetworkPolicy()
+    updates = []
+
+    class _LeaseCheckedCache(dict):
+        def __setitem__(self, key, value):
+            updates.append(policy.active_leases)
+            return super().__setitem__(key, value)
+
+    monkeypatch.setattr(watcher, "_listing_cache", _LeaseCheckedCache())
+
+    def fail(*_args, **_kwargs):
+        assert policy.active_leases == 1
+        raise OSError("yt-dlp unavailable")
+
+    monkeypatch.setattr(watcher.subprocess, "run", fail)
+
+    assert watcher.list_playlist_items(
+        "https://93.184.216.34/dead", network_policy=policy,
+    ) == []
+    assert updates == [1]
+    assert policy.active_leases == 0

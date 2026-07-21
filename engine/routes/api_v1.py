@@ -2221,6 +2221,14 @@ def list_watches():
 @token_required
 def create_watch():
     data = request.get_json(silent=True) or {}
+    if data.get("kind") in ("channel", "playlist"):
+        # Keep admission live through URL validation and persistence so enabling
+        # Offline cannot race a remote watch into the store after a stale precheck.
+        with _network_policy().egress("watch_create"):
+            err = _validate_watch(data, require_name=True)
+            if err:
+                return err
+            return jsonify(_ws().create(data)), 201
     err = _validate_watch(data, require_name=True)
     if err:
         return err
@@ -2240,13 +2248,22 @@ def get_watch(watch_id):
 @token_required
 def update_watch(watch_id):
     data = request.get_json(silent=True) or {}
-    err = _validate_watch(data, require_name=False, current=_ws().get(watch_id))
+    current = _ws().get(watch_id)
+    if current is None:
+        return jsonify({"error": "not_found"}), 404
+    effective_kind = data.get("kind", current.get("kind"))
+    if current.get("kind") in ("channel", "playlist") or effective_kind in ("channel", "playlist"):
+        # Every mutation of an existing/effective remote watch is a protected
+        # operation, including metadata-only changes and remote-to-local repoints.
+        with _network_policy().egress("watch_update"):
+            err = _validate_watch(data, require_name=False, current=current)
+            if err:
+                return err
+            return jsonify(_ws().update(watch_id, data))
+    err = _validate_watch(data, require_name=False, current=current)
     if err:
         return err
-    w = _ws().update(watch_id, data)
-    if w is None:
-        return jsonify({"error": "not_found"}), 404
-    return jsonify(w)
+    return jsonify(_ws().update(watch_id, data))
 
 
 @api_v1_bp.delete("/watches/<watch_id>")
