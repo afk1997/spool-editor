@@ -373,6 +373,76 @@ def test_streaming_download_keeps_lease_until_spawned_process_is_reaped_on_callb
     assert policy.active_leases == 0
 
 
+def _slow_reap_proc_factory(policy, events):
+    class SlowReapProc:
+        returncode = None
+
+        def __init__(self, *_args, **_kwargs):
+            self.stdout = iter([])
+            self.stderr = iter([])
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            assert policy.active_leases == 1
+            events.append("kill")
+
+        def wait(self, timeout=None):
+            assert policy.active_leases == 1
+            if timeout is not None:
+                events.append("timed_wait")
+                raise subprocess.TimeoutExpired(cmd="yt-dlp", timeout=timeout)
+            events.append("blocking_wait")
+            self.returncode = -9
+            return self.returncode
+
+    return SlowReapProc
+
+
+def test_streaming_timeout_blocks_until_child_is_reaped_after_timed_wait_expires(
+    monkeypatch, tmp_path,
+):
+    policy = NetworkPolicy()
+    events = []
+    monkeypatch.setattr(runner.subprocess, "Popen", _slow_reap_proc_factory(policy, events))
+
+    result = run_download(
+        url="https://example.com/v",
+        out_template=str(tmp_path / "x.%(ext)s"),
+        format_choice="video",
+        format_id=None,
+        network_policy=policy,
+        timeout=0,
+        progress_cb=lambda *_args: None,
+    )
+
+    assert result.error_category == "timeout"
+    assert events == ["kill", "timed_wait", "blocking_wait"]
+    assert policy.active_leases == 0
+
+
+def test_exceptional_cleanup_blocks_until_child_is_reaped_after_timed_wait_expires(
+    monkeypatch, tmp_path,
+):
+    policy = NetworkPolicy()
+    events = []
+    monkeypatch.setattr(runner.subprocess, "Popen", _slow_reap_proc_factory(policy, events))
+
+    with pytest.raises(RuntimeError, match="register failed"):
+        run_download(
+            url="https://example.com/v",
+            out_template=str(tmp_path / "x.%(ext)s"),
+            format_choice="video",
+            format_id=None,
+            network_policy=policy,
+            register_process=lambda _proc: (_ for _ in ()).throw(RuntimeError("register failed")),
+        )
+
+    assert events == ["kill", "timed_wait", "blocking_wait"]
+    assert policy.active_leases == 0
+
+
 def test_download_argv_includes_concurrent_fragments():
     argv = build_download_argv(
         url="https://example.com/v",

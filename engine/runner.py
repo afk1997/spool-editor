@@ -207,6 +207,14 @@ def _cleanup_glob(out_template: str) -> None:
             pass
 
 
+def _wait_until_reaped(proc) -> None:
+    """Confirm process exit; a slow post-kill reap may outlast the grace period."""
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.wait()
+
+
 def _reap_if_running(proc) -> None:
     """Do not let an exceptional streaming path outlive its network lease."""
     try:
@@ -218,10 +226,7 @@ def _reap_if_running(proc) -> None:
     try:
         proc.kill()
     finally:
-        try:
-            proc.wait(timeout=2)
-        except Exception:
-            pass
+        _wait_until_reaped(proc)
 
 
 def _resolve_output(out_template: str, format_choice: str) -> DownloadResult:
@@ -467,10 +472,7 @@ def _run_download_leased(
                 break
             if time.monotonic() >= deadline:
                 proc.kill()
-                try:
-                    proc.wait(timeout=2)
-                except Exception:
-                    pass
+                _wait_until_reaped(proc)
                 if not (was_paused_check and was_paused_check()):
                     _cleanup_glob(out_template)
                 return DownloadResult(error_category="timeout", error_raw="download timed out")
