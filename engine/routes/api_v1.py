@@ -1455,33 +1455,49 @@ def remove_model(name):
 def install_model(name):
     if name not in models_store.KNOWN_MODELS:
         return jsonify({"error": "unknown_model"}), 400
-    with _install_lock:
-        if _install_state["downloading"]:
-            return jsonify({"error": "busy", "name": _install_state["name"]}), 409
-        _install_state.update({
-            "downloading": True, "name": name,
-            "received": 0, "total": models_store.KNOWN_MODELS[name]["size_bytes"],
-            "error": None, "done": False,
-        })
+    network_policy = _network_policy()
 
     def _progress(rec, total):
         with _install_lock:
             _install_state["received"] = rec
             _install_state["total"] = total
 
+    def _record_error(error: Exception, *, category: str | None = None):
+        with _install_lock:
+            _install_state["downloading"] = False
+            detail = category if category is not None else str(error)
+            _install_state["error"] = type(error).__name__ + ": " + detail
+
     def _worker():
         try:
-            models_store.download(name, progress_cb=_progress, verify=True)
+            models_store.download(
+                name,
+                network_policy=network_policy,
+                progress_cb=_progress,
+                verify=True,
+            )
             models_store.set_active(name)
             with _install_lock:
                 _install_state["downloading"] = False
                 _install_state["done"] = True
+        except NetworkPolicyError as e:
+            _record_error(e, category=e.code)
+            raise
         except Exception as e:
-            with _install_lock:
-                _install_state["downloading"] = False
-                _install_state["error"] = type(e).__name__ + ": " + str(e)
+            _record_error(e)
 
-    Thread(target=_worker, daemon=True, name="trove-v1-model-install").start()
+    # Keep admission linearized against enabling Offline. The worker repeats the same policy
+    # check inside models_store.download so a deferred/queued install cannot use a stale grant.
+    with network_policy.egress("model_install_admission"):
+        with _install_lock:
+            if _install_state["downloading"]:
+                return jsonify({"error": "busy", "name": _install_state["name"]}), 409
+            _install_state.update({
+                "downloading": True, "name": name,
+                "received": 0, "total": models_store.KNOWN_MODELS[name]["size_bytes"],
+                "error": None, "done": False,
+            })
+        Thread(target=_worker, daemon=True, name="trove-v1-model-install").start()
     return jsonify({"name": name, "downloading": True}), 202
 
 

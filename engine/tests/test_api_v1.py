@@ -934,6 +934,163 @@ def test_install_progress_endpoint(client):
     assert "downloading" in body
 
 
+def _reset_model_install_state(api_v1):
+    with api_v1._install_lock:
+        api_v1._install_state.update({
+            "downloading": False,
+            "name": None,
+            "received": 0,
+            "total": 0,
+            "error": None,
+            "done": False,
+        })
+
+
+def test_model_install_offline_rejects_before_state_or_thread_admission(
+    client, monkeypatch, tmp_path
+):
+    import models_store
+    from routes import api_v1
+
+    app, c = client
+    monkeypatch.setattr(models_store, "MODELS_DIR", tmp_path / "models")
+    _reset_model_install_state(api_v1)
+    with api_v1._install_lock:
+        before = dict(api_v1._install_state)
+    app.extensions["trove.network_policy"].enable_offline()
+    urlopen_calls = []
+
+    def forbidden_urlopen(*args, **kwargs):
+        urlopen_calls.append((args, kwargs))
+        raise AssertionError("offline install reached urlopen")
+
+    class ForbiddenThread:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("offline install admitted a worker")
+
+    monkeypatch.setattr(models_store, "urlopen", forbidden_urlopen)
+    monkeypatch.setattr(api_v1, "Thread", ForbiddenThread)
+
+    response = c.post("/api/v1/models/ggml-tiny.bin/install")
+
+    assert response.status_code == 409
+    assert response.get_json() == {"error": "offline_network_disabled"}
+    assert urlopen_calls == []
+    with api_v1._install_lock:
+        assert api_v1._install_state == before
+    assert not (tmp_path / "models").exists()
+
+
+def test_queued_model_install_rechecks_policy_before_urlopen(
+    client, monkeypatch, tmp_path
+):
+    import models_store
+    from network_policy import NetworkPolicyError
+    from routes import api_v1
+
+    app, c = client
+    monkeypatch.setattr(models_store, "MODELS_DIR", tmp_path / "models")
+    _reset_model_install_state(api_v1)
+    captured = {}
+    urlopen_calls = []
+
+    class DeferredThread:
+        def __init__(self, *, target, **kwargs):
+            captured["target"] = target
+
+        def start(self):
+            captured["started"] = True
+
+    def forbidden_urlopen(*args, **kwargs):
+        urlopen_calls.append((args, kwargs))
+        raise AssertionError("queued offline install reached urlopen")
+
+    monkeypatch.setattr(api_v1, "Thread", DeferredThread)
+    monkeypatch.setattr(models_store, "urlopen", forbidden_urlopen)
+
+    accepted = c.post("/api/v1/models/ggml-tiny.bin/install")
+    assert accepted.status_code == 202
+    assert captured["started"] is True
+
+    app.extensions["trove.network_policy"].enable_offline()
+    with pytest.raises(NetworkPolicyError) as denied:
+        captured["target"]()
+
+    assert denied.value.code == "offline_network_disabled"
+    assert urlopen_calls == []
+    with api_v1._install_lock:
+        assert api_v1._install_state["downloading"] is False
+        assert api_v1._install_state["done"] is False
+        assert "offline_network_disabled" in api_v1._install_state["error"]
+    assert not (tmp_path / "models").exists()
+
+
+def test_active_model_download_blocks_offline_setting_until_release(
+    client, monkeypatch, tmp_path
+):
+    import models_store
+
+    app, c = client
+    models_dir = tmp_path / "models"
+    monkeypatch.setattr(models_store, "MODELS_DIR", models_dir)
+    policy = app.extensions["trove.network_policy"]
+    read_started = threading.Event()
+    release_read = threading.Event()
+    payload = b"model-data"
+
+    class BlockingResponse:
+        headers = {"Content-Length": str(len(payload))}
+
+        def __init__(self):
+            self._read = False
+
+        def read(self, _size=-1):
+            if self._read:
+                return b""
+            self._read = True
+            read_started.set()
+            assert release_read.wait(2)
+            return payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(models_store, "urlopen", lambda *a, **k: BlockingResponse())
+    failures = []
+
+    def download_model():
+        try:
+            models_store.download(
+                "ggml-tiny.bin", network_policy=policy, verify=False
+            )
+        except BaseException as exc:  # expose worker failures to the test thread
+            failures.append(exc)
+
+    worker = threading.Thread(target=download_model)
+    worker.start()
+    try:
+        assert read_started.wait(2)
+        assert policy.active_leases == 1
+        rejected = c.patch("/api/v1/settings", json={"offline": True})
+        assert rejected.status_code == 409
+        assert rejected.get_json() == {"error": "network_work_active"}
+        assert c.get("/api/v1/settings").get_json()["offline"] is False
+        assert policy.offline is False
+    finally:
+        release_read.set()
+        worker.join(2)
+
+    assert not worker.is_alive()
+    assert failures == []
+    assert policy.active_leases == 0
+    enabled = c.patch("/api/v1/settings", json={"offline": True})
+    assert enabled.status_code == 200
+    assert enabled.get_json()["offline"] is True
+
+
 # ---- progress / human fields ---------------------------------------
 
 def test_job_view_includes_human_progress(client, monkeypatch):

@@ -1,8 +1,10 @@
 import hashlib
 import os
+import threading
 import pytest
 from pathlib import Path
 import models_store
+from network_policy import NetworkPolicy, NetworkPolicyError
 
 
 @pytest.fixture()
@@ -10,6 +12,11 @@ def tmp_models_dir(tmp_path, monkeypatch):
     """Re-point models_store at an empty temp dir for each test."""
     monkeypatch.setattr(models_store, "MODELS_DIR", tmp_path)
     return tmp_path
+
+
+@pytest.fixture()
+def network_policy():
+    return NetworkPolicy()
 
 
 def test_list_installed_empty(tmp_models_dir):
@@ -102,7 +109,7 @@ def _fake_response(payload: bytes, total_size: int | None = None):
     return FakeResp(payload, total_size if total_size is not None else len(payload))
 
 
-def test_download_writes_atomic_with_progress(tmp_models_dir, monkeypatch):
+def test_download_writes_atomic_with_progress(tmp_models_dir, monkeypatch, network_policy):
     """download() saves the file with atomic rename and emits progress."""
     payload = b"FAKEMODELDATA" * 1000
     monkeypatch.setattr(
@@ -117,7 +124,9 @@ def test_download_writes_atomic_with_progress(tmp_models_dir, monkeypatch):
 
     target = "ggml-tiny.bin"
     # Skip SHA verification for this test by passing verify=False
-    models_store.download(target, progress_cb=cb, verify=False)
+    models_store.download(
+        target, network_policy=network_policy, progress_cb=cb, verify=False
+    )
 
     final = tmp_models_dir / target
     assert final.exists()
@@ -129,7 +138,7 @@ def test_download_writes_atomic_with_progress(tmp_models_dir, monkeypatch):
     assert progress_events[-1] == (len(payload), len(payload))
 
 
-def test_download_verifies_sha256(tmp_models_dir, monkeypatch):
+def test_download_verifies_sha256(tmp_models_dir, monkeypatch, network_policy):
     """download() rejects the file if SHA-256 doesn't match KNOWN_MODELS metadata."""
     payload = b"WRONGDATA" * 100
     monkeypatch.setattr(
@@ -139,24 +148,136 @@ def test_download_verifies_sha256(tmp_models_dir, monkeypatch):
 
     # The KNOWN_MODELS sha256 won't match this random payload
     with pytest.raises(ValueError, match="sha-?256"):
-        models_store.download("ggml-tiny.bin", verify=True)
+        models_store.download(
+            "ggml-tiny.bin", network_policy=network_policy, verify=True
+        )
 
     # No file should be left behind
     assert not (tmp_models_dir / "ggml-tiny.bin").exists()
     assert not (tmp_models_dir / "ggml-tiny.bin.part").exists()
 
 
-def test_download_writes_sha256_sidecar(tmp_models_dir, monkeypatch):
+def test_download_writes_sha256_sidecar(tmp_models_dir, monkeypatch, network_policy):
     payload = b"SOMECONTENT" * 500
     monkeypatch.setattr(
         models_store, "urlopen",
         lambda url, timeout=None: _fake_response(payload, len(payload))
     )
-    models_store.download("ggml-tiny.bin", verify=False)
+    models_store.download(
+        "ggml-tiny.bin", network_policy=network_policy, verify=False
+    )
     sha = hashlib.sha256(payload).hexdigest()
     assert (tmp_models_dir / "ggml-tiny.bin.sha256").read_text().strip() == sha
 
 
-def test_download_unknown_model_raises():
+def test_download_unknown_model_raises(network_policy):
     with pytest.raises(ValueError, match="unknown model"):
-        models_store.download("ggml-foo.bin")
+        models_store.download("ggml-foo.bin", network_policy=network_policy)
+
+
+def test_download_offline_performs_no_network_or_model_mutation(
+    tmp_models_dir, monkeypatch
+):
+    existing = "ggml-tiny.bin"
+    target = "ggml-base.bin"
+    (tmp_models_dir / existing).write_bytes(b"already-installed")
+    models_store.set_active(existing)
+    before = {path.name: path.read_bytes() for path in tmp_models_dir.iterdir()}
+    calls = []
+
+    def forbidden_urlopen(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("offline model install reached urlopen")
+
+    monkeypatch.setattr(models_store, "urlopen", forbidden_urlopen)
+    policy = NetworkPolicy(offline=True)
+
+    with pytest.raises(NetworkPolicyError) as denied:
+        models_store.download(target, network_policy=policy, verify=False)
+
+    assert denied.value.code == "offline_network_disabled"
+    assert calls == []
+    assert {path.name: path.read_bytes() for path in tmp_models_dir.iterdir()} == before
+    assert models_store.get_active() == existing
+
+
+def test_download_holds_model_lease_through_stream_and_releases_on_success(
+    tmp_models_dir, monkeypatch, network_policy
+):
+    read_started = threading.Event()
+    release_read = threading.Event()
+    payload = b"model-data"
+
+    class BlockingResponse:
+        headers = {"Content-Length": str(len(payload))}
+
+        def __init__(self):
+            self._read = False
+
+        def read(self, _size=-1):
+            if self._read:
+                return b""
+            self._read = True
+            read_started.set()
+            assert release_read.wait(2)
+            return payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(models_store, "urlopen", lambda *a, **k: BlockingResponse())
+    failures = []
+
+    def run_download():
+        try:
+            models_store.download(
+                "ggml-tiny.bin", network_policy=network_policy, verify=False
+            )
+        except BaseException as exc:  # expose worker failures to the test thread
+            failures.append(exc)
+
+    worker = threading.Thread(target=run_download)
+    worker.start()
+    try:
+        assert read_started.wait(2)
+        assert network_policy.active_leases == 1
+        assert (tmp_models_dir / "ggml-tiny.bin.part").exists()
+    finally:
+        release_read.set()
+        worker.join(2)
+
+    assert not worker.is_alive()
+    assert failures == []
+    assert network_policy.active_leases == 0
+    assert (tmp_models_dir / "ggml-tiny.bin").read_bytes() == payload
+
+
+def test_download_releases_model_lease_and_partial_file_on_stream_error(
+    tmp_models_dir, monkeypatch, network_policy
+):
+    class FailingResponse:
+        headers = {}
+
+        def read(self, _size=-1):
+            assert network_policy.active_leases == 1
+            raise OSError("connection reset")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(models_store, "urlopen", lambda *a, **k: FailingResponse())
+
+    with pytest.raises(OSError, match="connection reset"):
+        models_store.download(
+            "ggml-tiny.bin", network_policy=network_policy, verify=False
+        )
+
+    assert network_policy.active_leases == 0
+    assert not (tmp_models_dir / "ggml-tiny.bin").exists()
+    assert not (tmp_models_dir / "ggml-tiny.bin.part").exists()
