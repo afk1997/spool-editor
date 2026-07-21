@@ -222,27 +222,60 @@ class _OwnedDownloadProcess:
         fallback()
 
     def wait_for_group_exit(self, *, timeout: float = 5.0) -> None:
-        """Wait until no live or zombie member keeps the owned group present."""
+        """Wait for group exit, then force lingering descendants and confirm quiescence."""
         if self._pgid is None:
             self._tree_exited = True
             return
-        deadline = time.monotonic() + timeout
-        while True:
+
+        def group_is_gone() -> bool:
             try:
                 os.killpg(self._pgid, 0)
             except ProcessLookupError:
                 self._pgid = None
                 self._tree_exited = True
-                return
+                return True
             except AttributeError:
                 self._pgid = None
                 self._tree_exited = True
-                return
-            if time.monotonic() >= deadline:
-                raise RuntimeError(
-                    f"download process group did not exit within {timeout:g}s"
-                )
-            time.sleep(0.01)
+                return True
+            except OSError:
+                # EPERM/other probe failures do not prove absence; retain ownership
+                # and continue to the forced cleanup phase rather than failing open.
+                return False
+            return False
+
+        def wait_phase(phase_timeout: float) -> bool:
+            deadline = time.monotonic() + phase_timeout
+            while not group_is_gone():
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(0.01)
+            return True
+
+        if wait_phase(timeout):
+            return
+
+        # The direct parent is already reaped, but a descendant still owns the group.
+        # Fail closed: force the whole cached group, then keep the lease until the OS
+        # confirms that even transient zombies no longer keep it present.
+        try:
+            os.killpg(self._pgid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        except ProcessLookupError:
+            self._pgid = None
+            self._tree_exited = True
+            return
+        except (AttributeError, OSError):
+            try:
+                self._process.kill()
+            except (ProcessLookupError, OSError):
+                pass
+
+        forced_timeout = max(timeout, 1.0)
+        if wait_phase(forced_timeout):
+            return
+        raise RuntimeError(
+            f"download process group did not exit after SIGKILL within {forced_timeout:g}s"
+        )
 
     def kill(self) -> None:
         if self._tree_exited:

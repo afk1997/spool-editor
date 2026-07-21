@@ -812,6 +812,26 @@ def _process_tree_helper(tmp_path):
     return helper
 
 
+def _orphan_tree_helper(tmp_path, exit_code):
+    helper = tmp_path / f"orphan_tree_{exit_code}.py"
+    helper.write_text(
+        f"#!{sys.executable}\n"
+        "import os, subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)\n"
+        "with open(os.environ['TREE_PID_FILE'], 'w') as handle:\n"
+        "    handle.write(f'{os.getpid()} {child.pid}')\n"
+        "    handle.flush()\n"
+        "    os.fsync(handle.fileno())\n"
+        "if int(os.environ['TREE_EXIT_CODE']) == 0:\n"
+        "    with open(os.environ['TREE_OUTPUT_FILE'], 'wb') as output:\n"
+        "        output.write(b'media')\n"
+        "sys.exit(int(os.environ['TREE_EXIT_CODE']))\n"
+    )
+    helper.chmod(0o755)
+    return helper
+
+
 def _pid_alive(pid):
     try:
         os.kill(pid, 0)
@@ -942,6 +962,59 @@ def test_registered_streaming_handle_kills_real_process_tree_before_lease_releas
     finally:
         if killer is not None:
             killer.join(timeout=2)
+        if not pids:
+            pids = _read_test_pids(pid_file)
+        _cleanup_test_pids(pids)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group regression")
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_blocking_completion_kills_lingering_real_descendant_before_lease_release(
+    monkeypatch, tmp_path, exit_code,
+):
+    helper = _orphan_tree_helper(tmp_path, exit_code)
+    pid_file = tmp_path / "orphan.pids"
+    output_file = tmp_path / "out.mp4"
+    monkeypatch.setenv("TREE_PID_FILE", str(pid_file))
+    monkeypatch.setenv("TREE_OUTPUT_FILE", str(output_file))
+    monkeypatch.setenv("TREE_EXIT_CODE", str(exit_code))
+    monkeypatch.setattr(runner, "build_download_argv", lambda **_kwargs: [str(helper)])
+    real_spawn = runner._spawn_download_process
+    real_killpg = runner.os.killpg
+    policy = NetworkPolicy()
+    forced_signals = []
+    pids = []
+
+    def spawn_with_short_quiescence_deadline(argv, **kwargs):
+        process = real_spawn(argv, **kwargs)
+        real_wait = process.wait_for_group_exit
+        process.wait_for_group_exit = lambda: real_wait(timeout=0.05)
+        return process
+
+    def observe_group_signal(pgid, sig):
+        if sig != 0:
+            assert policy.active_leases == 1
+            forced_signals.append((pgid, sig))
+        return real_killpg(pgid, sig)
+
+    monkeypatch.setattr(runner, "_spawn_download_process", spawn_with_short_quiescence_deadline)
+    monkeypatch.setattr(runner.os, "killpg", observe_group_signal)
+
+    try:
+        result = run_download(
+            url="https://example.com/v",
+            out_template=str(tmp_path / "out.%(ext)s"),
+            format_choice="video",
+            format_id=None,
+            network_policy=policy,
+        )
+        pids = _read_test_pids(pid_file)
+
+        assert (result.error_category is None) is (exit_code == 0)
+        assert forced_signals and forced_signals[-1][1] == signal.SIGKILL
+        assert not any(_pid_alive(pid) for pid in pids)
+        assert policy.active_leases == 0
+    finally:
         if not pids:
             pids = _read_test_pids(pid_file)
         _cleanup_test_pids(pids)
