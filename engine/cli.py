@@ -242,10 +242,9 @@ def cmd_serve(args) -> int:
     assert_safe_bind(args.host)
     from app import create_app
     from lifecycle import run_flask_app
-    app = create_app()
     _print_banner(subtitle=f"self-hosted media · serving on http://{args.host}:{args.port}")
     run_flask_app(
-        app,
+        app_factory=create_app,
         host=args.host,
         port=args.port,
         debug=False,

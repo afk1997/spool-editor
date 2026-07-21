@@ -6,6 +6,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -32,6 +33,107 @@ def test_run_flask_app_drains_engine_on_normal_return():
         ("run", {"host": "127.0.0.1", "port": 8899}),
         ("shutdown", True),
     ]
+
+
+def test_run_flask_app_installs_shutdown_before_building_app(monkeypatch):
+    import lifecycle
+    from contextlib import contextmanager
+
+    events = []
+
+    class FakeApp:
+        extensions = {
+            "trove.shutdown": lambda *, wait: events.append(("shutdown", wait)),
+        }
+
+        def run(self, **_options):
+            events.append("run")
+            return "stopped"
+
+    def build_app():
+        events.append("build")
+        return FakeApp()
+
+    @contextmanager
+    def observed_bridge(_shutdown):
+        events.append("install")
+        try:
+            yield
+        finally:
+            events.append("restore")
+
+    monkeypatch.setattr(lifecycle, "sigterm_shutdown", observed_bridge)
+
+    result = lifecycle.run_flask_app(app_factory=build_app)
+
+    assert result == "stopped"
+    assert events == [
+        "install",
+        "build",
+        "run",
+        ("shutdown", True),
+        "restore",
+    ]
+
+
+def test_sigterm_relay_is_installed_before_worker_start(monkeypatch):
+    import lifecycle
+
+    events = []
+
+    class FakeThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            events.append("worker-start")
+
+        def join(self, timeout=None):
+            pass
+
+    def record_signal(_signum, handler):
+        events.append("install" if callable(handler) else "restore")
+
+    monkeypatch.setattr(lifecycle.threading, "Thread", FakeThread)
+    monkeypatch.setattr(lifecycle.signal, "getsignal", lambda _signum: "previous")
+    monkeypatch.setattr(lifecycle.signal, "signal", record_signal)
+
+    with lifecycle.sigterm_shutdown(lambda: None):
+        pass
+
+    assert events[:2] == ["install", "worker-start"]
+
+
+def test_failed_sigterm_drain_does_not_exit_and_can_be_retried(monkeypatch):
+    import lifecycle
+
+    first_attempt = threading.Event()
+    second_attempt = threading.Event()
+    exit_codes = []
+    attempts = 0
+
+    def shutdown():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            first_attempt.set()
+            raise RuntimeError("tree still live")
+        second_attempt.set()
+
+    monkeypatch.setattr(lifecycle.os, "_exit", exit_codes.append)
+
+    with lifecycle.sigterm_shutdown(shutdown) as bridge:
+        os.write(bridge._write_fd, lifecycle._TERMINATE)
+        assert first_attempt.wait(1)
+        time.sleep(0.01)
+        assert exit_codes == []
+
+        os.write(bridge._write_fd, lifecycle._TERMINATE)
+        assert second_attempt.wait(1)
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and not exit_codes:
+            time.sleep(0.001)
+        assert exit_codes == [128 + signal.SIGTERM]
 
 
 def test_app_exposes_one_shutdown_boundary_for_all_owned_workers(tmp_path, monkeypatch):

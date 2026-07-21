@@ -72,6 +72,10 @@ class ReasoningDisabledError(ProviderUnavailableError):
     error_category = "reasoning_provider_required"
 
 
+class ReasoningDrainError(RuntimeError):
+    """Raised when shutdown cannot prove every owned reasoning tree exited."""
+
+
 def is_offline(env: dict | None = None) -> bool:
     """True when the engine-wide offline switch (``SPOOL_OFFLINE``) is set."""
     e = env if env is not None else os.environ
@@ -246,9 +250,11 @@ class _OwnedReasoningProcess:
         self.kill()
         try:
             self._process.wait(timeout=max(0.0, timeout))
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             self.kill()
-            self._process.wait()
+            raise RuntimeError(
+                "Codex parent process did not exit within the shutdown timeout"
+            ) from exc
         self.wait_for_group_exit(timeout=min(0.25, max(0.0, timeout)))
 
 
@@ -258,6 +264,7 @@ class ReasoningProcessRegistry:
     def __init__(self):
         self._lock = RLock()
         self._active: set[_OwnedReasoningProcess] = set()
+        self._leases: dict[_OwnedReasoningProcess, object] = {}
         self._closing = False
 
     @property
@@ -270,18 +277,60 @@ class ReasoningProcessRegistry:
         with self._lock:
             return self._closing
 
-    def spawn(self, factory: Callable[[], _OwnedReasoningProcess]) -> _OwnedReasoningProcess:
+    def spawn(
+        self,
+        factory: Callable[[], _OwnedReasoningProcess],
+        *,
+        lease=None,
+    ) -> _OwnedReasoningProcess:
         """Linearize process creation/registration against shutdown."""
         with self._lock:
             if self._closing:
                 raise ProviderUnavailableError("remote reasoning is shutting down")
-            process = factory()
-            self._active.add(process)
-            return process
+            retained = lease is not None
+            if lease is not None:
+                # Called while launch_admission owns the policy lock. Retaining
+                # here makes process registration + lease ownership one boundary.
+                lease.retain_for_process()
+            process = None
+            registered = False
+            try:
+                process = factory()
+                self._active.add(process)
+                registered = True
+                if lease is not None:
+                    self._leases[process] = lease
+                return process
+            except BaseException:
+                if registered:
+                    self._active.discard(process)
+                    self._leases.pop(process, None)
+                if process is not None:
+                    try:
+                        process.terminate_and_wait(timeout=2.0)
+                    except BaseException as cleanup_error:
+                        # Keep the retained policy reference: an unconfirmed live
+                        # process must continue blocking Offline even if registration
+                        # itself failed and cannot be retried through this registry.
+                        raise ReasoningDrainError(
+                            "could not drain Codex process after registration failed"
+                        ) from cleanup_error
+                    if not process.tree_exited:
+                        raise ReasoningDrainError(
+                            "Codex process exit remained unconfirmed after registration failed"
+                        )
+                if retained:
+                    lease.release()
+                raise
 
     def release(self, process: _OwnedReasoningProcess) -> None:
         with self._lock:
             self._active.discard(process)
+            lease = self._leases.pop(process, None)
+        # Never acquire the policy lock while holding the registry lock: spawn
+        # consistently takes policy then registry, so the reverse order can deadlock.
+        if lease is not None:
+            lease.release()
 
     def shutdown(self, *, timeout: float = 5.0) -> None:
         """Reject new launches, kill all registered trees, and reap their parents."""
@@ -306,6 +355,11 @@ class ReasoningProcessRegistry:
                 # A later shutdown call can retry every entry that remains tracked.
                 if process.tree_exited:
                     self.release(process)
+        remaining = self.active_count
+        if remaining:
+            raise ReasoningDrainError(
+                f"could not confirm exit for {remaining} Codex process tree(s)"
+            )
 
 
 _reasoning_registries_lock = RLock()
@@ -342,22 +396,29 @@ def _communicate_reasoning_process(
     timeout: float,
 ) -> tuple[str, str]:
     """Communicate, reap the parent, and confirm tree exit before returning."""
+    def bounded_abort() -> None:
+        deadline = time.monotonic() + 2.0
+        process.kill()
+        try:
+            process.communicate(
+                timeout=max(0.0, deadline - time.monotonic())
+            )
+        except BaseException:
+            process.terminate_and_wait(
+                timeout=max(0.0, deadline - time.monotonic())
+            )
+        else:
+            process.wait_for_group_exit(
+                timeout=min(0.25, max(0.0, deadline - time.monotonic()))
+            )
+
     try:
         stdout, stderr = process.communicate(input=input_text, timeout=timeout)
     except subprocess.TimeoutExpired:
-        process.kill()
-        try:
-            process.communicate()
-        finally:
-            process.wait_for_group_exit()
+        bounded_abort()
         raise
     except BaseException:
-        try:
-            if process.poll() is None:
-                process.kill()
-            process.communicate()
-        finally:
-            process.wait_for_group_exit()
+        bounded_abort()
         raise
     process.wait_for_group_exit()
     return stdout or "", stderr or ""
@@ -458,7 +519,8 @@ class CodexProvider:
                             stderr=subprocess.PIPE,
                             text=True,
                             cwd=scratch,
-                        )
+                        ),
+                        lease=lease,
                     )
             except FileNotFoundError as e:  # race: vanished between which() and spawn
                 raise ProviderUnavailableError(

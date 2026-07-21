@@ -31,6 +31,24 @@ class _EgressLease:
         self._purpose = purpose
         self._owner_ident = get_ident()
         self._active = True
+        self._references = 1
+
+    def retain_for_process(self) -> None:
+        """Keep this logical lease active until its registered process tree exits."""
+        with self._policy._lock:
+            if not self._active or self._owner_ident != get_ident():
+                raise RuntimeError("only the active lease owner can retain a process")
+            self._references += 1
+
+    def release(self) -> None:
+        """Release one owner; policy capacity returns only after the last owner."""
+        with self._policy._lock:
+            if not self._active:
+                return
+            self._references -= 1
+            if self._references == 0:
+                self._active = False
+                self._policy._active_leases -= 1
 
     @contextmanager
     def launch_admission(self) -> Iterator[None]:
@@ -73,10 +91,7 @@ class NetworkPolicy:
         try:
             yield lease
         finally:
-            with self._lock:
-                if lease._active:
-                    lease._active = False
-                    self._active_leases -= 1
+            lease.release()
 
     @contextmanager
     def _launch_admission(self, lease: _EgressLease) -> Iterator[None]:

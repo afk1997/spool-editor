@@ -1019,5 +1019,4 @@ if __name__ == "__main__":
     from lifecycle import run_flask_app
     # Refuse to start on a public bind without auth — see config.py.
     assert_safe_bind(DEFAULT_HOST)
-    app = create_app()
-    run_flask_app(app, host=DEFAULT_HOST, port=DEFAULT_PORT)
+    run_flask_app(app_factory=create_app, host=DEFAULT_HOST, port=DEFAULT_PORT)

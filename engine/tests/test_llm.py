@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from clip import llm
-from network_policy import NetworkPolicy
+from network_policy import NetworkPolicy, NetworkPolicyError
 from settings import SettingsStore
 
 
@@ -1044,12 +1044,142 @@ def test_reasoning_registry_retains_a_tree_until_exit_is_confirmed():
     process = UnconfirmedProcess()
     registry.spawn(lambda: process)
 
-    registry.shutdown(timeout=0)
+    with pytest.raises(llm.ReasoningDrainError, match="could not confirm exit"):
+        registry.shutdown(timeout=0)
     assert registry.active_count == 1
 
     registry.shutdown(timeout=0)
     assert process.attempts == 2
     assert registry.active_count == 0
+
+
+def test_owned_process_wait_never_becomes_unbounded_after_timeout():
+    class NeverReaped:
+        pid = 4242
+
+        def __init__(self):
+            self.wait_timeouts = []
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            self.wait_timeouts.append(timeout)
+            raise llm.subprocess.TimeoutExpired(cmd="codex", timeout=timeout)
+
+    process = NeverReaped()
+    owned = llm._OwnedReasoningProcess(process, owns_group=False)
+
+    with pytest.raises(RuntimeError, match="did not exit"):
+        owned.terminate_and_wait(timeout=0.01)
+
+    assert process.wait_timeouts
+    assert all(timeout is not None for timeout in process.wait_timeouts)
+
+
+@pytest.mark.parametrize(
+    "first_error",
+    [
+        pytest.param("timeout", id="timeout"),
+        pytest.param("base_exception", id="base-exception"),
+    ],
+)
+def test_failed_communicate_uses_only_bounded_process_cleanup(first_error):
+    class FailedCommunication:
+        tree_exited = False
+
+        def __init__(self):
+            self.communicate_timeouts = []
+            self.cleanup_timeouts = []
+
+        def communicate(self, input=None, timeout=None):
+            self.communicate_timeouts.append(timeout)
+            if len(self.communicate_timeouts) > 1:
+                if timeout is None:
+                    raise AssertionError("cleanup called communicate without a bound")
+                raise llm.subprocess.TimeoutExpired(cmd="codex", timeout=timeout)
+            if first_error == "timeout":
+                raise llm.subprocess.TimeoutExpired(cmd="codex", timeout=timeout)
+            raise ValueError("injected communication failure")
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            pass
+
+        def wait_for_group_exit(self, *, timeout=0.25):
+            pass
+
+        def terminate_and_wait(self, *, timeout):
+            self.cleanup_timeouts.append(timeout)
+            self.tree_exited = True
+
+    process = FailedCommunication()
+    expected = llm.subprocess.TimeoutExpired if first_error == "timeout" else ValueError
+
+    with pytest.raises(expected):
+        llm._communicate_reasoning_process(
+            process,
+            input_text="transcript",
+            timeout=0.01,
+        )
+
+    assert process.communicate_timeouts[0] == 0.01
+    assert all(timeout is not None for timeout in process.communicate_timeouts)
+    assert process.cleanup_timeouts
+    assert all(timeout is not None for timeout in process.cleanup_timeouts)
+
+
+def test_unconfirmed_reasoning_tree_retains_egress_lease_until_registry_drain(
+    tmp_path, monkeypatch,
+):
+    policy = NetworkPolicy()
+    registry = llm.reasoning_process_registry(policy)
+
+    class UnconfirmedProcess:
+        returncode = 0
+        tree_exited = False
+
+        def communicate(self, *, input, timeout):
+            return "", ""
+
+        def wait_for_group_exit(self, *, timeout=0.25):
+            raise RuntimeError("group exit is unconfirmed")
+
+        def kill(self):
+            pass
+
+        def terminate_and_wait(self, *, timeout):
+            self.tree_exited = True
+
+    process = UnconfirmedProcess()
+    monkeypatch.setattr(llm.shutil, "which", lambda binary: binary)
+    monkeypatch.setattr(
+        llm,
+        "_spawn_reasoning_process",
+        lambda *_args, **_kwargs: process,
+    )
+    provider = llm.CodexProvider(
+        network_policy=policy,
+        privacy_state=lambda: _privacy(),
+        cwd=str(tmp_path),
+    )
+
+    with pytest.raises(RuntimeError, match="group exit is unconfirmed"):
+        provider.complete("transcript")
+
+    assert registry.active_count == 1
+    assert policy.active_leases == 1
+    with pytest.raises(NetworkPolicyError) as denied:
+        policy.enable_offline()
+    assert denied.value.code == "network_work_active"
+
+    registry.shutdown(timeout=0)
+    assert registry.active_count == 0
+    assert policy.active_leases == 0
+    policy.enable_offline()
+    assert policy.offline is True
 
 
 def test_codex_provider_rejects_a_registry_outside_its_shared_policy_boundary():
@@ -1062,3 +1192,30 @@ def test_codex_provider_rejects_a_registry_outside_its_shared_policy_boundary():
             privacy_state=lambda: _privacy(),
             process_registry=rogue_registry,
         )
+
+
+def test_registry_spawn_rolls_back_retained_lease_and_process_on_registration_error():
+    policy = NetworkPolicy()
+    registry = llm.ReasoningProcessRegistry()
+
+    class UnhashableProcess:
+        __hash__ = None
+        tree_exited = False
+
+        def __init__(self):
+            self.terminated = False
+
+        def terminate_and_wait(self, *, timeout):
+            assert timeout is not None
+            self.terminated = True
+            self.tree_exited = True
+
+    process = UnhashableProcess()
+    with policy.egress("codex_reasoning") as lease:
+        with pytest.raises(TypeError):
+            registry.spawn(lambda: process, lease=lease)
+        assert process.terminated is True
+        assert registry.active_count == 0
+        assert policy.active_leases == 1
+
+    assert policy.active_leases == 0

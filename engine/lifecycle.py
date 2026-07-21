@@ -57,8 +57,9 @@ class _SigtermShutdown(AbstractContextManager):
             name="trove-sigterm-shutdown",
             daemon=True,
         )
-        self._worker.start()
         signal.signal(signal.SIGTERM, relay)
+        # The pipe buffers a signal delivered before the worker starts.
+        self._worker.start()
         return self
 
     def _wait_for_signal(self) -> None:
@@ -78,8 +79,11 @@ class _SigtermShutdown(AbstractContextManager):
                 self._shutdown()
             except BaseException:
                 _log.exception("engine shutdown failed while handling SIGTERM")
-            finally:
-                os._exit(128 + signal.SIGTERM)
+                # A retained process tree is not drained. Stay alive so a later
+                # SIGTERM can retry; SIGKILL remains the operator's explicit escape.
+                continue
+            os._exit(128 + signal.SIGTERM)
+            return
 
     def __exit__(self, exc_type, exc_value, traceback):
         if self._write_fd is None:
@@ -108,13 +112,34 @@ def sigterm_shutdown(shutdown: Callable[[], None]) -> AbstractContextManager:
     return _SigtermShutdown(shutdown)
 
 
-def run_flask_app(app, **run_options):
+def run_flask_app(app=None, *, app_factory=None, **run_options):
     """Run a Flask app and close every engine-owned worker on every exit path."""
-    shutdown = app.extensions.get("trove.shutdown")
-    if not callable(shutdown):
-        return app.run(**run_options)
+    if (app is None) == (app_factory is None):
+        raise ValueError("provide exactly one of app or app_factory")
 
-    with sigterm_shutdown(lambda: shutdown(wait=False)):
+    app_ready = threading.Event()
+    shutdown_holder = {}
+
+    def shutdown_from_signal():
+        # SIGTERM may arrive midway through app construction. Wait for the
+        # factory to either publish its complete ownership boundary or fail.
+        app_ready.wait()
+        shutdown = shutdown_holder.get("shutdown")
+        if callable(shutdown):
+            shutdown(wait=False)
+
+    with sigterm_shutdown(shutdown_from_signal):
+        if app_factory is not None:
+            try:
+                app = app_factory()
+            finally:
+                if app is None:
+                    app_ready.set()
+        shutdown = app.extensions.get("trove.shutdown")
+        shutdown_holder["shutdown"] = shutdown
+        app_ready.set()
+        if not callable(shutdown):
+            return app.run(**run_options)
         try:
             return app.run(**run_options)
         finally:
