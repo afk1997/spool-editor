@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 import pytest
 from app import create_app
+from job_capacity import QueueFullError
 from jobs import Job, JobStatus
 import transcribe_jobs
 import safety
@@ -268,6 +269,29 @@ def test_submit_job_busy_returns_503(client, monkeypatch):
     assert r.get_json()["error"] == "busy"
 
 
+def _assert_queue_full_response(response):
+    assert response.status_code == 429
+    assert response.get_json() == {"error": "queue_full", "retry_after": 1}
+    assert response.headers["Retry-After"] == "1"
+
+
+def test_submit_job_queue_full_returns_exact_429_and_releases_idempotency_claim(client):
+    app, c = client
+
+    def saturated(*_args, **_kwargs):
+        raise QueueFullError("download queue full")
+
+    app.extensions["trove.actions"]["enqueue_download"] = saturated
+    request = {
+        "json": {"url": "https://93.184.216.34/video", "title": "x"},
+        "headers": {"Idempotency-Key": "capacity-retry"},
+    }
+
+    _assert_queue_full_response(c.post("/api/v1/jobs", **request))
+    # A rejected claim must be released so retry does not become 409 in_flight.
+    _assert_queue_full_response(c.post("/api/v1/jobs", **request))
+
+
 def test_submit_job_does_not_probe_on_the_request_thread(client, monkeypatch):
     """A single-URL submit with NO title must enqueue immediately without
     running yt-dlp's ``run_info`` probe on the request thread.
@@ -379,6 +403,26 @@ def test_attempt_unwinding_resume_returns_structured_409(client):
 
     assert response.status_code == 409
     assert response.get_json() == {"error": "attempt_unwinding"}
+
+
+def test_resume_queue_full_returns_exact_429_and_preserves_paused_job(client):
+    app, c = client
+    paused = Job(id="paused-full", url="u", title="t", status=JobStatus.PAUSED)
+    paused._attempt = 7
+    app.extensions["trove.jobs"]._jobs[paused.id] = paused
+    before = copy.deepcopy(vars(paused))
+    before.pop("last_accessed", None)
+
+    def saturated(_job_id):
+        raise QueueFullError("download queue full")
+
+    app.extensions["trove.actions"]["resume_job"] = saturated
+    response = c.post(f"/api/v1/jobs/{paused.id}/resume")
+
+    _assert_queue_full_response(response)
+    after = copy.deepcopy(vars(paused))
+    after.pop("last_accessed", None)
+    assert after == before
 
 
 @pytest.mark.parametrize(
@@ -735,6 +779,41 @@ def test_attempt_staging_successful_download_promotes_before_auto_transcribe(
     assert auto_state == [(JobStatus.DONE, str(final), True)]
 
 
+def test_auto_transcribe_queue_full_does_not_poison_completed_download(
+    client, monkeypatch,
+):
+    from runner import DownloadResult
+    import app as app_module
+
+    app, c = client
+
+    def fake_download(**kwargs):
+        staged = Path(kwargs["out_template"].replace("%(ext)s", "mp4"))
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"download")
+        return DownloadResult(file_path=str(staged))
+
+    def saturated(**_kwargs):
+        raise QueueFullError("transcription queue full")
+
+    monkeypatch.setattr(app_module, "run_download", fake_download)
+    monkeypatch.setattr("models_store.get_active_path", lambda: Path("model.bin"))
+    monkeypatch.setattr(app.extensions["trove.transcribe"], "submit", saturated)
+
+    response = c.post("/api/v1/jobs", json={
+        "url": "https://93.184.216.34/video",
+        "title": "video",
+        "auto_transcribe": True,
+    })
+    job_id = response.get_json()["id"]
+    assert _wait_download_worker_inactive(app.extensions["trove.jobs"], job_id)
+
+    job = app.extensions["trove.jobs"].get(job_id)
+    assert job.status is JobStatus.DONE
+    assert Path(job.file_path).read_bytes() == b"download"
+    assert app.extensions["trove.transcribe"].snapshot_jobs() == []
+
+
 def test_auto_transcribe_entitlement_survives_dismiss_after_done_persist(
     client, monkeypatch,
 ):
@@ -828,6 +907,31 @@ def test_start_transcribe_409_when_no_active_model(client, monkeypatch):
     r = c.post("/api/v1/jobs/p/transcribe")
     assert r.status_code == 409
     assert r.get_json()["error"] == "no_active_model"
+
+
+def test_start_transcribe_queue_full_returns_exact_429_without_hidden_job(
+    client, monkeypatch, tmp_path,
+):
+    app, c = client
+    media = tmp_path / "parent.mp4"
+    media.write_bytes(b"media")
+    app.extensions["trove.jobs"]._jobs["parent-full"] = Job(
+        id="parent-full",
+        url="u",
+        title="t",
+        status=JobStatus.DONE,
+        file_path=str(media),
+    )
+    monkeypatch.setattr("models_store.get_active_path", lambda: Path("model.bin"))
+
+    def saturated(_parent_job_id):
+        raise QueueFullError("transcription queue full")
+
+    app.extensions["trove.actions"]["start_transcribe"] = saturated
+    response = c.post("/api/v1/jobs/parent-full/transcribe")
+
+    _assert_queue_full_response(response)
+    assert app.extensions["trove.transcribe"].snapshot_jobs() == []
 
 
 def test_start_transcribe_idempotent_on_existing(client, monkeypatch, tmp_path):
@@ -1520,6 +1624,54 @@ def test_submit_bulk_partial_failure(client):
     body = r.get_json()
     assert body["submitted"] == 2 and body["failed"] == 1
     assert body["results"][1]["error"] == "unsupported_url"
+
+
+def test_submit_bulk_partial_capacity_returns_exact_rows_header_and_no_hidden_jobs(client):
+    app, c = client
+    calls = 0
+
+    def capacity_one(url, _fmt, _fmt_id, title, _thumbnail="", **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise QueueFullError("download queue full")
+        job = Job(id="accepted-1", url=url, title=title, status=JobStatus.QUEUED)
+        app.extensions["trove.jobs"]._jobs[job.id] = job
+        return job.id
+
+    app.extensions["trove.actions"]["enqueue_download"] = capacity_one
+    response = c.post("/api/v1/jobs/bulk", json={
+        "urls": [
+            "https://93.184.216.34/one",
+            "https://93.184.216.34/two",
+            "https://93.184.216.34/three",
+        ],
+    })
+
+    assert response.status_code == 207
+    assert response.headers["Retry-After"] == "1"
+    assert response.get_json() == {
+        "submitted": 1,
+        "failed": 2,
+        "results": [
+            {
+                "url": "https://93.184.216.34/one",
+                "id": "accepted-1",
+                "title": "https://93.184.216.34/one",
+            },
+            {
+                "url": "https://93.184.216.34/two",
+                "error": "queue_full",
+                "retry_after": 1,
+            },
+            {
+                "url": "https://93.184.216.34/three",
+                "error": "queue_full",
+                "retry_after": 1,
+            },
+        ],
+    }
+    assert [job.id for job in app.extensions["trove.jobs"].snapshot_jobs()] == ["accepted-1"]
 
 
 def test_submit_bulk_rejects_empty(client):
@@ -3004,6 +3156,32 @@ def test_watch_scan_ingests_new_folder_videos(client, tmp_path, monkeypatch):
     assert r.status_code == 200 and len(r.get_json()["ingested"]) == 1     # the new file ingested
     assert "talk.mp4" in c.get(f"/api/v1/watches/{wid}").get_json()["seen"]
     assert c.post(f"/api/v1/watches/{wid}/scan").get_json()["ingested"] == []   # nothing new the 2nd scan
+
+
+def test_watch_ingest_queue_full_returns_429_without_retry_or_seen_state(
+    client, tmp_path, monkeypatch,
+):
+    app, c = client
+    inbox = tmp_path / "capacity-inbox"
+    inbox.mkdir()
+    (inbox / "queued.mp4").write_bytes(b"media")
+    created = c.post("/api/v1/watches", json={
+        "name": "Capacity",
+        "kind": "folder",
+        "target": str(inbox),
+    }).get_json()
+    store = app.extensions["trove.watches"]
+    before = copy.deepcopy(store.get(created["id"]))
+    monkeypatch.setattr(watcher, "list_folder_items", lambda *_a, **_kw: ["queued.mp4"])
+
+    def saturated(*_args, **_kwargs):
+        raise QueueFullError("download queue full")
+
+    monkeypatch.setattr(app.extensions["trove.jobs"], "submit", saturated)
+    response = c.post(f"/api/v1/watches/{created['id']}/scan")
+
+    _assert_queue_full_response(response)
+    assert store.get(created["id"]) == before
 
 
 def test_offline_folder_watch_create_update_and_scan_remain_local(client, tmp_path, monkeypatch):

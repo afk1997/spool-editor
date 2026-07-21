@@ -33,6 +33,7 @@ import models_store
 import transcribe_jobs
 import transcript_io
 from jobs import JobStatus
+from job_capacity import QueueFullError
 from network_policy import NetworkPolicyError
 from safety import (
     token_or_sig_required, token_required,
@@ -850,6 +851,8 @@ def _submit_one(url: str, *, format_choice: str = "video",
         )
     except NetworkPolicyError:
         raise
+    except QueueFullError:
+        return None, {"error": "queue_full", "retry_after": 1}
     except ValueError:
         return None, {"error": "unsupported_url"}
     except RuntimeError:
@@ -916,8 +919,13 @@ def submit_job():
         raise
     if err is not None:
         _idempotency_store.release(idem_key)
-        # Map error codes to HTTP status. ``busy`` is a real 503 (queue
-        # full); everything else is a 400 (caller-side problem).
+        # Capacity exhaustion is a retryable, typed contract. Preserve
+        # generic RuntimeError as the older 503 ``busy`` response.
+        if err["error"] == "queue_full":
+            response = jsonify(err)
+            response.status_code = 429
+            response.headers["Retry-After"] = "1"
+            return response
         code = 503 if err["error"] == "busy" else 400
         return jsonify(err), code
     if idem_key:
@@ -981,9 +989,13 @@ def submit_bulk():
             results.append({"url": u, **err})
             failed += 1
     status_code = 201 if failed == 0 else 207
-    return jsonify({
+    response = jsonify({
         "submitted": submitted, "failed": failed, "results": results,
-    }), status_code
+    })
+    response.status_code = status_code
+    if any(row.get("error") == "queue_full" for row in results):
+        response.headers["Retry-After"] = "1"
+    return response
 
 
 @api_v1_bp.post("/jobs/<job_id>/pause")

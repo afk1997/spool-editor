@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from app import create_app
+from job_capacity import QueueFullError
 from jobs import Job, JobStatus
 
 
@@ -90,6 +91,37 @@ def _await(c, jid, status="done", tries=150):
         time.sleep(0.02)
     last = c.get(f"/api/v1/clip-jobs/{jid}").get_json()
     raise AssertionError(f"job {jid} never reached {status}: {last}")
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/api/v1/sources/src1/moments", {"mode": "funny", "count": 1}),
+        ("/api/v1/sources/src1/produce", {"content_mode": "funny", "count": 1}),
+        ("/api/v1/sources/src1/cut", {"start": 1, "end": 5}),
+        ("/api/v1/clips/clipA/reframe", {}),
+        ("/api/v1/clips/clipA/captions", {}),
+        ("/api/v1/clips/clipA/renders", {}),
+        ("/api/v1/sources/src1/render", {"start": 1, "end": 5}),
+    ],
+)
+def test_media_submission_routes_return_exact_queue_full_without_hidden_jobs(
+    client, monkeypatch, path, payload,
+):
+    app, c = client
+    _seed_source(app)
+    _seed_clip(app)
+
+    def saturated(*_args, **_kwargs):
+        raise QueueFullError("media queue full")
+
+    monkeypatch.setattr(app.extensions["trove.clips"], "submit", saturated)
+    response = c.post(path, json=payload)
+
+    assert response.status_code == 429
+    assert response.get_json() == {"error": "queue_full", "retry_after": 1}
+    assert response.headers["Retry-After"] == "1"
+    assert app.extensions["trove.clips"].snapshot_jobs() == []
 
 
 # ---- moments ---------------------------------------------------------

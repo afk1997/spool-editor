@@ -12,6 +12,7 @@ from safety import (
 from config import rate_limit_max_keys, trusted_proxy_hops
 from runner import run_download, run_info
 from jobs import AttemptUnwindingError, JobManager, Job, JobStatus
+from job_capacity import QueueFullError
 from attempt_staging import AttemptOutcome, Promotion
 import models_store
 import machine
@@ -70,6 +71,13 @@ def create_app() -> Flask:
     @app.errorhandler(NetworkPolicyError)
     def _network_policy_error(error):
         return jsonify({"error": error.code}), 409
+
+    @app.errorhandler(QueueFullError)
+    def _queue_full(_error):
+        response = jsonify({"error": "queue_full", "retry_after": 1})
+        response.status_code = 429
+        response.headers["Retry-After"] = "1"
+        return response
 
     rate_limiter = RateLimiter(
         rate=RATE_LIMIT_PER_MIN,
@@ -791,7 +799,7 @@ def create_app() -> Flask:
                 pass
             return _enqueue_download(url=key, format_choice="video", format_id=None,
                                      title=title, thumbnail=thumbnail, auto_transcribe=True)
-        except NetworkPolicyError:
+        except (NetworkPolicyError, QueueFullError):
             raise
         except Exception:
             app.logger.warning("watch ingest failed for %r", key, exc_info=True)
