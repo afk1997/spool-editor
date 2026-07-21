@@ -72,7 +72,7 @@ def list_installed() -> list[str]:
     try:
         return sorted(p.name for p in MODELS_DIR.iterdir()
                       if p.suffix == ".bin" and p.name.startswith("ggml-"))
-    except OSError:
+    except FileNotFoundError:
         return []
 
 
@@ -81,7 +81,7 @@ def get_active() -> str | None:
     active_file = MODELS_DIR / "ACTIVE"
     try:
         name = active_file.read_text().strip()
-    except OSError:
+    except FileNotFoundError:
         return None
     if not name or not (MODELS_DIR / name).exists():
         return None

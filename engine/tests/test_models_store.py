@@ -46,6 +46,33 @@ def test_model_mutation_still_ensures_a_missing_models_directory(tmp_path, monke
     assert models_dir.is_dir()
 
 
+def test_list_installed_propagates_model_directory_permission_errors(
+    tmp_models_dir, monkeypatch
+):
+    def denied(_path):
+        raise PermissionError("models unreadable")
+
+    monkeypatch.setattr(Path, "iterdir", denied)
+
+    with pytest.raises(PermissionError, match="models unreadable"):
+        models_store.list_installed()
+
+
+def test_get_active_propagates_active_file_permission_errors(
+    tmp_models_dir, monkeypatch
+):
+    def denied(path, *args, **kwargs):
+        if path.name == "ACTIVE":
+            raise PermissionError("ACTIVE unreadable")
+        return original_read_text(path, *args, **kwargs)
+
+    original_read_text = Path.read_text
+    monkeypatch.setattr(Path, "read_text", denied)
+
+    with pytest.raises(PermissionError, match="ACTIVE unreadable"):
+        models_store.get_active()
+
+
 def test_list_installed_returns_only_ggml_bins(tmp_models_dir):
     (tmp_models_dir / "ggml-tiny.bin").write_bytes(b"x")
     (tmp_models_dir / "ggml-base.bin").write_bytes(b"x")
