@@ -165,8 +165,6 @@ class JobManager:
             if job.status in (JobStatus.DOWNLOADING, JobStatus.QUEUED):
                 job.status = JobStatus.PAUSED
             self._jobs[jid] = job
-            if job.status is JobStatus.PAUSED:
-                self._ensure_download_staging_locked(job)
 
     def _persist(self, *, only_if_dirty: bool = False) -> bool:
         if self._store_path is None:
@@ -341,8 +339,15 @@ class JobManager:
             else:
                 # resume() exposes DOWNLOADING immediately, but the captured
                 # identity/attempt still must be live when its worker slot opens.
+                # Normalize legacy partials only after the executor accepts this
+                # wrapper.  A rejected resume must leave both bytes and its
+                # persisted row exactly where they were for a later retry.
                 started = self._mutate_current(
-                    job.id, job, attempt, {JobStatus.DOWNLOADING}, lambda _current: None,
+                    job.id,
+                    job,
+                    attempt,
+                    {JobStatus.DOWNLOADING},
+                    lambda current: self._ensure_download_staging_locked(current),
                 )
             if not started:
                 return
@@ -584,7 +589,6 @@ class JobManager:
                 )
             }
             try:
-                self._ensure_download_staging_locked(job)
                 job._attempt += 1
                 attempt = job._attempt
                 job.status = JobStatus.DOWNLOADING

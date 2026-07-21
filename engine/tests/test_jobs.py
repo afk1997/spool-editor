@@ -1082,6 +1082,59 @@ def test_download_resume_rejection_restores_paused_record_and_store(tmp_path):
     manager.shutdown(wait=True)
 
 
+def test_legacy_download_resume_rejection_preserves_partial_store_and_retry(tmp_path):
+    from jobs_store import persist_atomic
+
+    store = tmp_path / "jobs.json"
+    legacy_root = tmp_path / "legacy"
+    legacy_root.mkdir()
+    legacy_template = legacy_root / "paused.%(ext)s"
+    legacy_partial = legacy_root / "paused.mp4.part"
+    legacy_partial.write_bytes(b"resume-bytes")
+    persist_atomic(
+        {
+            "paused": Job(
+                id="paused",
+                url="u-paused",
+                title="paused",
+                status=JobStatus.PAUSED,
+                out_template=str(legacy_template),
+            ),
+        },
+        store,
+    )
+    before_store = store.read_bytes()
+
+    manager = JobManager(max_workers=1, store_path=store)
+    manager._executor.shutdown(wait=True)
+    rejecting = _RejectingExecutor()
+    manager._executor = rejecting
+
+    with pytest.raises(RuntimeError, match="executor rejected"):
+        manager.resume("paused", target=lambda _job: None)
+
+    paused = manager.get("paused")
+    assert paused is not None
+    assert paused.status is JobStatus.PAUSED
+    assert paused.out_template == str(legacy_template)
+    assert legacy_partial.read_bytes() == b"resume-bytes"
+    assert store.read_bytes() == before_store
+    assert manager.pending_count == 0
+
+    observed = []
+    manager._executor = ThreadPoolExecutor(max_workers=1)
+
+    def retry_target(job):
+        partial = Path(job.out_template.replace("%(ext)s", "mp4.part"))
+        observed.append(partial.read_bytes())
+
+    assert manager.resume("paused", target=retry_target) is True
+    assert _wait_worker_inactive(manager, "paused")
+    assert observed == [b"resume-bytes"]
+    assert manager.get("paused").status is JobStatus.DONE
+    manager.shutdown(wait=True)
+
+
 def test_download_shutdown_wait_false_rejects_new_work_and_drains():
     manager = JobManager(max_workers=1)
     gate = threading.Event()
