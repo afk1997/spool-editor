@@ -73,7 +73,7 @@ export default function OnboardingScreen() {
 
   const fix = (id: string, hint: string) => { ctx.pushToast({ icon: "terminal", tone: "info", title: `Install ${id}`, body: hint ? `Run: ${hint}` : "See the docs, then re-check." }); doctor.reload(); };
 
-  const steps = ["Welcome", "Dependencies", "Models", "Test render"];
+  const steps = ["Welcome", "Dependencies", "Models", "Summary"];
   const StatusDot = ({ s }: { s: string }) => <span style={{ width: 10, height: 10, borderRadius: "50%", background: s === "ok" ? "var(--ok)" : s === "warn" ? "var(--warn)" : "var(--err)", boxShadow: `0 0 8px ${s === "ok" ? "var(--ok)" : s === "warn" ? "var(--warn)" : "var(--err)"}` }} />;
 
   return (
@@ -140,9 +140,11 @@ export default function OnboardingScreen() {
           {step === 3 && (
             <div style={{ textAlign: "center" }}>
               <div className="ill" style={{ width: 90, height: 90, margin: "0 auto 22px", borderRadius: 24, color: doctor.data?.ok ? "var(--ok)" : "var(--warn)" }}><Icon name={doctor.data?.ok ? "check" : "alert"} size={38} /></div>
-              <h1 style={{ fontSize: 26, marginBottom: 8 }}>{doctor.data?.ok ? "You're all set" : "Almost there"}</h1>
-              <p style={{ color: "var(--text-dim)", fontSize: 14.5, marginBottom: 26, maxWidth: 420, margin: "0 auto 26px" }}>{doctor.data?.ok ? `Your machine has the full pipeline — ffmpeg, whisper.cpp, yt-dlp and the ${encoder} encoder. Time to make your first clip.` : "Fix the missing tools back in the Dependencies step, then come back."}</p>
-              <Btn variant="primary" size="lg" icon="import" onClick={() => ctx.nav("import")}>Make my first clip →</Btn>
+              <h1 style={{ fontSize: 26, marginBottom: 8 }}>{doctor.data?.ok ? "Dependency check complete" : "Dependency check incomplete"}</h1>
+              <p style={{ color: "var(--text-dim)", fontSize: 14.5, marginBottom: 26, maxWidth: 420, margin: "0 auto 26px" }}>{doctor.data?.ok ? "Required command-line dependencies were detected. Setup did not download or validate a model, and it did not run a test render." : "Some required command-line dependencies are missing. Setup did not download or validate a model, and it did not run a test render."}</p>
+              {doctor.data?.ok
+                ? <Btn variant="primary" size="lg" icon="import" onClick={() => ctx.nav("import")}>Go to Import</Btn>
+                : <Btn variant="primary" size="lg" icon="arrowL" onClick={() => setStep(1)}>Back to Dependencies</Btn>}
             </div>
           )}
         </div>

@@ -970,6 +970,43 @@ describe("product truth: visible control inventory", () => {
     expect(screen.queryByText(/engine\/downloads/i)).not.toBeInTheDocument();
   });
 
+  it("finishes onboarding with a dependency summary, not a fake test render", () => {
+    const nav = vi.fn();
+    importHarness.queryData = {
+      doctor: {
+        ok: true,
+        tools: {
+          ffmpeg: { present: true, version: "7.1" },
+          python: { present: true, version: "3.12" },
+          whisper_cpp: { present: true, version: "1.7" },
+          yt_dlp: { present: true, version: "2026.6.9" },
+        },
+        machine: {},
+        encoders: ["libx264"],
+      },
+      storage: { download_dir: "/srv/spool/library" },
+    };
+    importHarness.ctx = baseCtx({ nav });
+    render(<OnboardingScreen />);
+
+    expect(screen.getByText("Summary")).toBeInTheDocument();
+    expect(screen.queryByText("Test render")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Let’s set up" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(screen.getByText("Dependency check complete")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Required command-line dependencies were detected. Setup did not download or validate a model, and it did not run a test render.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("You're all set")).not.toBeInTheDocument();
+    expect(screen.queryByText(/full pipeline/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Go to Import" }));
+    expect(nav).toHaveBeenCalledWith("import");
+  });
+
   it("renders the Codex agent as text-only and submits a plain-language query", () => {
     expect(INITIAL_AGENT).toEqual([
       {
