@@ -237,7 +237,9 @@ describe("editor async lifecycle guards", () => {
     });
 
     await waitFor(() => expect(renderClip).toHaveBeenCalledWith("clip-1", { preset: "tiktok" }));
-    expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({ title: "Applied “Studio kit”" }));
+    expect(pushToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Applied “Studio kit”" }),
+    );
     expect(nav).toHaveBeenCalledWith("queue");
   });
 
@@ -641,13 +643,15 @@ describe("editor controls expose their real accessible actions", () => {
     harness.ctx = baseCtx({
       agentOpen: true,
       working: true,
-      agentMessages: [{
-        role: "elicit",
-        id: "clarify-busy",
-        kind: "enum",
-        q: "Which source should I inspect?",
-        options: ["Interview", "Keynote"],
-      }],
+      agentMessages: [
+        {
+          role: "elicit",
+          id: "clarify-busy",
+          kind: "enum",
+          q: "Which source should I inspect?",
+          options: ["Interview", "Keynote"],
+        },
+      ],
     });
 
     render(<AgentPanel />);

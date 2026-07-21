@@ -11,8 +11,12 @@ const importHarness = vi.hoisted(() => ({
   params: {} as Record<string, string>,
   snapshot: { ts: 1, jobs: [], transcripts: [], clips: [] } as unknown as EventsSnapshot | null,
   router: {
-    push: vi.fn(), replace: vi.fn(), back: vi.fn(), forward: vi.fn(),
-    prefetch: vi.fn(), refresh: vi.fn(),
+    push: vi.fn(),
+    replace: vi.fn(),
+    back: vi.fn(),
+    forward: vi.fn(),
+    prefetch: vi.fn(),
+    refresh: vi.fn(),
   },
   queryData: {} as Record<string, unknown>,
   queryReload: {} as Record<string, ReturnType<typeof vi.fn>>,
@@ -30,13 +34,17 @@ vi.mock("@/lib/engine-context", () => ({
   useEngine: () => importHarness.ctx?.client,
   useEngineQuery: (query: (client: Record<string, (...args: unknown[]) => unknown>) => unknown) => {
     const marker = "__spoolQueryKey";
-    const probe = new Proxy<Record<string, (...args: unknown[]) => unknown>>({}, {
-      get: (_target, property) => () => ({ [marker]: String(property) }),
-    });
+    const probe = new Proxy<Record<string, (...args: unknown[]) => unknown>>(
+      {},
+      {
+        get: (_target, property) => () => ({ [marker]: String(property) }),
+      },
+    );
     const result = query(probe);
-    const key = result && typeof result === "object" && marker in result
-      ? String((result as Record<string, unknown>)[marker])
-      : undefined;
+    const key =
+      result && typeof result === "object" && marker in result
+        ? String((result as Record<string, unknown>)[marker])
+        : undefined;
     return {
       data: key ? importHarness.queryData[key] : undefined,
       loading: false,
@@ -84,7 +92,10 @@ import WatchesScreen from "@/app/watches/page";
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
   return { promise, resolve, reject };
 };
 
@@ -213,7 +224,12 @@ beforeEach(() => {
   importHarness.search = "";
   importHarness.pathname = "/import";
   importHarness.params = {};
-  importHarness.snapshot = { ts: 1, jobs: [], transcripts: [], clips: [] } as unknown as EventsSnapshot;
+  importHarness.snapshot = {
+    ts: 1,
+    jobs: [],
+    transcripts: [],
+    clips: [],
+  } as unknown as EventsSnapshot;
   importHarness.queryData = {};
   importHarness.queryReload = {};
   window.history.replaceState({}, "", "/");
@@ -503,37 +519,63 @@ describe("product truth: live view models", () => {
       error_message: null,
       human: { summary: "waiting" },
     };
-    const snapshot = (statuses: string[]) => ({
-      ts: 0,
-      jobs: statuses.map((status, index) => ({ ...job, id: `${job.id}-${index}`, status })),
-      transcripts: [],
-      clips: [],
-    }) as unknown as EventsSnapshot;
+    const snapshot = (statuses: string[]) =>
+      ({
+        ts: 0,
+        jobs: statuses.map((status, index) => ({ ...job, id: `${job.id}-${index}`, status })),
+        transcripts: [],
+        clips: [],
+      }) as unknown as EventsSnapshot;
 
-    expect(mapDownloads(snapshot(["queued", "paused", "cancelled"])).map((item) => item.status).sort()).toEqual([
-      "cancelled",
-      "paused",
-      "queued",
-    ]);
+    expect(
+      mapDownloads(snapshot(["queued", "paused", "cancelled"]))
+        .map((item) => item.status)
+        .sort(),
+    ).toEqual(["cancelled", "paused", "queued"]);
   });
 
   it("uses the newest transcript attempt in snapshot order", () => {
     const job = {
-      id: "source-retry", url: "https://media.example.test/retry", title: "Retry source",
-      status: "done", filename: "source.mp4", downloaded_bytes: 10, total_bytes: 10,
-      progress_pct: 100, elapsed_seconds: 5, auto_transcribe: true,
+      id: "source-retry",
+      url: "https://media.example.test/retry",
+      title: "Retry source",
+      status: "done",
+      filename: "source.mp4",
+      downloaded_bytes: 10,
+      total_bytes: 10,
+      progress_pct: 100,
+      elapsed_seconds: 5,
+      auto_transcribe: true,
       human: { summary: "done", elapsed: "5s", size: "10 B" },
     };
     const transcript = {
-      parent_job_id: job.id, progress_pct: 100, duration_seconds: 40, speaker_count: 1,
-      error_category: null, error_message: null, human: { summary: "transcript" },
+      parent_job_id: job.id,
+      progress_pct: 100,
+      duration_seconds: 40,
+      speaker_count: 1,
+      error_category: null,
+      error_message: null,
+      human: { summary: "transcript" },
     };
     const snapshot = {
       ts: 2,
       jobs: [job],
       transcripts: [
-        { ...transcript, id: "old-attempt", status: "done", elapsed_seconds: 100, language_detected: "en" },
-        { ...transcript, id: "new-attempt", status: "queued", elapsed_seconds: 1, progress_pct: 0, language_detected: "hi" },
+        {
+          ...transcript,
+          id: "old-attempt",
+          status: "done",
+          elapsed_seconds: 100,
+          language_detected: "en",
+        },
+        {
+          ...transcript,
+          id: "new-attempt",
+          status: "queued",
+          elapsed_seconds: 1,
+          progress_pct: 0,
+          language_detected: "hi",
+        },
       ],
       clips: [],
     } as unknown as EventsSnapshot;
@@ -547,21 +589,47 @@ describe("product truth: live view models", () => {
 
   it("retains the newest successful transcript after a later attempt fails", () => {
     const job = {
-      id: "source-retry", url: "https://media.example.test/retry", title: "Retry source",
-      status: "done", filename: "source.mp4", downloaded_bytes: 10, total_bytes: 10,
-      progress_pct: 100, elapsed_seconds: 5, auto_transcribe: true,
+      id: "source-retry",
+      url: "https://media.example.test/retry",
+      title: "Retry source",
+      status: "done",
+      filename: "source.mp4",
+      downloaded_bytes: 10,
+      total_bytes: 10,
+      progress_pct: 100,
+      elapsed_seconds: 5,
+      auto_transcribe: true,
       human: { summary: "done", elapsed: "5s", size: "10 B" },
     };
     const transcript = {
-      parent_job_id: job.id, progress_pct: 100, duration_seconds: 40, speaker_count: 1,
-      error_category: null, error_message: null, human: { summary: "transcript" },
+      parent_job_id: job.id,
+      progress_pct: 100,
+      duration_seconds: 40,
+      speaker_count: 1,
+      error_category: null,
+      error_message: null,
+      human: { summary: "transcript" },
     };
     const snapshot = {
       ts: 3,
       jobs: [job],
       transcripts: [
-        { ...transcript, id: "successful-attempt", status: "done", elapsed_seconds: 10, language_detected: "en" },
-        { ...transcript, id: "failed-attempt", status: "error", elapsed_seconds: 1, progress_pct: 20, language_detected: null, error_category: "whisper_failed" },
+        {
+          ...transcript,
+          id: "successful-attempt",
+          status: "done",
+          elapsed_seconds: 10,
+          language_detected: "en",
+        },
+        {
+          ...transcript,
+          id: "failed-attempt",
+          status: "error",
+          elapsed_seconds: 1,
+          progress_pct: 20,
+          language_detected: null,
+          error_category: "whisper_failed",
+        },
       ],
       clips: [],
     } as unknown as EventsSnapshot;
@@ -576,16 +644,33 @@ describe("product truth: live view models", () => {
 
   it("keeps cancelled jobs visible and labels moment discovery as analysis", () => {
     const download = {
-      id: "download-cancelled", url: "https://media.example.test/video", title: "Cancelled download",
-      status: "cancelled", filename: null, downloaded_bytes: 2, total_bytes: 10,
-      progress_pct: 20, elapsed_seconds: 3, auto_transcribe: false,
-      error_message: "Cancelled by user", error_category: "cancelled",
+      id: "download-cancelled",
+      url: "https://media.example.test/video",
+      title: "Cancelled download",
+      status: "cancelled",
+      filename: null,
+      downloaded_bytes: 2,
+      total_bytes: 10,
+      progress_pct: 20,
+      elapsed_seconds: 3,
+      auto_transcribe: false,
+      error_message: "Cancelled by user",
+      error_category: "cancelled",
       human: { summary: "cancelled", elapsed: "3s" },
     };
     const clip = {
-      id: "clip-cancelled", kind: "export", source_id: "source-1", clip_id: "clip-1",
-      status: "cancelled", progress_pct: 30, stage: "cancelled", elapsed_seconds: 2,
-      params: {}, result: {}, error_category: "cancelled", error_message: "Cancelled by user",
+      id: "clip-cancelled",
+      kind: "export",
+      source_id: "source-1",
+      clip_id: "clip-1",
+      status: "cancelled",
+      progress_pct: 30,
+      stage: "cancelled",
+      elapsed_seconds: 2,
+      params: {},
+      result: {},
+      error_category: "cancelled",
+      error_message: "Cancelled by user",
       human: { summary: "cancelled", elapsed: "2s" },
     };
     const moments = {
@@ -598,7 +683,12 @@ describe("product truth: live view models", () => {
       error_category: null,
       error_message: null,
     };
-    const jobs = mapJobs({ ts: 3, jobs: [download], transcripts: [], clips: [clip, moments] } as unknown as EventsSnapshot);
+    const jobs = mapJobs({
+      ts: 3,
+      jobs: [download],
+      transcripts: [],
+      clips: [clip, moments],
+    } as unknown as EventsSnapshot);
 
     expect(jobs.find((job) => job.id === download.id)).toMatchObject({
       type: "download",
@@ -621,35 +711,66 @@ describe("product truth: live view models", () => {
 
   it("keeps terminal transcript failures and the real clip error details in Queue", () => {
     const failedTranscript = {
-      id: "transcript-failed", parent_job_id: "source-1", status: "error",
-      progress_pct: 72, elapsed_seconds: 4, error_category: "whisper_failed",
-      error_message: "Whisper worker exited", human: { summary: "transcribing", elapsed: "4s" },
+      id: "transcript-failed",
+      parent_job_id: "source-1",
+      status: "error",
+      progress_pct: 72,
+      elapsed_seconds: 4,
+      error_category: "whisper_failed",
+      error_message: "Whisper worker exited",
+      human: { summary: "transcribing", elapsed: "4s" },
     };
     const cancelledTranscript = {
-      ...failedTranscript, id: "transcript-cancelled", status: "cancelled",
-      error_category: "cancelled", error_message: "Cancelled by user",
+      ...failedTranscript,
+      id: "transcript-cancelled",
+      status: "cancelled",
+      error_category: "cancelled",
+      error_message: "Cancelled by user",
     };
     const failedClip = {
-      id: "clip-failed", kind: "export", source_id: "source-1", clip_id: "clip-1",
-      status: "error", progress_pct: 80, stage: "export", elapsed_seconds: 7,
-      params: {}, result: {}, error_category: "ffmpeg_failed", error_message: "Encoder exited",
+      id: "clip-failed",
+      kind: "export",
+      source_id: "source-1",
+      clip_id: "clip-1",
+      status: "error",
+      progress_pct: 80,
+      stage: "export",
+      elapsed_seconds: 7,
+      params: {},
+      result: {},
+      error_category: "ffmpeg_failed",
+      error_message: "Encoder exited",
       human: { summary: "export", elapsed: "7s" },
     };
     const jobs = mapJobs({
-      ts: 4, jobs: [], transcripts: [failedTranscript, cancelledTranscript], clips: [failedClip],
+      ts: 4,
+      jobs: [],
+      transcripts: [failedTranscript, cancelledTranscript],
+      clips: [failedClip],
     } as unknown as EventsSnapshot);
 
     expect(jobs.find((job) => job.id === failedTranscript.id)).toMatchObject({
-      type: "transcribe", status: "failed", stage: "Whisper worker exited",
-      errorCode: "whisper_failed", errorMessage: "Whisper worker exited", err: true,
+      type: "transcribe",
+      status: "failed",
+      stage: "Whisper worker exited",
+      errorCode: "whisper_failed",
+      errorMessage: "Whisper worker exited",
+      err: true,
     });
     expect(jobs.find((job) => job.id === cancelledTranscript.id)).toMatchObject({
-      type: "transcribe", status: "cancelled", stage: "Cancelled by user",
-      errorCode: "cancelled", errorMessage: "Cancelled by user",
+      type: "transcribe",
+      status: "cancelled",
+      stage: "Cancelled by user",
+      errorCode: "cancelled",
+      errorMessage: "Cancelled by user",
     });
     expect(jobs.find((job) => job.id === failedClip.id)).toMatchObject({
-      type: "render", status: "failed", stage: "Encoder exited",
-      errorCode: "ffmpeg_failed", errorMessage: "Encoder exited", err: true,
+      type: "render",
+      status: "failed",
+      stage: "Encoder exited",
+      errorCode: "ffmpeg_failed",
+      errorMessage: "Encoder exited",
+      err: true,
     });
   });
 });
@@ -660,7 +781,11 @@ describe("product truth: visible control inventory", () => {
     const openShortcuts = vi.fn();
     importHarness.pathname = "/";
     importHarness.ctx = baseCtx({ openPalette, openShortcuts });
-    render(<Shell><p>Current page</p></Shell>);
+    render(
+      <Shell>
+        <p>Current page</p>
+      </Shell>,
+    );
 
     for (const name of ["Home", "Import", "Library", "Clips", "Queue", "Settings"])
       expect(screen.getByRole("link", { name })).toBeInTheDocument();
@@ -679,7 +804,9 @@ describe("product truth: visible control inventory", () => {
     importHarness.ctx = baseCtx({ paletteOpen: true, nav, closePalette });
     render(<CommandPalette />);
 
-    expect(screen.getByPlaceholderText("Search pages, sources, and transcripts…")).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("Search pages, sources, and transcripts…"),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByText("Brand Kit"));
     expect(nav).toHaveBeenCalledWith("brand");
     expect(closePalette).toHaveBeenCalledTimes(1);
@@ -693,7 +820,9 @@ describe("product truth: visible control inventory", () => {
     const { container } = render(<AnalyticsPage />);
 
     expect(screen.getByText("Analytics unavailable")).toBeInTheDocument();
-    expect(screen.getByText(/does not collect or display performance analytics/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/does not collect or display performance analytics/i),
+    ).toBeInTheDocument();
     for (const fabricated of ["128.4k", "41%", "3,201", "+18%"])
       expect(screen.queryByText(fabricated)).not.toBeInTheDocument();
     expect(container.querySelector("polyline")).toBeNull();
@@ -728,7 +857,9 @@ describe("product truth: visible control inventory", () => {
 
     expect(screen.getByText("Agent · read-only")).toBeInTheDocument();
     expect(screen.getByText("Inspection only")).toBeInTheDocument();
-    const input = screen.getByPlaceholderText("Ask about sources, clips, transcripts, or queue status…");
+    const input = screen.getByPlaceholderText(
+      "Ask about sources, clips, transcripts, or queue status…",
+    );
     fireEvent.change(input, { target: { value: "Which jobs are queued?" } });
     fireEvent.keyDown(input, { key: "Enter" });
     expect(askAgent).toHaveBeenCalledWith("Which jobs are queued?");
@@ -777,8 +908,13 @@ describe("product truth: visible control inventory", () => {
 
   it("omits unknown origin and duration glyphs in the rendered Library table", () => {
     const source = sourceFixture({
-      src: "—", channel: "—", kind: "—", dur: 0, status: "downloaded",
-      transcriptId: undefined, speakerCount: undefined,
+      src: "—",
+      channel: "—",
+      kind: "—",
+      dur: 0,
+      status: "downloaded",
+      transcriptId: undefined,
+      speakerCount: undefined,
     });
     importHarness.ctx = baseCtx({ sources: [source] });
     const { container } = render(<LibraryScreen />);
@@ -856,7 +992,9 @@ describe("product truth: visible control inventory", () => {
   });
 
   it("Reframe ignores a completed throwaway preview when selecting canonical track history", () => {
-    const clipArtifactUrl = vi.fn((_id: string, name: string) => `https://files.example.test/${name}.mp4`);
+    const clipArtifactUrl = vi.fn(
+      (_id: string, name: string) => `https://files.example.test/${name}.mp4`,
+    );
     importHarness.params = { id: "clip-1" };
     importHarness.ctx = baseCtx({
       clips: [clipFixture()],
@@ -898,8 +1036,9 @@ describe("product truth: visible control inventory", () => {
 
     expect(screen.getByTitle(/left ·/i)).toBeInTheDocument();
     expect(screen.queryByTitle(/right ·/i)).not.toBeInTheDocument();
-    const renderedPreview = Array.from(view.container.querySelectorAll("video"))
-      .find((video) => video.src.includes("reframed.mp4"));
+    const renderedPreview = Array.from(view.container.querySelectorAll("video")).find((video) =>
+      video.src.includes("reframed.mp4"),
+    );
     expect(renderedPreview?.src).toContain("v=canonical-reframe");
     expect(renderedPreview?.src).not.toContain("throwaway-preview");
   });
@@ -920,24 +1059,30 @@ describe("product truth: structured action errors", () => {
     queue_full: "The work queue is full. Wait for a job to finish, then try again.",
     invalid_url: "Enter a valid HTTP or HTTPS URL.",
     origin_forbidden: "That source is blocked by the engine's origin policy.",
-    agent_mutation_disabled: "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
+    agent_mutation_disabled:
+      "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
     offline_network_disabled: "Turn off Offline mode before using this network action.",
     network_work_active: "Wait for active network work to finish before turning on Offline mode.",
     reasoning_provider_required: "Select Codex as the reasoning provider before using this action.",
-    egress_consent_required: "Allow transcript text to be sent to Codex before using remote reasoning.",
+    egress_consent_required:
+      "Allow transcript text to be sent to Codex before using remote reasoning.",
     egress_consent_requires_codex: "Select Codex before granting remote-reasoning consent.",
-    settings_persist_failed: "The engine could not save settings. Your confirmed settings were kept.",
+    settings_persist_failed:
+      "The engine could not save settings. Your confirmed settings were kept.",
     not_resumable: "This job cannot be resumed. Start it again instead.",
     timeout: "The engine took too long to respond. Try again.",
     unreachable: "The engine is unreachable. Make sure it is running, then try again.",
   } as const;
 
-  it.each(Object.entries(known))("maps %s to exact actionable copy and retains its code", (code, message) => {
-    const error = new SpoolApiError(409, code, "raw engine detail");
-    expect(describeActionError(error)).toEqual({ code, message });
-    expect(formatActionError(error)).toBe(`${message} (${code})`);
-    expect(actionError(error)).toEqual({ code, rawCode: code, message });
-  });
+  it.each(Object.entries(known))(
+    "maps %s to exact actionable copy and retains its code",
+    (code, message) => {
+      const error = new SpoolApiError(409, code, "raw engine detail");
+      expect(describeActionError(error)).toEqual({ code, message });
+      expect(formatActionError(error)).toBe(`${message} (${code})`);
+      expect(actionError(error)).toEqual({ code, rawCode: code, message });
+    },
+  );
 
   it("preserves structured unknown diagnostics and classifies ordinary versus network failures", () => {
     expect(describeActionError({ code: "codec_failed", message: "Codec exited." })).toEqual({
@@ -968,7 +1113,12 @@ describe("product truth: URL import", () => {
     },
     {
       state: "when privacy settings are unavailable",
-      ctx: { settings: null, settingsReady: false, settingsLoading: false, settingsError: "unreachable" },
+      ctx: {
+        settings: null,
+        settingsReady: false,
+        settingsLoading: false,
+        settingsError: "unreachable",
+      },
       reason: /privacy settings are unavailable/i,
     },
     {
@@ -976,28 +1126,36 @@ describe("product truth: URL import", () => {
       ctx: { settings: settingsFixture({ offline: true }), settingsReady: true, offline: true },
       reason: /offline mode blocks network downloads and resumes/i,
     },
-  ])("disables URL submission $state without disabling typing or local controls", ({ ctx, reason }) => {
-    const { submitDownload } = importClient(ctx);
-    render(<ImportPage />);
+  ])(
+    "disables URL submission $state without disabling typing or local controls",
+    ({ ctx, reason }) => {
+      const { submitDownload } = importClient(ctx);
+      render(<ImportPage />);
 
-    const input = screen.getByRole("textbox");
-    const download = screen.getByRole("button", { name: "Download" });
-    expect(input).toBeEnabled();
-    fireEvent.change(input, { target: { value: "https://media.example.test/watch/1" } });
-    expect(input).toHaveValue("https://media.example.test/watch/1");
-    expect(screen.getByRole("button", { name: "Audio" })).toBeEnabled();
-    expect(screen.getByRole("switch", { name: "Download subtitles if available" })).toBeEnabled();
-    expect(download).toBeDisabled();
-    fireEvent.click(download);
+      const input = screen.getByRole("textbox");
+      const download = screen.getByRole("button", { name: "Download" });
+      expect(input).toBeEnabled();
+      fireEvent.change(input, { target: { value: "https://media.example.test/watch/1" } });
+      expect(input).toHaveValue("https://media.example.test/watch/1");
+      expect(screen.getByRole("button", { name: "Audio" })).toBeEnabled();
+      expect(screen.getByRole("switch", { name: "Download subtitles if available" })).toBeEnabled();
+      expect(download).toBeDisabled();
+      fireEvent.click(download);
 
-    expect(submitDownload).not.toHaveBeenCalled();
-    expect(screen.getByRole("status")).toHaveTextContent(reason);
-  });
+      expect(submitDownload).not.toHaveBeenCalled();
+      expect(screen.getByRole("status")).toHaveTextContent(reason);
+    },
+  );
 
   it.each([
     {
       state: "while privacy settings are unavailable",
-      ctx: { settings: null, settingsReady: false, settingsLoading: false, settingsError: "unreachable" },
+      ctx: {
+        settings: null,
+        settingsReady: false,
+        settingsLoading: false,
+        settingsError: "unreachable",
+      },
     },
     {
       state: "in Offline mode",
@@ -1010,12 +1168,24 @@ describe("product truth: URL import", () => {
       ...ctx,
       downloads: [
         {
-          id: "paused-download", title: "Paused download", src: "youtube", prog: 20,
-          status: "paused", size: "10 MB", speed: "—", eta: "—",
+          id: "paused-download",
+          title: "Paused download",
+          src: "youtube",
+          prog: 20,
+          status: "paused",
+          size: "10 MB",
+          speed: "—",
+          eta: "—",
         },
         {
-          id: "active-download", title: "Active download", src: "youtube", prog: 40,
-          status: "downloading", size: "20 MB", speed: "1 MB/s", eta: "10s",
+          id: "active-download",
+          title: "Active download",
+          src: "youtube",
+          prog: 40,
+          status: "downloading",
+          size: "20 MB",
+          speed: "1 MB/s",
+          eta: "10s",
         },
       ],
       client: clientFixture({ pauseJob, resumeJob }),
@@ -1044,7 +1214,9 @@ describe("product truth: URL import", () => {
 
     await waitFor(() => expect(screen.getByText(/invalid url/i)).toBeInTheDocument());
     expect(submitDownload).not.toHaveBeenCalled();
-    expect(input).toHaveValue("https://media.example.test/watch/1 ftp://media.example.test/watch/2");
+    expect(input).toHaveValue(
+      "https://media.example.test/watch/1 ftp://media.example.test/watch/2",
+    );
     expect(pushToast).not.toHaveBeenCalled();
   });
 
@@ -1100,16 +1272,24 @@ describe("product truth: URL import", () => {
     expect(input).toHaveValue("https://media.example.test/one https://media.example.test/two");
     expect(pushToast).not.toHaveBeenCalled();
 
-    await act(async () => { first.resolve({ id: "download-1" }); await Promise.resolve(); });
+    await act(async () => {
+      first.resolve({ id: "download-1" });
+      await Promise.resolve();
+    });
     expect(input).toHaveValue("https://media.example.test/one https://media.example.test/two");
     expect(pushToast).not.toHaveBeenCalled();
 
-    await act(async () => { second.resolve({ id: "download-2" }); await second.promise; });
+    await act(async () => {
+      second.resolve({ id: "download-2" });
+      await second.promise;
+    });
     await waitFor(() => expect(input).toHaveValue(""));
-    expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({
-      title: "2 succeeded, 0 failed",
-      body: "Every download was accepted. Progress appears below and in the queue.",
-    }));
+    expect(pushToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "2 succeeded, 0 failed",
+        body: "Every download was accepted. Progress appears below and in the queue.",
+      }),
+    );
   });
 });
 
@@ -1117,11 +1297,15 @@ describe("product truth: visible mutations settle before success", () => {
   it("Library waits for the whole batch, reports exact counts, and retains failed selections", async () => {
     const delayed = deferred<{ id: string }>();
     const pushToast = vi.fn();
-    const startTranscribe = vi.fn()
+    const startTranscribe = vi
+      .fn()
       .mockReturnValueOnce(delayed.promise)
       .mockRejectedValueOnce(new SpoolApiError(429, "queue_full", "capacity"));
     importHarness.ctx = baseCtx({
-      sources: [sourceFixture({ id: "source-1" }), sourceFixture({ id: "source-2", title: "Second source" })],
+      sources: [
+        sourceFixture({ id: "source-1" }),
+        sourceFixture({ id: "source-2", title: "Second source" }),
+      ],
       client: clientFixture({ startTranscribe }),
       pushToast,
     });
@@ -1133,12 +1317,17 @@ describe("product truth: visible mutations settle before success", () => {
     expect(pushToast).not.toHaveBeenCalled();
     expect(screen.getByText("2 selected")).toBeInTheDocument();
 
-    await act(async () => { delayed.resolve({ id: "transcript-1" }); await delayed.promise; });
+    await act(async () => {
+      delayed.resolve({ id: "transcript-1" });
+      await delayed.promise;
+    });
     await waitFor(() => expect(pushToast).toHaveBeenCalledTimes(1));
-    expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Transcribe requests settled",
-      body: expect.stringMatching(/^1 succeeded · 1 failed · queue_full:/),
-    }));
+    expect(pushToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Transcribe requests settled",
+        body: expect.stringMatching(/^1 succeeded · 1 failed · queue_full:/),
+      }),
+    );
     expect(screen.getByText("1 selected")).toBeInTheDocument();
   });
 
@@ -1146,7 +1335,9 @@ describe("product truth: visible mutations settle before success", () => {
     const delayed = deferred<void>();
     const pushToast = vi.fn();
     const dismissJob = vi.fn().mockReturnValue(delayed.promise);
-    const dismissClipJob = vi.fn().mockRejectedValue(new SpoolApiError(503, "unreachable", "offline"));
+    const dismissClipJob = vi
+      .fn()
+      .mockRejectedValue(new SpoolApiError(503, "unreachable", "offline"));
     importHarness.ctx = baseCtx({
       jobs: [
         jobFixture({ id: "download-done", status: "done", domain: "download" }),
@@ -1162,11 +1353,18 @@ describe("product truth: visible mutations settle before success", () => {
     expect(dismissClipJob).toHaveBeenCalledWith("clip-failed");
     expect(pushToast).not.toHaveBeenCalled();
 
-    await act(async () => { delayed.resolve(); await delayed.promise; });
-    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Finished-job cleanup settled",
-      body: expect.stringMatching(/^1 succeeded · 1 failed · unreachable:/),
-    })));
+    await act(async () => {
+      delayed.resolve();
+      await delayed.promise;
+    });
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Finished-job cleanup settled",
+          body: expect.stringMatching(/^1 succeeded · 1 failed · unreachable:/),
+        }),
+      ),
+    );
   });
 
   it("Source retranscription surfaces a structured rejection without early success", async () => {
@@ -1223,10 +1421,14 @@ describe("product truth: visible mutations settle before success", () => {
       delayed.reject(new SpoolApiError(429, "queue_full", "capacity"));
       await delayed.promise.catch(() => undefined);
     });
-    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Render failed",
-      body: expect.stringMatching(/queue_full/),
-    })));
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Render failed",
+          body: expect.stringMatching(/queue_full/),
+        }),
+      ),
+    );
     expect(nav).not.toHaveBeenCalled();
   });
 
@@ -1242,7 +1444,11 @@ describe("product truth: visible mutations settle before success", () => {
       pushToast,
       nav,
     });
-    render(<StrictMode><ReframeScreen /></StrictMode>);
+    render(
+      <StrictMode>
+        <ReframeScreen />
+      </StrictMode>,
+    );
 
     for (const fake of ["Auto-detect", "speaker 2", "Live 9:16 preview", "Single scene"])
       expect(screen.queryByText(fake)).not.toBeInTheDocument();
@@ -1311,7 +1517,10 @@ describe("product truth: visible mutations settle before success", () => {
     fireEvent.click(screen.getByRole("button", { name: "Apply & continue to captions" }));
     await waitFor(() => expect(awaitClipJob).toHaveBeenCalledWith("reframe-1"));
     window.history.pushState({}, "", "/library");
-    await act(async () => { terminal.resolve(); await terminal.promise; });
+    await act(async () => {
+      terminal.resolve();
+      await terminal.promise;
+    });
 
     expect(pushToast).not.toHaveBeenCalled();
     expect(nav).not.toHaveBeenCalled();
@@ -1337,7 +1546,10 @@ describe("product truth: visible mutations settle before success", () => {
     fireEvent.click(screen.getByRole("button", { name: "Apply & continue to captions" }));
     await waitFor(() => expect(awaitClipJob).toHaveBeenCalledWith("reframe-1"));
     view.unmount();
-    await act(async () => { terminal.resolve(); await terminal.promise; });
+    await act(async () => {
+      terminal.resolve();
+      await terminal.promise;
+    });
 
     expect(pushToast).not.toHaveBeenCalled();
     expect(nav).not.toHaveBeenCalled();
@@ -1347,7 +1559,8 @@ describe("product truth: visible mutations settle before success", () => {
     const delayed = deferred<{ id: string }>();
     const pushToast = vi.fn();
     const nav = vi.fn();
-    const caption = vi.fn()
+    const caption = vi
+      .fn()
       .mockReturnValueOnce(delayed.promise)
       .mockRejectedValueOnce(new SpoolApiError(429, "queue_full", "capacity"));
     const renderClip = vi.fn().mockResolvedValue({ id: "render-1" });
@@ -1355,13 +1568,20 @@ describe("product truth: visible mutations settle before success", () => {
     importHarness.queryData = { listBrandKits: { brand_kits: [] } };
     importHarness.ctx = baseCtx({
       sources: [sourceFixture()],
-      clips: [clipFixture({ id: "clip-1", platform: undefined }), clipFixture({ id: "clip-2", title: "Second clip" })],
+      clips: [
+        clipFixture({ id: "clip-1", platform: undefined }),
+        clipFixture({ id: "clip-2", title: "Second clip" }),
+      ],
       client: clientFixture({ caption, render: renderClip }),
       awaitClipJob,
       pushToast,
       nav,
     });
-    render(<StrictMode><BrandScreen /></StrictMode>);
+    render(
+      <StrictMode>
+        <BrandScreen />
+      </StrictMode>,
+    );
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "source-1" } });
     fireEvent.click(screen.getByRole("button", { name: "Apply to 2 clips" }));
 
@@ -1369,11 +1589,18 @@ describe("product truth: visible mutations settle before success", () => {
     expect(pushToast).not.toHaveBeenCalled();
     expect(nav).not.toHaveBeenCalled();
 
-    await act(async () => { delayed.resolve({ id: "caption-1" }); await delayed.promise; });
-    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Brand apply settled for 2 clips",
-      body: expect.stringMatching(/^1 succeeded · 1 failed · queue_full:/),
-    })));
+    await act(async () => {
+      delayed.resolve({ id: "caption-1" });
+      await delayed.promise;
+    });
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Brand apply settled for 2 clips",
+          body: expect.stringMatching(/^1 succeeded · 1 failed · queue_full:/),
+        }),
+      ),
+    );
     expect(awaitClipJob).toHaveBeenCalledWith("caption-1");
     expect(renderClip).toHaveBeenCalledTimes(1);
     expect(renderClip).toHaveBeenCalledWith("clip-1", {});
@@ -1405,10 +1632,14 @@ describe("product truth: visible mutations settle before success", () => {
       delayed.reject(new SpoolApiError(429, "queue_full", "capacity"));
       await delayed.promise.catch(() => undefined);
     });
-    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Couldn't run the recipe",
-      body: expect.stringMatching(/^queue_full:/),
-    })));
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Couldn't run the recipe",
+          body: expect.stringMatching(/^queue_full:/),
+        }),
+      ),
+    );
     expect(importHarness.router.push).not.toHaveBeenCalled();
   });
 
@@ -1425,12 +1656,19 @@ describe("product truth: visible mutations settle before success", () => {
       pushToast,
     });
     window.history.replaceState({}, "", "/recipes");
-    render(<StrictMode><RecipesScreen /></StrictMode>);
+    render(
+      <StrictMode>
+        <RecipesScreen />
+      </StrictMode>,
+    );
     fireEvent.change(screen.getAllByRole("combobox").at(-1)!, { target: { value: "source-1" } });
     fireEvent.click(screen.getByRole("button", { name: "Run recipe" }));
     window.history.pushState({}, "", "/library");
 
-    await act(async () => { delayed.resolve({ jobs: [] }); await delayed.promise; });
+    await act(async () => {
+      delayed.resolve({ jobs: [] });
+      await delayed.promise;
+    });
 
     expect(pushToast).not.toHaveBeenCalled();
     expect(importHarness.router.push).not.toHaveBeenCalled();
@@ -1440,8 +1678,14 @@ describe("product truth: visible mutations settle before success", () => {
     const delayed = deferred<unknown>();
     const pushToast = vi.fn();
     const watch = {
-      id: "watch-1", name: "Incoming videos", kind: "folder", target: "/tmp/incoming",
-      recipe_id: undefined, enabled: true, produced: [], seen: [],
+      id: "watch-1",
+      name: "Incoming videos",
+      kind: "folder",
+      target: "/tmp/incoming",
+      recipe_id: undefined,
+      enabled: true,
+      produced: [],
+      seen: [],
     };
     importHarness.queryData = {
       listWatches: { watches: [watch] },
@@ -1459,17 +1703,26 @@ describe("product truth: visible mutations settle before success", () => {
       delayed.reject(new SpoolApiError(0, "unreachable", "offline"));
       await delayed.promise.catch(() => undefined);
     });
-    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Scan failed",
-      body: expect.stringMatching(/^unreachable:/),
-    })));
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Scan failed",
+          body: expect.stringMatching(/^unreachable:/),
+        }),
+      ),
+    );
   });
 
   it("Brand keeps the edited record stable while a save is pending", async () => {
     const delayed = deferred<Record<string, unknown>>();
     const kit = {
-      id: "kit-1", name: "Primary kit", palette: ["#45556E"], caption_preset: "opus",
-      caption_overrides: {}, watermark: "", lower_third: "",
+      id: "kit-1",
+      name: "Primary kit",
+      palette: ["#45556E"],
+      caption_preset: "opus",
+      caption_overrides: {},
+      watermark: "",
+      lower_third: "",
     };
     importHarness.queryData = { listBrandKits: { brand_kits: [kit] } };
     importHarness.ctx = baseCtx({
@@ -1482,7 +1735,10 @@ describe("product truth: visible mutations settle before success", () => {
     fireEvent.click(screen.getByRole("button", { name: "New kit" }));
 
     expect(name).toHaveValue("Primary kit");
-    await act(async () => { delayed.resolve(kit); await delayed.promise; });
+    await act(async () => {
+      delayed.resolve(kit);
+      await delayed.promise;
+    });
     await waitFor(() => expect(screen.getByRole("button", { name: "Save" })).toBeEnabled());
     expect(name).toHaveValue("Primary kit");
   });

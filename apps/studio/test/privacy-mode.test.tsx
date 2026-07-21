@@ -74,8 +74,20 @@ function mountContext() {
     ref.current = useSpool();
     return null;
   }
-  const view = render(<SpoolProvider><Probe /></SpoolProvider>);
-  return { get: () => ref.current!, rerender: () => view.rerender(<SpoolProvider><Probe /></SpoolProvider>) };
+  const view = render(
+    <SpoolProvider>
+      <Probe />
+    </SpoolProvider>,
+  );
+  return {
+    get: () => ref.current!,
+    rerender: () =>
+      view.rerender(
+        <SpoolProvider>
+          <Probe />
+        </SpoolProvider>,
+      ),
+  };
 }
 
 function renderWithProvider(children: React.ReactNode) {
@@ -163,7 +175,9 @@ describe("authoritative privacy settings", () => {
     await waitFor(() => expect(ctx.get().settingsReady).toBe(true));
 
     let result!: Promise<EngineSettings>;
-    act(() => { result = ctx.get().updateSettings({ offline: true }); });
+    act(() => {
+      result = ctx.get().updateSettings({ offline: true });
+    });
     expect(ctx.get().settingsPending).toBe(true);
 
     // The query effect has started GET generation 2, but React has not rerendered the provider
@@ -185,7 +199,9 @@ describe("authoritative privacy settings", () => {
       getRequestGeneration,
     };
     ctx.rerender();
-    await act(async () => { await Promise.resolve(); });
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(ctx.get().settings).toEqual(canonical);
     expect(ctx.get().settingsPending).toBe(false);
 
@@ -229,9 +245,7 @@ describe("authoritative privacy settings", () => {
     const first = deferred<EngineSettings>();
     const second = deferred<EngineSettings>();
     settingsQuery = { data: initial, loading: false, reload: vi.fn() };
-    client.updateSettings
-      .mockReturnValueOnce(first.promise)
-      .mockReturnValueOnce(second.promise);
+    client.updateSettings.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
     const ctx = mountContext();
     await waitFor(() => expect(ctx.get().settingsReady).toBe(true));
 
@@ -244,12 +258,18 @@ describe("authoritative privacy settings", () => {
     expect(client.updateSettings).toHaveBeenCalledTimes(1);
     expect(ctx.get().settings).toEqual(initial);
 
-    await act(async () => { first.resolve(firstResponse); await one; });
+    await act(async () => {
+      first.resolve(firstResponse);
+      await one;
+    });
     expect(client.updateSettings).toHaveBeenCalledTimes(2);
     expect(ctx.get().settings).toEqual(firstResponse);
     expect(ctx.get().settingsPending).toBe(true);
 
-    await act(async () => { second.resolve(secondResponse); await two; });
+    await act(async () => {
+      second.resolve(secondResponse);
+      await two;
+    });
     expect(ctx.get().settings).toEqual(secondResponse);
     expect(ctx.get().settingsPending).toBe(false);
   });
@@ -271,7 +291,10 @@ describe("authoritative privacy settings", () => {
     expect(client.updateSettings).toHaveBeenCalledWith({ offline: true });
     expect(ctx.get().offlinePending).toBe(true);
 
-    await act(async () => { write.resolve(canonical); await write.promise; });
+    await act(async () => {
+      write.resolve(canonical);
+      await write.promise;
+    });
     await waitFor(() => expect(ctx.get().offlinePending).toBe(false));
     expect(ctx.get().offline).toBe(true);
   });
@@ -289,7 +312,9 @@ describe("privacy settings UI", () => {
     expect(none).toBeDisabled();
     expect(codex).toBeDisabled();
     expect(screen.getByRole("switch", { name: "Offline mode" })).toBeDisabled();
-    expect(screen.queryByRole("switch", { name: /Allow transcript text to leave/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", { name: /Allow transcript text to leave/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows consent only after the canonical provider becomes Codex", async () => {
@@ -304,7 +329,9 @@ describe("privacy settings UI", () => {
     expect(client.updateSettings).toHaveBeenCalledWith({ reasoning_provider: "codex" });
     expect(screen.getByRole("button", { name: "None" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "Codex" })).toBeDisabled();
-    expect(screen.queryByRole("switch", { name: /Allow transcript text to leave/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", { name: /Allow transcript text to leave/i }),
+    ).not.toBeInTheDocument();
 
     await act(async () => {
       write.resolve(canonical);
@@ -312,8 +339,12 @@ describe("privacy settings UI", () => {
     });
 
     expect(screen.getByRole("button", { name: "Codex" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("switch", { name: /Allow transcript text to leave/i })).not.toBeChecked();
-    expect(screen.getByText(/transcript text leaves this machine and is sent to Codex/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", { name: /Allow transcript text to leave/i }),
+    ).not.toBeChecked();
+    expect(
+      screen.getByText(/transcript text leaves this machine and is sent to Codex/i),
+    ).toBeInTheDocument();
   });
 
   it("publishes consent only from the canonical PATCH response", async () => {
@@ -346,7 +377,10 @@ describe("privacy settings UI", () => {
       reasoning_provider: "codex",
       reasoning_egress_consent: true,
     });
-    const canonical = engineSettings({ reasoning_provider: "none", reasoning_egress_consent: false });
+    const canonical = engineSettings({
+      reasoning_provider: "none",
+      reasoning_egress_consent: false,
+    });
     client.updateSettings.mockReturnValue(write.promise);
     await renderPrivacySettings(initial);
 
@@ -359,7 +393,9 @@ describe("privacy settings UI", () => {
       await write.promise;
     });
     expect(screen.getByRole("button", { name: "None" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.queryByRole("switch", { name: /Allow transcript text to leave/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", { name: /Allow transcript text to leave/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps confirmed provider and consent controls when persistence fails", async () => {
@@ -372,7 +408,9 @@ describe("privacy settings UI", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "None" }));
 
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/confirmed settings were kept/i));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(/confirmed settings were kept/i),
+    );
     expect(screen.getByRole("button", { name: "Codex" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("switch", { name: /Allow transcript text to leave/i })).toBeChecked();
     expect(screen.getByRole("button", { name: "None" })).toBeEnabled();
@@ -395,23 +433,41 @@ describe("canonical privacy status label", () => {
     },
   ])("renders exactly one $label label", async ({ settings, label }) => {
     settingsQuery = { data: settings, loading: false, reload: vi.fn() };
-    renderWithProvider(<Shell><p>Current page</p></Shell>);
+    renderWithProvider(
+      <Shell>
+        <p>Current page</p>
+      </Shell>,
+    );
 
     await waitFor(() => expect(screen.getAllByText(label, { exact: true })).toHaveLength(1));
-    for (const other of ["Offline", "Remote reasoning enabled", "Fully local"].filter((item) => item !== label)) {
+    for (const other of ["Offline", "Remote reasoning enabled", "Fully local"].filter(
+      (item) => item !== label,
+    )) {
       expect(screen.queryByText(other, { exact: true })).not.toBeInTheDocument();
     }
   });
 
   it("does not claim local safety while privacy settings are loading or unavailable", async () => {
-    const view = renderWithProvider(<Shell><p>Current page</p></Shell>);
+    const view = renderWithProvider(
+      <Shell>
+        <p>Current page</p>
+      </Shell>,
+    );
     expect(screen.getByText("Privacy status loading", { exact: true })).toBeInTheDocument();
     expect(screen.queryByText("Offline", { exact: true })).not.toBeInTheDocument();
     expect(screen.queryByText("Fully local", { exact: true })).not.toBeInTheDocument();
 
     settingsQuery = { error: "unreachable", loading: false, reload: vi.fn() };
-    view.rerender(<SpoolProvider><Shell><p>Current page</p></Shell></SpoolProvider>);
-    await waitFor(() => expect(screen.getByText("Privacy status unavailable", { exact: true })).toBeInTheDocument());
+    view.rerender(
+      <SpoolProvider>
+        <Shell>
+          <p>Current page</p>
+        </Shell>
+      </SpoolProvider>,
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Privacy status unavailable", { exact: true })).toBeInTheDocument(),
+    );
   });
 });
 
@@ -425,7 +481,11 @@ describe("truthful privacy copy", () => {
     renderWithProvider(<OnboardingScreen />);
 
     expect(screen.getByText(/URL downloads use the network/i)).toBeInTheDocument();
-    expect(screen.getByText(/Codex receives transcript text only when remote reasoning is selected and consented/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Codex receives transcript text only when remote reasoning is selected and consented/i,
+      ),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/Everything runs on your machine/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/entirely on your machine/i)).not.toBeInTheDocument();
   });
@@ -444,7 +504,9 @@ describe("truthful privacy copy", () => {
     });
     const settingsView = await renderPrivacySettings(offlineCodex);
 
-    expect(screen.getByText("blocked by Offline · no current egress", { exact: true })).toBeInTheDocument();
+    expect(
+      screen.getByText("blocked by Offline · no current egress", { exact: true }),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/transcript text → Codex \(consented\)/i)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Models" }));
     expect(screen.getByText("blocked by Offline", { exact: true })).toBeInTheDocument();
@@ -455,9 +517,15 @@ describe("truthful privacy copy", () => {
     fireEvent.click(screen.getByRole("button", { name: /Let.s set up/i }));
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 
-    expect(screen.getByText("Codex configured with consent · no current transcript egress", { exact: true })).toBeInTheDocument();
+    expect(
+      screen.getByText("Codex configured with consent · no current transcript egress", {
+        exact: true,
+      }),
+    ).toBeInTheDocument();
     expect(screen.getByText("blocked by Offline", { exact: true })).toBeInTheDocument();
-    expect(screen.queryByText(/transcript text leaves this machine with consent/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/transcript text leaves this machine with consent/i),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("enabled", { exact: true })).not.toBeInTheDocument();
   });
 });
@@ -467,9 +535,11 @@ describe("privacy action error copy", () => {
     offline_network_disabled: "Turn off Offline mode before using this network action.",
     network_work_active: "Wait for active network work to finish before turning on Offline mode.",
     reasoning_provider_required: "Select Codex as the reasoning provider before using this action.",
-    egress_consent_required: "Allow transcript text to be sent to Codex before using remote reasoning.",
+    egress_consent_required:
+      "Allow transcript text to be sent to Codex before using remote reasoning.",
     egress_consent_requires_codex: "Select Codex before granting remote-reasoning consent.",
-    settings_persist_failed: "The engine could not save settings. Your confirmed settings were kept.",
+    settings_persist_failed:
+      "The engine could not save settings. Your confirmed settings were kept.",
   } as const;
 
   it.each(Object.entries(cases))("maps %s to actionable raw-code copy", (code, message) => {

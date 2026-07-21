@@ -389,22 +389,24 @@ describe("visible mutation inventory: Source work", () => {
       ts: 2,
       jobs: [],
       clips: [],
-      transcripts: [{
-        id: "transcript-2",
-        parent_job_id: "source-1",
-        status: "error",
-        model_used: "ggml-base.bin",
-        progress_pct: 12,
-        duration_seconds: 90,
-        language_detected: "en",
-        elapsed_seconds: 3,
-        error_category: "decode_failed",
-        error_message: "bad audio",
-        diarization_status: null,
-        diarization_error: null,
-        speaker_count: null,
-        human: { summary: "failed" },
-      }],
+      transcripts: [
+        {
+          id: "transcript-2",
+          parent_job_id: "source-1",
+          status: "error",
+          model_used: "ggml-base.bin",
+          progress_pct: 12,
+          duration_seconds: 90,
+          language_detected: "en",
+          elapsed_seconds: 3,
+          error_category: "decode_failed",
+          error_message: "bad audio",
+          diarization_status: null,
+          diarization_error: null,
+          speaker_count: null,
+          human: { summary: "failed" },
+        },
+      ],
     } as unknown as EventsSnapshot;
     view.rerender(<ProjectScreen />);
 
@@ -494,10 +496,14 @@ describe("visible mutation inventory: Source work", () => {
       terminal.resolve();
       await terminal.promise;
     });
-    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Moment scans complete",
-      body: expect.stringMatching(/^6 succeeded · 0 failed\./),
-    })));
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Moment scans complete",
+          body: expect.stringMatching(/^6 succeeded · 0 failed\./),
+        }),
+      ),
+    );
     expect(screen.getAllByRole("button", { name: "Scan all modes" })[0]).toBeEnabled();
   });
 
@@ -518,10 +524,14 @@ describe("visible mutation inventory: Source work", () => {
 
     fireEvent.click(screen.getAllByRole("button", { name: "Scan all modes" })[0]!);
 
-    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Some moment scans failed",
-      body: expect.stringMatching(/^5 succeeded · 1 failed\./),
-    })));
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Some moment scans failed",
+          body: expect.stringMatching(/^5 succeeded · 1 failed\./),
+        }),
+      ),
+    );
     expect(pushToast.mock.calls[0]?.[0].body).toMatch(/queue_full/);
     expect(awaitClipJob).toHaveBeenCalledTimes(6);
   });
@@ -1160,7 +1170,12 @@ describe("visible mutation inventory: Offline watch gates", () => {
   const blockedStates = [
     {
       state: "when privacy settings are unavailable",
-      ctx: { settings: null, settingsReady: false, settingsLoading: false, settingsError: "unreachable" },
+      ctx: {
+        settings: null,
+        settingsReady: false,
+        settingsLoading: false,
+        settingsError: "unreachable",
+      },
       reason: "Privacy settings are unavailable. Remote watch actions are disabled.",
     },
     {
@@ -1186,30 +1201,39 @@ describe("visible mutation inventory: Offline watch gates", () => {
     ingesting: {},
   };
 
-  it.each(blockedStates.flatMap((privacy) => (["channel", "playlist"] as const).map((kind) => ({ ...privacy, kind }))))(
-    "blocks $kind create $state with an exact zero-call result",
-    ({ ctx, kind, reason }) => {
-      const createWatch = vi.fn().mockResolvedValue(watchFixture(kind));
-      harness.queryData = { listWatches: { watches: [] }, listRecipes: { recipes: [] } };
-      harness.ctx = baseCtx({ ...ctx, client: clientFixture({ createWatch }) });
-      render(<WatchesScreen />);
+  it.each(
+    blockedStates.flatMap((privacy) =>
+      (["channel", "playlist"] as const).map((kind) => ({ ...privacy, kind })),
+    ),
+  )("blocks $kind create $state with an exact zero-call result", ({ ctx, kind, reason }) => {
+    const createWatch = vi.fn().mockResolvedValue(watchFixture(kind));
+    harness.queryData = { listWatches: { watches: [] }, listRecipes: { recipes: [] } };
+    harness.ctx = baseCtx({ ...ctx, client: clientFixture({ createWatch }) });
+    render(<WatchesScreen />);
 
-      fireEvent.click(screen.getByRole("button", { name: kind === "channel" ? "Channel" : "Playlist" }));
-      fireEvent.change(screen.getByPlaceholderText("Watch name"), { target: { value: "Remote feed" } });
-      fireEvent.change(screen.getByPlaceholderText("https://youtube.com/@channel"), {
-        target: { value: "https://media.example.test/feed" },
-      });
-      const create = screen.getByRole("button", { name: "Create" });
-      expect(create).toBeDisabled();
-      fireEvent.click(create);
+    fireEvent.click(
+      screen.getByRole("button", { name: kind === "channel" ? "Channel" : "Playlist" }),
+    );
+    fireEvent.change(screen.getByPlaceholderText("Watch name"), {
+      target: { value: "Remote feed" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("https://youtube.com/@channel"), {
+      target: { value: "https://media.example.test/feed" },
+    });
+    const create = screen.getByRole("button", { name: "Create" });
+    expect(create).toBeDisabled();
+    fireEvent.click(create);
 
-      expect(createWatch).not.toHaveBeenCalled();
-      expect(screen.getByRole("status")).toHaveTextContent(reason);
-      expect(harness.queryCalls).toContain("listWatches");
-    },
-  );
+    expect(createWatch).not.toHaveBeenCalled();
+    expect(screen.getByRole("status")).toHaveTextContent(reason);
+    expect(harness.queryCalls).toContain("listWatches");
+  });
 
-  it.each(blockedStates.flatMap((privacy) => (["channel", "playlist"] as const).map((kind) => ({ ...privacy, kind }))))(
+  it.each(
+    blockedStates.flatMap((privacy) =>
+      (["channel", "playlist"] as const).map((kind) => ({ ...privacy, kind })),
+    ),
+  )(
     "blocks $kind update and scan $state while keeping delete and list usable",
     ({ ctx, kind, reason }) => {
       const watch = watchFixture(kind);
@@ -1269,44 +1293,49 @@ describe("visible mutation inventory: Offline watch gates", () => {
     },
   );
 
-  it.each(blockedStates.flatMap((privacy) => (["create", "update", "scan"] as const).map((operation) => ({ ...privacy, operation }))))(
-    "keeps folder $operation usable $state",
-    async ({ ctx, operation }) => {
-      const watch = watchFixture("folder");
-      const createWatch = vi.fn().mockResolvedValue(watch);
-      const updateWatch = vi.fn().mockResolvedValue(watch);
-      const scanWatch = vi.fn().mockResolvedValue(scanResult);
-      harness.queryData = {
-        listWatches: { watches: operation === "create" ? [] : [watch] },
-        listRecipes: { recipes: [] },
-      };
-      harness.ctx = baseCtx({
-        ...ctx,
-        client: clientFixture({ createWatch, updateWatch, scanWatch }),
-      });
-      render(<WatchesScreen />);
+  it.each(
+    blockedStates.flatMap((privacy) =>
+      (["create", "update", "scan"] as const).map((operation) => ({ ...privacy, operation })),
+    ),
+  )("keeps folder $operation usable $state", async ({ ctx, operation }) => {
+    const watch = watchFixture("folder");
+    const createWatch = vi.fn().mockResolvedValue(watch);
+    const updateWatch = vi.fn().mockResolvedValue(watch);
+    const scanWatch = vi.fn().mockResolvedValue(scanResult);
+    harness.queryData = {
+      listWatches: { watches: operation === "create" ? [] : [watch] },
+      listRecipes: { recipes: [] },
+    };
+    harness.ctx = baseCtx({
+      ...ctx,
+      client: clientFixture({ createWatch, updateWatch, scanWatch }),
+    });
+    render(<WatchesScreen />);
 
-      if (operation === "create") {
-        fireEvent.change(screen.getByPlaceholderText("Watch name"), { target: { value: watch.name } });
-        fireEvent.change(screen.getByPlaceholderText("/Users/you/Movies/clips-in"), { target: { value: watch.target } });
-        const create = screen.getByRole("button", { name: "Create" });
-        expect(create).toBeEnabled();
-        fireEvent.click(create);
-        await waitFor(() => expect(createWatch).toHaveBeenCalledTimes(1));
-      } else if (operation === "update") {
-        const save = screen.getByRole("button", { name: "Save" });
-        expect(save).toBeEnabled();
-        fireEvent.click(save);
-        await waitFor(() => expect(updateWatch).toHaveBeenCalledTimes(1));
-      } else {
-        const scan = screen.getByRole("button", { name: "Scan now" });
-        expect(scan).toBeEnabled();
-        fireEvent.click(scan);
-        await waitFor(() => expect(scanWatch).toHaveBeenCalledTimes(1));
-      }
-      expect(harness.queryCalls).toContain("listWatches");
-    },
-  );
+    if (operation === "create") {
+      fireEvent.change(screen.getByPlaceholderText("Watch name"), {
+        target: { value: watch.name },
+      });
+      fireEvent.change(screen.getByPlaceholderText("/Users/you/Movies/clips-in"), {
+        target: { value: watch.target },
+      });
+      const create = screen.getByRole("button", { name: "Create" });
+      expect(create).toBeEnabled();
+      fireEvent.click(create);
+      await waitFor(() => expect(createWatch).toHaveBeenCalledTimes(1));
+    } else if (operation === "update") {
+      const save = screen.getByRole("button", { name: "Save" });
+      expect(save).toBeEnabled();
+      fireEvent.click(save);
+      await waitFor(() => expect(updateWatch).toHaveBeenCalledTimes(1));
+    } else {
+      const scan = screen.getByRole("button", { name: "Scan now" });
+      expect(scan).toBeEnabled();
+      fireEvent.click(scan);
+      await waitFor(() => expect(scanWatch).toHaveBeenCalledTimes(1));
+    }
+    expect(harness.queryCalls).toContain("listWatches");
+  });
 });
 
 describe("visible mutation inventory: Settings", () => {
@@ -1319,39 +1348,57 @@ describe("visible mutation inventory: Settings", () => {
     {
       state: "while privacy settings load",
       ctx: { settings: null, settingsReady: false, settingsLoading: true, settingsError: null },
-      reason: "Checking privacy settings. New model downloads are unavailable; installed models remain available.",
+      reason:
+        "Checking privacy settings. New model downloads are unavailable; installed models remain available.",
     },
     {
       state: "when privacy settings are unavailable",
-      ctx: { settings: null, settingsReady: false, settingsLoading: false, settingsError: "unreachable" },
-      reason: "Privacy settings are unavailable. New model downloads are unavailable; installed models remain available.",
+      ctx: {
+        settings: null,
+        settingsReady: false,
+        settingsLoading: false,
+        settingsError: "unreachable",
+      },
+      reason:
+        "Privacy settings are unavailable. New model downloads are unavailable; installed models remain available.",
     },
     {
       state: "in Offline mode",
       ctx: { settings: settingsFixture({ offline: true }), settingsReady: true, offline: true },
       reason: "Offline mode blocks new model downloads. Installed models remain available.",
     },
-  ])("semantically disables an uninstalled model $state and makes zero install calls", async ({ ctx, reason }) => {
-    const installModel = vi.fn().mockResolvedValue(undefined);
-    harness.queryData = settingsQueries({
-      name: "candidate", label: "Candidate model", is_active: false,
-      is_installed: false, size_bytes: 1_000_000,
-    });
-    harness.ctx = baseCtx({ ...ctx, client: clientFixture({ installModel }) });
-    render(<SettingsScreen />);
+  ])(
+    "semantically disables an uninstalled model $state and makes zero install calls",
+    async ({ ctx, reason }) => {
+      const installModel = vi.fn().mockResolvedValue(undefined);
+      harness.queryData = settingsQueries({
+        name: "candidate",
+        label: "Candidate model",
+        is_active: false,
+        is_installed: false,
+        size_bytes: 1_000_000,
+      });
+      harness.ctx = baseCtx({ ...ctx, client: clientFixture({ installModel }) });
+      render(<SettingsScreen />);
 
-    const model = await screen.findByRole("button", { name: "Candidate model" });
-    expect(model).toBeDisabled();
-    expect(model).toHaveAccessibleDescription(reason);
-    fireEvent.click(model);
-    expect(installModel).not.toHaveBeenCalled();
-    expect(screen.getByText(reason, { exact: true })).toBeInTheDocument();
-  });
+      const model = await screen.findByRole("button", { name: "Candidate model" });
+      expect(model).toBeDisabled();
+      expect(model).toHaveAccessibleDescription(reason);
+      fireEvent.click(model);
+      expect(installModel).not.toHaveBeenCalled();
+      expect(screen.getByText(reason, { exact: true })).toBeInTheDocument();
+    },
+  );
 
   it.each([
     {
       state: "while privacy settings are unavailable",
-      ctx: { settings: null, settingsReady: false, settingsLoading: false, settingsError: "unreachable" },
+      ctx: {
+        settings: null,
+        settingsReady: false,
+        settingsLoading: false,
+        settingsError: "unreachable",
+      },
     },
     {
       state: "in Offline mode",
@@ -1360,8 +1407,11 @@ describe("visible mutation inventory: Settings", () => {
   ])("keeps switching to an installed model enabled $state", async ({ ctx }) => {
     const useModel = vi.fn().mockResolvedValue(undefined);
     harness.queryData = settingsQueries({
-      name: "candidate", label: "Candidate model", is_active: false,
-      is_installed: true, size_bytes: 1_000_000,
+      name: "candidate",
+      label: "Candidate model",
+      is_active: false,
+      is_installed: true,
+      size_bytes: 1_000_000,
     });
     harness.ctx = baseCtx({ ...ctx, client: clientFixture({ useModel }) });
     render(<SettingsScreen />);
@@ -1374,7 +1424,11 @@ describe("visible mutation inventory: Settings", () => {
 
   it("uses context settings without creating a second GET settings subscription", () => {
     harness.queryData = settingsQueries({
-      name: "base", label: "Base", is_active: true, is_installed: true, size_bytes: 1,
+      name: "base",
+      label: "Base",
+      is_active: true,
+      is_installed: true,
+      size_bytes: 1,
     });
     harness.ctx = baseCtx();
 
@@ -1390,14 +1444,21 @@ describe("visible mutation inventory: Settings", () => {
     const updateSettings = vi.fn().mockReturnValue(delayed.promise);
     const pushToast = vi.fn();
     harness.queryData = settingsQueries({
-      name: "base", label: "Base", is_active: true, is_installed: true, size_bytes: 1,
+      name: "base",
+      label: "Base",
+      is_active: true,
+      is_installed: true,
+      size_bytes: 1,
     });
     harness.ctx = baseCtx({ updateSettings, pushToast });
     render(<SettingsScreen />);
     fireEvent.click(screen.getByRole("button", { name: "MCP server" }));
     const http = screen.getByRole("button", { name: "HTTP" });
 
-    act(() => { http.click(); http.click(); });
+    act(() => {
+      http.click();
+      http.click();
+    });
     expect(updateSettings).toHaveBeenCalledTimes(1);
     expect(pushToast).not.toHaveBeenCalled();
 
@@ -1405,20 +1466,29 @@ describe("visible mutation inventory: Settings", () => {
       delayed.reject(structuredFailure());
       await delayed.promise.catch(() => undefined);
     });
-    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Couldn't save setting",
-      body: expect.stringMatching(/^queue_full:/),
-    })));
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Couldn't save setting",
+          body: expect.stringMatching(/^queue_full:/),
+        }),
+      ),
+    );
   });
 
   it("allows a different setting to join the context queue while another key is pending", async () => {
     const first = deferred<EngineSettings>();
     const second = deferred<EngineSettings>();
-    const updateSettings = vi.fn()
+    const updateSettings = vi
+      .fn()
       .mockReturnValueOnce(first.promise)
       .mockReturnValueOnce(second.promise);
     harness.queryData = settingsQueries({
-      name: "base", label: "Base", is_active: true, is_installed: true, size_bytes: 1,
+      name: "base",
+      label: "Base",
+      is_active: true,
+      is_installed: true,
+      size_bytes: 1,
     });
     harness.ctx = baseCtx({ updateSettings });
     render(<SettingsScreen />);
@@ -1450,7 +1520,11 @@ describe("visible mutation inventory: Settings", () => {
       const write = deferred<EngineSettings>();
       const updateSettings = vi.fn().mockReturnValue(write.promise);
       harness.queryData = settingsQueries({
-        name: "base", label: "Base", is_active: true, is_installed: true, size_bytes: 1,
+        name: "base",
+        label: "Base",
+        is_active: true,
+        is_installed: true,
+        size_bytes: 1,
       });
       harness.ctx = baseCtx({ updateSettings });
       const view = render(<SettingsScreen />);
@@ -1486,32 +1560,45 @@ describe("visible mutation inventory: Settings", () => {
   it.each([
     { installed: true, method: "useModel", failureTitle: "Couldn't switch model" },
     { installed: false, method: "installModel", failureTitle: "Couldn't install model" },
-  ])("single-flights $method and surfaces its structured rejection", async ({ installed, method, failureTitle }) => {
-    const delayed = deferred<void>();
-    const mutation = vi.fn().mockReturnValue(delayed.promise);
-    const pushToast = vi.fn();
-    harness.queryData = settingsQueries({
-      name: "candidate", label: "Candidate model", is_active: false,
-      is_installed: installed, size_bytes: 1_000_000,
-    });
-    harness.ctx = baseCtx({ client: clientFixture({ [method]: mutation }), pushToast });
-    render(<SettingsScreen />);
-    const model = await screen.findByRole("button", { name: "Candidate model" });
+  ])(
+    "single-flights $method and surfaces its structured rejection",
+    async ({ installed, method, failureTitle }) => {
+      const delayed = deferred<void>();
+      const mutation = vi.fn().mockReturnValue(delayed.promise);
+      const pushToast = vi.fn();
+      harness.queryData = settingsQueries({
+        name: "candidate",
+        label: "Candidate model",
+        is_active: false,
+        is_installed: installed,
+        size_bytes: 1_000_000,
+      });
+      harness.ctx = baseCtx({ client: clientFixture({ [method]: mutation }), pushToast });
+      render(<SettingsScreen />);
+      const model = await screen.findByRole("button", { name: "Candidate model" });
 
-    act(() => { model.click(); model.click(); });
-    expect(mutation).toHaveBeenCalledTimes(1);
-    expect(model).toBeDisabled();
-    expect(pushToast).not.toHaveBeenCalled();
+      act(() => {
+        model.click();
+        model.click();
+      });
+      expect(mutation).toHaveBeenCalledTimes(1);
+      expect(model).toBeDisabled();
+      expect(pushToast).not.toHaveBeenCalled();
 
-    await act(async () => {
-      delayed.reject(structuredFailure());
-      await delayed.promise.catch(() => undefined);
-    });
-    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({
-      title: failureTitle,
-      body: expect.stringMatching(/^queue_full:/),
-    })));
-  });
+      await act(async () => {
+        delayed.reject(structuredFailure());
+        await delayed.promise.catch(() => undefined);
+      });
+      await waitFor(() =>
+        expect(pushToast).toHaveBeenCalledWith(
+          expect.objectContaining({
+            title: failureTitle,
+            body: expect.stringMatching(/^queue_full:/),
+          }),
+        ),
+      );
+    },
+  );
 });
 
 describe("visible mutation inventory: Caption Studio", () => {
@@ -1521,7 +1608,8 @@ describe("visible mutation inventory: Caption Studio", () => {
     harness.params = { id: "clip-1" };
     harness.queryData = { getTranscriptDoc: { words: [], segments: [] } };
     harness.ctx = baseCtx({
-      sources: [sourceFixture()], clips: [clipFixture({ platform: undefined })],
+      sources: [sourceFixture()],
+      clips: [clipFixture({ platform: undefined })],
       client: clientFixture({
         caption: vi.fn().mockResolvedValue({ id: "caption-1" }),
         render: renderClip,
@@ -1545,13 +1633,23 @@ describe("visible mutation inventory: Caption Studio", () => {
     harness.params = { id: "clip-1" };
     harness.queryData = { getTranscriptDoc: { words: [], segments: [] } };
     harness.ctx = baseCtx({
-      sources: [sourceFixture()], clips: [clipFixture()],
-      client: clientFixture({ caption, render: renderClip }), pushToast, nav,
+      sources: [sourceFixture()],
+      clips: [clipFixture()],
+      client: clientFixture({ caption, render: renderClip }),
+      pushToast,
+      nav,
     });
-    render(<StrictMode><CaptionScreen /></StrictMode>);
+    render(
+      <StrictMode>
+        <CaptionScreen />
+      </StrictMode>,
+    );
     const burn = screen.getByRole("button", { name: "Burn captions" });
 
-    act(() => { burn.click(); burn.click(); });
+    act(() => {
+      burn.click();
+      burn.click();
+    });
     expect(caption).toHaveBeenCalledTimes(1);
     expect(pushToast).not.toHaveBeenCalled();
     expect(nav).not.toHaveBeenCalled();
@@ -1560,10 +1658,14 @@ describe("visible mutation inventory: Caption Studio", () => {
       delayed.reject(structuredFailure());
       await delayed.promise.catch(() => undefined);
     });
-    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Caption failed",
-      body: expect.stringMatching(/^queue_full:/),
-    })));
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Caption failed",
+          body: expect.stringMatching(/^queue_full:/),
+        }),
+      ),
+    );
     expect(renderClip).not.toHaveBeenCalled();
     expect(nav).not.toHaveBeenCalled();
   });
@@ -1577,9 +1679,15 @@ describe("visible mutation inventory: Caption Studio", () => {
     harness.params = { id: "clip-1" };
     harness.queryData = { getTranscriptDoc: { words: [], segments: [] } };
     harness.ctx = baseCtx({
-      sources: [sourceFixture()], clips: [clipFixture()], awaitClipJob,
-      client: clientFixture({ caption: vi.fn().mockResolvedValue({ id: "caption-1" }), render: renderClip }),
-      pushToast, nav,
+      sources: [sourceFixture()],
+      clips: [clipFixture()],
+      awaitClipJob,
+      client: clientFixture({
+        caption: vi.fn().mockResolvedValue({ id: "caption-1" }),
+        render: renderClip,
+      }),
+      pushToast,
+      nav,
     });
     window.history.replaceState({}, "", "/clips/clip-1/caption");
     render(<CaptionScreen />);
@@ -1587,7 +1695,10 @@ describe("visible mutation inventory: Caption Studio", () => {
     await waitFor(() => expect(awaitClipJob).toHaveBeenCalledWith("caption-1"));
     window.history.pushState({}, "", "/library");
 
-    await act(async () => { terminal.resolve(); await terminal.promise; });
+    await act(async () => {
+      terminal.resolve();
+      await terminal.promise;
+    });
 
     expect(renderClip).not.toHaveBeenCalled();
     expect(pushToast).not.toHaveBeenCalled();

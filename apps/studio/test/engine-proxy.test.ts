@@ -27,10 +27,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function request(
-  url = studioUrl,
-  init: RequestInit & { duplex?: "half" } = {},
-): Request {
+function request(url = studioUrl, init: RequestInit & { duplex?: "half" } = {}): Request {
   return new Request(url, init);
 }
 
@@ -96,9 +93,11 @@ describe("engine proxy upstream construction", () => {
 
 describe("engine proxy request boundary", () => {
   it("injects only the configured bearer and never trusts browser credentials", async () => {
-    const upstream = fetchReturning(new Response("ok", {
-      headers: { Authorization: "Bearer reflected", "Proxy-Authorization": "Basic reflected" },
-    }));
+    const upstream = fetchReturning(
+      new Response("ok", {
+        headers: { Authorization: "Bearer reflected", "Proxy-Authorization": "Basic reflected" },
+      }),
+    );
     const response = await forwardEngineRequest(
       request(studioUrl, {
         headers: {
@@ -283,9 +282,8 @@ describe("engine proxy origin policy", () => {
     "rejects a public Next request URL for %s before token injection",
     async (method) => {
       const upstream = vi.fn();
-      const headers = method === "GET" || method === "HEAD"
-        ? undefined
-        : { Origin: "https://studio.example" };
+      const headers =
+        method === "GET" || method === "HEAD" ? undefined : { Origin: "https://studio.example" };
       const response = await forwardEngineRequest(
         request("https://studio.example/api/engine/api/v1/jobs", { method, headers }),
         ["api", "v1", "jobs"],
@@ -437,9 +435,11 @@ describe("engine proxy streaming response", () => {
         controller = value;
       },
     });
-    const upstream = fetchReturning(new Response(body, {
-      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
-    }));
+    const upstream = fetchReturning(
+      new Response(body, {
+        headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+      }),
+    );
 
     const response = await forwardEngineRequest(request(), ["api", "v1", "events"], {
       env: defaultEnv,
@@ -455,18 +455,20 @@ describe("engine proxy streaming response", () => {
 
   it("preserves ranged media bytes and representation headers", async () => {
     const bytes = new Uint8Array([0, 1, 2, 3]);
-    const upstream = fetchReturning(new Response(bytes, {
-      status: 206,
-      headers: {
-        "Content-Type": "video/mp4",
-        "Content-Length": "4",
-        "Content-Range": "bytes 0-3/100",
-        "Accept-Ranges": "bytes",
-        "Content-Disposition": "attachment; filename=clip.mp4",
-        ETag: '"clip-v1"',
-        "Last-Modified": "Wed, 21 Oct 2015 07:28:00 GMT",
-      },
-    }));
+    const upstream = fetchReturning(
+      new Response(bytes, {
+        status: 206,
+        headers: {
+          "Content-Type": "video/mp4",
+          "Content-Length": "4",
+          "Content-Range": "bytes 0-3/100",
+          "Accept-Ranges": "bytes",
+          "Content-Disposition": "attachment; filename=clip.mp4",
+          ETag: '"clip-v1"',
+          "Last-Modified": "Wed, 21 Oct 2015 07:28:00 GMT",
+        },
+      }),
+    );
     const response = await forwardEngineRequest(
       request(studioUrl, { headers: { Range: "bytes=0-3" } }),
       ["api", "v1", "clips", "clip-1", "file"],
@@ -485,10 +487,12 @@ describe("engine proxy streaming response", () => {
   });
 
   it("preserves a 416 Content-Range response", async () => {
-    const upstream = fetchReturning(new Response("range", {
-      status: 416,
-      headers: { "Content-Range": "bytes */100" },
-    }));
+    const upstream = fetchReturning(
+      new Response("range", {
+        status: 416,
+        headers: { "Content-Range": "bytes */100" },
+      }),
+    );
     const response = await forwardEngineRequest(request(), ["api", "v1", "media"], {
       env: defaultEnv,
       fetchImpl: upstream.fetchImpl,
@@ -498,19 +502,21 @@ describe("engine proxy streaming response", () => {
   });
 
   it("strips fixed and dynamic hop-by-hop, cookies, and CORS response headers", async () => {
-    const upstream = fetchReturning(new Response("ok", {
-      headers: {
-        Connection: "X-Internal, Keep-Alive",
-        "X-Internal": "private",
-        "Keep-Alive": "timeout=5",
-        "Proxy-Connection": "close",
-        "Set-Cookie": "session=engine",
-        "Set-Cookie2": "legacy=engine",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Expose-Headers": "Authorization",
-        "X-Safe": "visible",
-      },
-    }));
+    const upstream = fetchReturning(
+      new Response("ok", {
+        headers: {
+          Connection: "X-Internal, Keep-Alive",
+          "X-Internal": "private",
+          "Keep-Alive": "timeout=5",
+          "Proxy-Connection": "close",
+          "Set-Cookie": "session=engine",
+          "Set-Cookie2": "legacy=engine",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Expose-Headers": "Authorization",
+          "X-Safe": "visible",
+        },
+      }),
+    );
     const response = await forwardEngineRequest(request(), ["api", "v1", "jobs"], {
       env: defaultEnv,
       fetchImpl: upstream.fetchImpl,
@@ -536,10 +542,12 @@ describe("engine proxy streaming response", () => {
 
 describe("engine proxy redirects and failures", () => {
   it("rewrites a same-engine API redirect to the same-origin proxy without following it", async () => {
-    const upstream = fetchReturning(new Response(null, {
-      status: 307,
-      headers: { Location: "/api/v1/jobs/job-1?view=full#state" },
-    }));
+    const upstream = fetchReturning(
+      new Response(null, {
+        status: 307,
+        headers: { Location: "/api/v1/jobs/job-1?view=full#state" },
+      }),
+    );
     const response = await forwardEngineRequest(request(), ["api", "v1", "jobs"], {
       env: defaultEnv,
       fetchImpl: upstream.fetchImpl,
@@ -547,31 +555,31 @@ describe("engine proxy redirects and failures", () => {
     expect(upstream.calls).toHaveLength(1);
     expect(upstream.calls[0]!.init?.redirect).toBe("manual");
     expect(response.status).toBe(307);
-    expect(response.headers.get("location")).toBe(
-      "/api/engine/api/v1/jobs/job-1?view=full#state",
-    );
+    expect(response.headers.get("location")).toBe("/api/engine/api/v1/jobs/job-1?view=full#state");
   });
 
-  it.each([
-    "https://evil.example/steal",
-    "/admin",
-    "http://[not-an-ipv6-address",
-  ])("blocks unsafe upstream redirect %s", async (location) => {
-    const cancel = vi.fn();
-    const body = new ReadableStream({ cancel });
-    const fetchImpl = vi.fn(async () => new Response(body, {
-      status: 302,
-      headers: { Location: location },
-    }));
-    const response = await forwardEngineRequest(request(), ["api", "v1", "jobs"], {
-      env: defaultEnv,
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-    });
-    await expectError(response, 502, "engine_redirect_forbidden");
-    expect(response.headers.has("location")).toBe(false);
-    expect(fetchImpl).toHaveBeenCalledOnce();
-    expect(cancel).toHaveBeenCalledOnce();
-  });
+  it.each(["https://evil.example/steal", "/admin", "http://[not-an-ipv6-address"])(
+    "blocks unsafe upstream redirect %s",
+    async (location) => {
+      const cancel = vi.fn();
+      const body = new ReadableStream({ cancel });
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(body, {
+            status: 302,
+            headers: { Location: location },
+          }),
+      );
+      const response = await forwardEngineRequest(request(), ["api", "v1", "jobs"], {
+        env: defaultEnv,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      await expectError(response, 502, "engine_redirect_forbidden");
+      expect(response.headers.has("location")).toBe(false);
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      expect(cancel).toHaveBeenCalledOnce();
+    },
+  );
 
   it("returns a non-secret structured error when the engine is unreachable", async () => {
     const fetchImpl = vi.fn(async () => {
@@ -607,9 +615,8 @@ describe("Next engine route adapters", () => {
       const response = await adapter(
         request(studioUrl, {
           method,
-          headers: method === "GET" || method === "HEAD"
-            ? undefined
-            : { Origin: "http://127.0.0.1:3000" },
+          headers:
+            method === "GET" || method === "HEAD" ? undefined : { Origin: "http://127.0.0.1:3000" },
         }),
         { params: Promise.resolve({ path: ["api", "v1", "jobs"] }) },
       );

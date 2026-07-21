@@ -73,7 +73,9 @@ describe("Queue mutation guards", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Logs" }));
 
-    expect(screen.getByText("error: transcription_failed: Whisper worker exited.")).toBeInTheDocument();
+    expect(
+      screen.getByText("error: transcription_failed: Whisper worker exited."),
+    ).toBeInTheDocument();
   });
 
   it("locks a row synchronously across repeated and conflicting actions", async () => {
@@ -110,10 +112,7 @@ describe("Queue mutation guards", () => {
   it("locks Pause all and every claimed row until the whole batch settles", async () => {
     const first = deferred<void>();
     const second = deferred<void>();
-    const pauseJob = vi
-      .fn()
-      .mockReturnValueOnce(first.promise)
-      .mockReturnValueOnce(second.promise);
+    const pauseJob = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
     const pushToast = vi.fn();
     harness.ctx = queueCtx(
       [jobFixture({ id: "download-1" }), jobFixture({ id: "download-2" })],
@@ -147,10 +146,14 @@ describe("Queue mutation guards", () => {
       second.resolve();
       await second.promise;
     });
-    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Pause requests settled",
-      body: "2 succeeded · 0 failed",
-    })));
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Pause requests settled",
+          body: "2 succeeded · 0 failed",
+        }),
+      ),
+    );
   });
 
   it("locks Clear finished and its dismiss rows while preserving structured aggregate errors", async () => {
@@ -192,17 +195,25 @@ describe("Queue mutation guards", () => {
       delayed.resolve();
       await delayed.promise;
     });
-    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Finished-job cleanup settled",
-      body: expect.stringMatching(/^1 succeeded · 1 failed · unreachable:/),
-    })));
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Finished-job cleanup settled",
+          body: expect.stringMatching(/^1 succeeded · 1 failed · unreachable:/),
+        }),
+      ),
+    );
   });
 
   it("allows terminal transcript failures to be dismissed individually and by Clear finished", async () => {
     const dismissTranscript = vi.fn().mockResolvedValue(undefined);
     const transcript = jobFixture({
-      id: "transcript-failed", domain: "transcribe", type: "transcribe", status: "failed",
-      stage: "Whisper worker exited", err: true,
+      id: "transcript-failed",
+      domain: "transcribe",
+      type: "transcribe",
+      status: "failed",
+      stage: "Whisper worker exited",
+      err: true,
     });
     harness.ctx = queueCtx([transcript], { dismissTranscript });
     const view = render(<QueueScreen />);
@@ -221,16 +232,30 @@ describe("Queue mutation guards", () => {
   it("allows a queued or running transcript to be cancelled with the row guard", async () => {
     const pending = deferred<void>();
     const cancelTranscript = vi.fn().mockReturnValue(pending.promise);
-    harness.ctx = queueCtx([
-      jobFixture({ id: "transcript-running", domain: "transcribe", type: "transcribe", status: "running" }),
-    ], { cancelTranscript });
+    harness.ctx = queueCtx(
+      [
+        jobFixture({
+          id: "transcript-running",
+          domain: "transcribe",
+          type: "transcribe",
+          status: "running",
+        }),
+      ],
+      { cancelTranscript },
+    );
     render(<QueueScreen />);
 
     const cancel = screen.getByRole("button", { name: "Cancel" });
-    act(() => { cancel.click(); cancel.click(); });
+    act(() => {
+      cancel.click();
+      cancel.click();
+    });
     expect(cancelTranscript).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "Cancelling…" })).toBeDisabled();
 
-    await act(async () => { pending.resolve(); await pending.promise; });
+    await act(async () => {
+      pending.resolve();
+      await pending.promise;
+    });
   });
 });

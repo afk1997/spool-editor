@@ -263,10 +263,7 @@ async function rewriteRedirect(
       await cancelUpstreamBody(upstream);
       return errorResponse("engine_redirect_forbidden", 502);
     }
-    headers.set(
-      "location",
-      `/api/engine${target.pathname}${target.search}${target.hash}`,
-    );
+    headers.set("location", `/api/engine${target.pathname}${target.search}${target.hash}`);
     return new Response(upstream.body, {
       status: upstream.status,
       statusText: upstream.statusText,
@@ -328,9 +325,8 @@ export async function forwardEngineRequest(
   const redirect = await rewriteRedirect(upstream, upstreamUrl, engineOrigin, headers);
   if (redirect) return redirect;
 
-  const body = request.method === "HEAD" || BODYLESS_STATUSES.has(upstream.status)
-    ? null
-    : upstream.body;
+  const body =
+    request.method === "HEAD" || BODYLESS_STATUSES.has(upstream.status) ? null : upstream.body;
   return new Response(body, {
     status: upstream.status,
     statusText: upstream.statusText,
