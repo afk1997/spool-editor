@@ -24,8 +24,8 @@ def client(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TROVE_JOB_TTL_SECONDS", "60")
     monkeypatch.setenv("TROVE_RATE_LIMIT", "0")
-    monkeypatch.setenv("SPOOL_LLM_PROVIDER", "codex")
-    monkeypatch.setenv("SPOOL_LLM_EGRESS_CONSENT", "1")
+    monkeypatch.setenv("SPOOL_LLM_PROVIDER", "CoDeX")
+    monkeypatch.setenv("SPOOL_LLM_EGRESS_CONSENT", "YES")
     monkeypatch.delenv("SPOOL_OFFLINE", raising=False)
     import app as _app_module
     (tmp_path / "downloads").mkdir(parents=True, exist_ok=True)
@@ -96,8 +96,6 @@ def _await(c, jid, status="done", tries=150):
 @pytest.mark.parametrize(
     ("path", "payload"),
     [
-        ("/api/v1/sources/src1/moments", {"mode": "funny", "count": 1}),
-        ("/api/v1/sources/src1/produce", {"content_mode": "funny", "count": 1}),
         ("/api/v1/sources/src1/cut", {"start": 1, "end": 5}),
         ("/api/v1/clips/clipA/reframe", {}),
         ("/api/v1/clips/clipA/captions", {}),
@@ -124,19 +122,7 @@ def test_media_submission_routes_return_exact_queue_full_without_hidden_jobs(
     assert app.extensions["trove.clips"].snapshot_jobs() == []
 
 
-# ---- moments ---------------------------------------------------------
-
-def test_find_moments_creates_job_and_returns_candidates(client):
-    app, c = client
-    _seed_source(app)
-    r = c.post("/api/v1/sources/src1/moments", json={"mode": "insightful", "count": 4})
-    assert r.status_code == 201
-    body = r.get_json()
-    assert body["kind"] == "moments" and body["source_id"] == "src1"
-    done = _await(c, body["id"])
-    assert done["result"]["count"] == 1
-    assert done["result"]["candidates"][0]["title"] == "M"
-    assert done["result"]["candidates"][0]["mode"] == "insightful"
+# ---- reasoning-dependent discovery / production ---------------------
 
 
 def test_find_moments_404_when_source_not_ready(client):
@@ -153,22 +139,14 @@ def test_find_moments_409_when_no_transcript(client):
 
 
 @pytest.mark.parametrize(
-    "endpoint,payload",
+    ("endpoint", "payload"),
     [
         ("/api/v1/sources/src1/moments", {"mode": "funny"}),
         ("/api/v1/sources/src1/produce", {"content_mode": "funny", "count": 1}),
     ],
 )
-@pytest.mark.parametrize(
-    "privacy_state,expected_error",
-    [
-        ("provider-none", "reasoning_provider_required"),
-        ("consent-missing", "egress_consent_required"),
-        ("offline", "offline_network_disabled"),
-    ],
-)
-def test_reasoning_routes_reject_before_clip_job_admission(
-    client, monkeypatch, endpoint, payload, privacy_state, expected_error,
+def test_reasoning_routes_return_exact_phase0_error_before_clip_job_admission(
+    client, monkeypatch, endpoint, payload,
 ):
     import clip_runner as cr
 
@@ -181,75 +159,37 @@ def test_reasoning_routes_reject_before_clip_job_admission(
         lambda *args, **kwargs: provider_calls.append((args, kwargs)) or [],
     )
 
-    if privacy_state == "provider-none":
-        assert c.patch("/api/v1/settings", json={"reasoning_provider": "none"}).status_code == 200
-    elif privacy_state == "consent-missing":
-        assert c.patch("/api/v1/settings", json={"reasoning_provider": "none"}).status_code == 200
-        assert c.patch("/api/v1/settings", json={"reasoning_provider": "codex"}).status_code == 200
-    else:
-        assert c.patch("/api/v1/settings", json={"offline": True}).status_code == 200
-
     manager = app.extensions["trove.clips"]
     before = len(manager.snapshot_jobs())
     response = c.post(endpoint, json=payload)
 
     assert response.status_code == 409
-    assert response.get_json()["error"] == expected_error
+    assert response.get_json() == {
+        "error": "remote_reasoning_unavailable",
+        "message": (
+            "Remote reasoning is unavailable in Phase 0 until a supported "
+            "zero-tool transport ships."
+        ),
+    }
     assert len(manager.snapshot_jobs()) == before
     assert provider_calls == []
+    assert app.extensions["trove.network_policy"].active_leases == 0
 
 
-@pytest.mark.parametrize(
-    ("revocation", "expected_error"),
-    [
-        ("provider", "reasoning_provider_required"),
-        ("consent", "egress_consent_required"),
-        ("offline", "offline_network_disabled"),
-    ],
-)
-def test_queued_reasoning_rechecks_live_privacy_before_provider_execution(
-    client, monkeypatch, revocation, expected_error,
-):
-    import clip_runner as cr
-    from clip import llm
-
+def test_reasoning_routes_keep_offline_as_the_stronger_error(client):
     app, c = client
     _seed_source(app)
-    entered = threading.Event()
-    release = threading.Event()
-    provider_calls = []
+    assert c.patch("/api/v1/settings", json={"offline": True}).status_code == 200
 
-    def delayed_reasoning(*_args, **kwargs):
-        entered.set()
-        assert release.wait(2), "reasoning worker was not released"
-        llm.complete(
-            "transcript text",
-            provider="codex",
-            network_policy=kwargs["network_policy"],
-            privacy_state=kwargs["privacy_state"],
-        )
-        return []
+    for endpoint in (
+        "/api/v1/sources/src1/moments",
+        "/api/v1/sources/src1/produce",
+    ):
+        response = c.post(endpoint, json={})
+        assert response.status_code == 409
+        assert response.get_json() == {"error": "offline_network_disabled"}
 
-    monkeypatch.setattr(cr.moments, "find_moments", delayed_reasoning)
-    monkeypatch.setattr(llm.shutil, "which", lambda _bin: provider_calls.append(_bin))
-
-    response = c.post("/api/v1/sources/src1/moments", json={"mode": "funny"})
-    assert response.status_code == 201
-    job_id = response.get_json()["id"]
-    assert entered.wait(2), "reasoning worker never reached the barrier"
-
-    change = {
-        "provider": {"reasoning_provider": "none"},
-        "consent": {"reasoning_egress_consent": False},
-        "offline": {"offline": True},
-    }[revocation]
-    revoked = c.patch("/api/v1/settings", json=change)
-    assert revoked.status_code == 200
-    release.set()
-
-    failed = _await(c, job_id, status="error")
-    assert failed["error_category"] == expected_error
-    assert provider_calls == []
+    assert app.extensions["trove.clips"].snapshot_jobs() == []
 
 
 # ---- cut -------------------------------------------------------------
