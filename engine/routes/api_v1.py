@@ -512,10 +512,11 @@ def _validate_settings(data):
     bad = (jsonify({"error": "bad_settings"}), 400)
     if not isinstance(data, dict):
         return None, bad
+    requested_provider = data.get("reasoning_provider")
     if (
-        data.get("reasoning_provider") == "codex"
-        or data.get("reasoning_egress_consent") is True
-    ):
+        isinstance(requested_provider, str)
+        and requested_provider.strip().lower() == "codex"
+    ) or data.get("reasoning_egress_consent") is True:
         return None, _remote_reasoning_unavailable()
     clean: dict = {}
     for key, lo, hi in (("clip_workers", 1, 16), ("max_workers", 1, 16)):
@@ -536,12 +537,6 @@ def _validate_settings(data):
             if not isinstance(data[bkey], bool):
                 return None, bad
             clean[bkey] = data[bkey]
-    if clean.get("reasoning_egress_consent") is True:
-        effective_provider = clean.get(
-            "reasoning_provider", _settings().get()["reasoning_provider"]
-        )
-        if effective_provider != "codex":
-            return None, (jsonify({"error": "egress_consent_requires_codex"}), 400)
     return clean, None
 
 
@@ -658,6 +653,11 @@ def capabilities():
             "transcript_chunk":  True,
             "transcript_search": True,
             "clips":             True,
+            # Phase 0 has no supported zero-tool remote transport. Manual local
+            # transcript selection, clip editing, and rendering remain available.
+            "remote_reasoning":   False,
+            "automated_discovery": False,
+            "watch_reconcile":   False,
         },
         "formats": {
             "transcript_export": ["txt", "srt", "vtt", "json"],
@@ -1706,7 +1706,7 @@ def _reasoning_preflight():
 @api_v1_bp.post("/sources/<source_id>/moments")
 @token_required
 def find_clip_moments(source_id):
-    """Find clip-worthy moments over the source transcript (discover.find_moments)."""
+    """Return the Phase 0 reasoning-unavailable contract for a ready transcript."""
     _, words_path, err = _source_or_error(source_id)
     if err:
         return err
@@ -1720,12 +1720,7 @@ def find_clip_moments(source_id):
             params["window"] = [float(win[0]), float(win[1])]
         except (TypeError, ValueError):
             return jsonify({"error": "bad_window"}), 400
-    privacy_error = _reasoning_preflight()
-    if privacy_error:
-        return privacy_error
-    jid = _cm().submit(kind="moments", source_id=source_id, params=params,
-                       target=_cr().find_moments_target(source_id=source_id, params=params))
-    return jsonify(_clip_job_view(_cm().get(jid))), 201
+    return _reasoning_preflight()
 
 
 def _opt_window(req):
@@ -1863,11 +1858,7 @@ def _sanitize_rank_weights(raw):
 @api_v1_bp.post("/sources/<source_id>/produce")
 @token_required
 def produce_clips(source_id):
-    """Apply a recipe to a source end-to-end → the review queue (automated discover.* +
-    render.pipeline). find_moments(recipe.content_mode, count) → glass-box rank(recipe.weights)
-    → the top ``count`` moments each render with the recipe's aspect/reframe/caption/platform,
-    tagged auto + recipe_id. The watch-folder runs this per new video. The clips are NOT
-    published (Phase 4) — they land for review (the honest gate)."""
+    """Validate source/recipe identity, then reject unavailable Phase 0 automation."""
     _, words_path, err = _source_or_error(source_id)
     if err:
         return err
@@ -1889,12 +1880,7 @@ def produce_clips(source_id):
         verr = _validate_recipe(recipe, require_name=False)
         if verr:
             return verr
-    privacy_error = _reasoning_preflight()
-    if privacy_error:
-        return privacy_error
-    jid = _cm().submit(kind="produce", source_id=source_id, params={"recipe_id": rid},
-                       target=_cr().produce_target(source_id=source_id, recipe=recipe))
-    return jsonify(_clip_job_view(_cm().get(jid))), 201
+    return _reasoning_preflight()
 
 
 @api_v1_bp.post("/sources/<source_id>/cut")
@@ -2366,15 +2352,10 @@ def delete_watch(watch_id):
 @api_v1_bp.post("/watches/<watch_id>/scan")
 @token_required
 def scan_watch(watch_id):
-    """Reconcile a watch once now: detect new videos → ingest (download+auto-transcribe / local
-    import) → produce the recipe for any whose transcript is done. Returns this tick's source ids.
-    The opt-in background poller runs the same reconcile on an interval."""
-    result = current_app.extensions["trove.watch_reconcile"](watch_id)
-    if result is None:
+    """Reject Phase 0 watch execution before listing, ingest, jobs, or state mutation."""
+    if _ws().get(watch_id) is None:
         return jsonify({"error": "not_found"}), 404
-    return jsonify({"ingested": result["ingested"], "produced": result["produced_now"],
-                    "pending": result["pending"], "producing": result["producing"],
-                    "ingesting": result["ingesting"]})
+    return _reasoning_preflight()
 
 
 # ---- settings (S14): writable engine config surfaced by the demo's Settings screen (07) ----
@@ -2408,84 +2389,12 @@ def patch_settings():
 @api_v1_bp.post("/agent")
 @token_required
 def agent_message():
-    """The studio Agent panel's remote turn: a NL message plus optional transcript text.
-    Codex receives no local tool catalog and cannot inspect application state. The
-    read-only tool loop remains available only to explicitly non-egress injected
-    providers outside this production Codex route; manual Studio, direct REST, CLI,
-    and MCP behavior is unchanged.
-
-    Body: ``{message, source_id?, confirm_tool?}``. Returns ``{reply, action, jobs[], tools[],
-    question?, options?, kind?}`` — remote turns always return empty ``tools`` and
-    ``jobs``. A ``clarify`` action carries question/options/kind for the studio's
-    elicitation card. ``confirm_tool`` remains accepted as inert compatibility baggage
-    and cannot enable a write."""
-    from clip import agent as clip_agent, llm as clip_llm, moments as clip_moments
-    from trove_client import TroveClient
-
+    """Reject remote Agent turns in Phase 0 before client or provider construction."""
     data = request.get_json(silent=True) or {}
     message = (data.get("message") or "").strip()
     if not message:
         return jsonify({"error": "missing_message"}), 400
-    privacy_error = _reasoning_preflight()
-    if privacy_error:
-        return privacy_error
-    source_id = (data.get("source_id") or "").strip() or None
-    confirmed = (data.get("confirm_tool") or "").strip() or None
-
-    # Source context: feed the transcript to the loop when we have one (so the agent can quote
-    # timestamps for moments/clips without an extra fetch).
-    lines = None
-    if source_id:
-        _, words_path = _cr().source_paths(source_id)
-        if words_path and os.path.exists(words_path):
-            try:
-                lines = clip_moments._transcript_lines(transcript_io.load(words_path), None)
-            except (OSError, ValueError):
-                lines = None
-
-    # Retained for the explicitly non-egress injection path: its allowed reads use the
-    # same HTTP surface as every other client. Production Codex never invokes it.
-    client = TroveClient()
-    try:
-        result = clip_agent.run_agent(
-            message,
-            client=client,
-            transcript_lines=lines,
-            confirmed_tool=confirmed,
-            network_policy=_network_policy(),
-            privacy_state=_settings().get,
-        )
-    except (clip_llm.OfflineError, clip_llm.ReasoningDisabledError) as e:
-        return jsonify({"error": e.error_category}), 409
-    except clip_llm.ProviderUnavailableError as e:
-        return jsonify({"error": "llm_unavailable", "message": str(e)}), 503
-    except RuntimeError as e:
-        # The bridge died before the loop ran any tool (post-retry): a 503 with the
-        # message beats an opaque 500 stack trace.
-        return jsonify({"error": "llm_failed", "message": str(e)[:300]}), 503
-
-    if result.get("error") == "agent_mutation_disabled":
-        return jsonify({
-            "error": "agent_mutation_disabled",
-            "message": result.get("message")
-            or "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
-        }), 409
-    if result.get("error") == "remote_agent_tools_disabled":
-        return jsonify({
-            "error": "remote_agent_tools_disabled",
-            "message": result.get("message")
-            or clip_agent.REMOTE_AGENT_TOOLS_DISABLED_ERROR["message"],
-        }), 409
-
-    resp = {"reply": result.get("reply", ""), "action": result.get("action", "reply"),
-            "jobs": result.get("jobs", []), "tools": result.get("tools", [])}
-    if result.get("action") in ("clarify", "confirm"):
-        resp["question"] = result.get("question", "")
-        resp["options"] = result.get("options", [])
-        resp["kind"] = result.get("kind", "enum")
-    if result.get("action") == "confirm":
-        resp["pending"] = result.get("pending") or {}
-    return jsonify(resp)
+    return _reasoning_preflight()
 
 
 # ----- OpenAPI schema -------------------------------------------------
@@ -2663,6 +2572,68 @@ _BULK_SUBMIT_OPERATION = {
     },
 }
 
+_REMOTE_REASONING_UNAVAILABLE_SCHEMA = {
+    "type": "object",
+    "required": ["error", "message"],
+    "additionalProperties": False,
+    "properties": {
+        "error": {
+            "type": "string",
+            "enum": [_REMOTE_REASONING_UNAVAILABLE["error"]],
+        },
+        "message": {
+            "type": "string",
+            "enum": [_REMOTE_REASONING_UNAVAILABLE["message"]],
+        },
+    },
+}
+
+
+def _phase0_reasoning_unavailable_operation(label: str) -> dict:
+    return {
+        "summary": f"Remote reasoning unavailable in Phase 0: {label}",
+        "responses": {
+            "409": {
+                "description": "Phase 0 has no supported zero-tool remote transport",
+                "content": {
+                    "application/json": {
+                        "schema": _REMOTE_REASONING_UNAVAILABLE_SCHEMA,
+                        "example": _REMOTE_REASONING_UNAVAILABLE,
+                    },
+                },
+            },
+        },
+    }
+
+
+_SETTINGS_PATCH_OPERATION = {
+    "summary": (
+        "Update local engine config; reasoning stays fixed to provider none "
+        "with egress consent false"
+    ),
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "reasoning_provider": {
+                            "type": "string",
+                            "enum": ["none"],
+                        },
+                        "reasoning_egress_consent": {
+                            "type": "boolean",
+                            "enum": [False],
+                        },
+                    },
+                    "additionalProperties": True,
+                },
+            },
+        },
+    },
+}
+
 # Hand-rolled because pulling in flask-openapi3 / apispec for ~25
 # routes is overkill, and we want the doc to read like prose, not
 # auto-generated noise. Keep this in sync with the actual handlers
@@ -2740,12 +2711,16 @@ _OPENAPI_DOC = {
                  "schema": {"type": "integer"},
                  "description": "Defaults: 4000 chars (txt/srt/vtt) or 50 segments (json). Capped at 64000 / 500."},
             ]}},
-        "/sources/{source_id}/moments": {"post": {"summary": "Find clip-worthy moments over the source transcript (LLM)"}},
+        "/sources/{source_id}/moments": {
+            "post": _phase0_reasoning_unavailable_operation("moment discovery is disabled"),
+        },
         "/sources/{source_id}/energy":  {"get": {"summary": "Normalized 0..1 loudness envelope across the source (the audio-energy waveform)"}},
         "/sources/{source_id}/scenes":  {"get": {"summary": "Scene-cut timestamps within ?start=&end= (the editor timeline's Scenes lane)"}},
         "/sources/{source_id}/filmstrip": {"get": {"summary": "Horizontal thumbnail filmstrip across ?start=&end= as a data URI (the editor timeline's Video lane)"}},
         "/sources/{source_id}/rank":    {"post": {"summary": "Re-rank candidates with the glass-box opportunity score (named, reweightable factors)"}},
-        "/sources/{source_id}/produce": {"post": {"summary": "Apply a recipe end-to-end (find→rank→top-N→pipeline per moment) → the review queue"}},
+        "/sources/{source_id}/produce": {
+            "post": _phase0_reasoning_unavailable_operation("automated production is disabled"),
+        },
         "/sources/{source_id}/cut":     {"post": {"summary": "Cut a clip [start,end] from the source"}},
         "/sources/{source_id}/render":  {"post": {"summary": "One-shot pipeline: cut→reframe→caption→export"}},
         "/clips/{clip_id}/reframe":     {"post": {"summary": "Reframe a clip (diar⊕ROI speaker pan; aspect/mode)"}},
@@ -2759,9 +2734,11 @@ _OPENAPI_DOC = {
         "/recipes/{recipe_id}": {"get": {"summary": "Get one recipe"}, "patch": {"summary": "Update a recipe"}, "delete": {"summary": "Delete a recipe"}},
         "/watches":             {"get": {"summary": "List watches (folder/channel/playlist automations)"}, "post": {"summary": "Create a watch"}},
         "/watches/{watch_id}":  {"get": {"summary": "Get one watch"}, "patch": {"summary": "Update a watch"}, "delete": {"summary": "Delete a watch"}},
-        "/watches/{watch_id}/scan": {"post": {"summary": "Reconcile a watch now: ingest new videos → produce ranked clips per its recipe"}},
+        "/watches/{watch_id}/scan": {
+            "post": _phase0_reasoning_unavailable_operation("watch reconciliation is disabled"),
+        },
         "/settings":            {"get":   {"summary": "Read writable engine config (fast/preset/aspect defaults, offline, concurrency, MCP transport)"},
-                                 "patch": {"summary": "Update engine config (fast/preset/aspect + offline apply immediately; concurrency + MCP transport apply on restart)"}},
+                                 "patch": _SETTINGS_PATCH_OPERATION},
         "/clip-jobs":          {"get":  {"summary": "List clip/render jobs (the render queue)",
                                           "parameters": [
                                               {"name": "kind", "in": "query",
@@ -2775,7 +2752,9 @@ _OPENAPI_DOC = {
         "/clip-jobs/{job_id}":          {"get":  {"summary": "Get one clip job"}},
         "/clip-jobs/{job_id}/cancel":   {"post": {"summary": "Cancel a clip job"}},
         "/clip-jobs/{job_id}/dismiss":  {"post": {"summary": "Drop a finished clip job"}},
-        "/agent":              {"post": {"summary": "Agent turn: NL message → a clip-tool action (find_moments / make_clip / clarify / reply)"}},
+        "/agent":              {
+            "post": _phase0_reasoning_unavailable_operation("Agent turns are disabled"),
+        },
         "/storage":            {"get":  {"summary": "Disk-usage report"}},
         "/openapi.json":       {"get":  {"summary": "This document"}},
         "/events":             {"get":  {"summary": "Server-Sent Events stream of jobs+transcripts",

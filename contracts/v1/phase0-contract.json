@@ -27,9 +27,5 @@
   "agent_mutation_disabled": {
     "error": "agent_mutation_disabled",
     "message": "Agent changes are disabled until the Phase 4 approval and undo contract ships."
-  },
-  "remote_agent_tools_disabled": {
-    "error": "remote_agent_tools_disabled",
-    "message": "Remote Agent tools are disabled. Codex receives only your message and attached transcript text; it cannot inspect local app state."
   }
 }

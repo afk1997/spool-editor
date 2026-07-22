@@ -27,7 +27,6 @@ import watcher
 import settings as settings_store_mod
 import transcript_index as transcript_index_mod
 import clip_runner
-from clip import llm as clip_llm
 from network_policy import NetworkPolicy, NetworkPolicyError
 from process_ownership import service_processes
 import time as _time
@@ -104,22 +103,11 @@ def create_app() -> Flask:
     effective_clip_workers = int(_settings_ov.get("clip_workers", os.environ.get("TROVE_CLIP_WORKERS", "2")))
     app.extensions["trove.settings"] = settings_store
 
-    # Privacy settings are persisted truth, while the LLM boundary reads a process-local
-    # applied snapshot immediately before egress. Boot env may seed only valid explicit
-    # choices; provider + consent land in ONE patch so consent is never reset between writes.
+    # Privacy settings are persisted truth. Phase 0 ignores every provider/consent env
+    # value (including legacy mixed-case values) and publishes only none/false below.
+    # Offline remains a supported, stronger local-network policy and may be seeded.
     true_env = {"1", "true", "yes", "on"}
     seed: dict = {}
-    env_provider = (os.environ.get("SPOOL_LLM_PROVIDER") or "").strip().lower()
-    if env_provider in ("none", "codex"):
-        seed["reasoning_provider"] = env_provider
-    effective_provider = seed.get(
-        "reasoning_provider", settings_store.get()["reasoning_provider"]
-    )
-    if (
-        effective_provider == "codex"
-        and (os.environ.get("SPOOL_LLM_EGRESS_CONSENT") or "").strip().lower() in true_env
-    ):
-        seed["reasoning_egress_consent"] = True
     if (os.environ.get("SPOOL_OFFLINE") or "").strip().lower() in true_env:
         seed["offline"] = True
     if seed:
@@ -127,25 +115,30 @@ def create_app() -> Flask:
 
     network_policy = NetworkPolicy(offline=settings_store.get()["offline"])
     app.extensions["trove.network_policy"] = network_policy
-    reasoning_processes = clip_llm.reasoning_process_registry(network_policy)
-    app.extensions["trove.reasoning_processes"] = reasoning_processes
 
     def _apply_settings(values: dict) -> None:
         if values.get("offline"):
             os.environ["SPOOL_OFFLINE"] = "1"
         else:
             os.environ.pop("SPOOL_OFFLINE", None)
-        provider = values.get("reasoning_provider")
-        os.environ["SPOOL_LLM_PROVIDER"] = provider if provider in ("none", "codex") else "none"
-        if provider == "codex" and values.get("reasoning_egress_consent") is True:
-            os.environ["SPOOL_LLM_EGRESS_CONSENT"] = "1"
-        else:
-            os.environ.pop("SPOOL_LLM_EGRESS_CONSENT", None)
+        # This is intentionally invariant even for a hostile direct extension call:
+        # no runtime path may republish legacy Codex/consent values.
+        os.environ["SPOOL_LLM_PROVIDER"] = "none"
+        os.environ.pop("SPOOL_LLM_EGRESS_CONSENT", None)
 
     _apply_settings(settings_store.get())
     app.extensions["trove.apply_settings"] = _apply_settings
 
     def _commit_settings(changes: dict) -> dict:
+        # SettingsStore repeats these checks, but reject here before even beginning
+        # an Offline transition so a hostile internal call cannot mutate policy.
+        if changes.get("reasoning_provider", "none") != "none":
+            raise ValueError("invalid reasoning_provider")
+        if (
+            "reasoning_egress_consent" in changes
+            and changes["reasoning_egress_consent"] is not False
+        ):
+            raise ValueError("invalid reasoning_egress_consent")
         requested_offline = changes["offline"] if "offline" in changes else None
         with network_policy.transition(requested_offline):
             privacy_keys = (
@@ -951,45 +944,22 @@ def create_app() -> Flask:
         w = watch_store.get(watch_id)
         if w is None:
             return None
-        if _remote_watch(w):
-            # Hold admission across cache invalidation, listing, ingest, and state commit.
-            # An Offline rejection therefore cannot erase a warm cache or advance retry
-            # state, and an accepted scan prevents Offline from becoming visible mid-tick.
-            with network_policy.egress("watch_scan"):
-                return _reconcile_one(w, refresh_listing=True)
-        return _reconcile_one(w)
+        if network_policy.offline:
+            raise NetworkPolicyError(
+                "offline_network_disabled", purpose="watch_scan"
+            )
+        from clip.llm import RemoteReasoningUnavailableError
+        raise RemoteReasoningUnavailableError()
 
     def _reconcile_all() -> None:
-        for w in watch_store.list():
-            if w.get("enabled", True):
-                try:
-                    if _remote_watch(w):
-                        # Denial happens before the reconciler can list, ingest, or
-                        # persist state. It is an expected Offline skip, not poller noise.
-                        with network_policy.egress("watch_poll"):
-                            _reconcile_one(w)
-                    else:
-                        _reconcile_one(w)
-                except NetworkPolicyError:
-                    continue
-                except Exception:
-                    app.logger.warning("watch reconcile failed for %s", w.get("id"), exc_info=True)
+        # Every watch pipeline depends on unavailable automated discovery. Keep
+        # background reconciliation inert before listing or iterating persisted state.
+        return None
 
     app.extensions["trove.watch_reconcile"] = _reconcile_watch_by_id
     app.extensions["trove.watch_reconcile_all"] = _reconcile_all
 
-    # Opt-in background poller: SPOOL_WATCH_INTERVAL seconds (0/unset = off — manual "Scan now"
-    # always works). A daemon thread so it never blocks shutdown.
-    try:
-        _watch_interval = float(os.environ.get("SPOOL_WATCH_INTERVAL", "0") or 0)
-    except ValueError:
-        _watch_interval = 0.0
-    if _watch_interval > 0:
-        def _poll():
-            while True:
-                _time.sleep(_watch_interval)
-                _reconcile_all()
-        threading.Thread(target=_poll, name="watch-poller", daemon=True).start()
+    # No Phase 0 watch poller is started: reconciliation is capability-gated off.
 
     # One lifecycle boundary owns every worker created by this app.  Calls are
     # serialized because SIGTERM can race the normal ``app.run`` finally path;
@@ -998,7 +968,7 @@ def create_app() -> Flask:
 
     def _signal_shutdown(*, deadline: float) -> None:
         # The SIGTERM path must never wait for the application shutdown lock or
-        # for manager/reasoning locks. Every service subprocess is independently
+        # for manager locks. Every service subprocess is independently
         # registered at creation, so the process-wide owner is the complete and
         # deadline-aware signal boundary.
         service_processes.close()
@@ -1013,10 +983,6 @@ def create_app() -> Flask:
         except BaseException as exc:  # manager cleanup must still be attempted
             failures.append(exc)
         with _shutdown_lock:
-            try:
-                reasoning_processes.shutdown(timeout=5.0)
-            except BaseException as exc:  # ensure queue workers still close
-                failures.append(exc)
             for manager in (job_manager, transcribe_manager, clip_manager):
                 try:
                     manager.shutdown(wait=wait)

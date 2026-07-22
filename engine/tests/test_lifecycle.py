@@ -1,4 +1,4 @@
-"""Process lifecycle tests for engine-owned workers and Codex subprocesses."""
+"""Process lifecycle tests for engine-owned workers and service subprocesses."""
 from __future__ import annotations
 
 import os
@@ -362,14 +362,6 @@ def test_app_exposes_one_shutdown_boundary_for_all_owned_workers(tmp_path, monke
 
     service_events = []
 
-    class FakeReasoningRegistry:
-        closing = False
-
-        def shutdown(self, *, timeout):
-            self.closing = True
-
-    reasoning = FakeReasoningRegistry()
-
     class FakeServiceRegistry:
         def close(self):
             service_events.append("close")
@@ -378,20 +370,13 @@ def test_app_exposes_one_shutdown_boundary_for_all_owned_workers(tmp_path, monke
             service_events.append(("drain", deadline))
 
     monkeypatch.setattr(app_module, "service_processes", FakeServiceRegistry())
-    monkeypatch.setattr(
-        app_module.clip_llm,
-        "reasoning_process_registry",
-        lambda _network_policy: reasoning,
-        raising=False,
-    )
     monkeypatch.setattr(app_module, "DOWNLOAD_DIR", tmp_path)
     monkeypatch.delenv("SPOOL_LLM_PROVIDER", raising=False)
     monkeypatch.delenv("SPOOL_LLM_EGRESS_CONSENT", raising=False)
     monkeypatch.delenv("SPOOL_OFFLINE", raising=False)
     application = app_module.create_app()
 
-    registry = application.extensions["trove.reasoning_processes"]
-    assert registry is reasoning
+    assert "trove.reasoning_processes" not in application.extensions
 
     started = time.monotonic()
     application.extensions["trove.shutdown"](wait=True)
@@ -403,7 +388,6 @@ def test_app_exposes_one_shutdown_boundary_for_all_owned_workers(tmp_path, monke
         < service_events[1][1]
         <= started + app_module.NORMAL_SHUTDOWN_TIMEOUT + 0.1
     )
-    assert registry.closing is True
     assert application.extensions["trove.jobs"]._accepting is False
     assert application.extensions["trove.transcribe"]._accepting is False
     assert application.extensions["trove.clips"]._accepting is False
@@ -422,17 +406,7 @@ def test_app_signal_drain_bypasses_contended_normal_shutdown_lock(tmp_path, monk
         def shutdown_until(self, *, deadline):
             drains.append(deadline)
 
-    class FakeReasoningRegistry:
-        def shutdown(self, *, timeout):
-            pass
-
     monkeypatch.setattr(app_module, "service_processes", FakeServiceRegistry())
-    monkeypatch.setattr(
-        app_module.clip_llm,
-        "reasoning_process_registry",
-        lambda _network_policy: FakeReasoningRegistry(),
-        raising=False,
-    )
     monkeypatch.setattr(app_module, "DOWNLOAD_DIR", tmp_path)
     monkeypatch.delenv("SPOOL_LLM_PROVIDER", raising=False)
     monkeypatch.delenv("SPOOL_LLM_EGRESS_CONSENT", raising=False)
@@ -440,13 +414,13 @@ def test_app_signal_drain_bypasses_contended_normal_shutdown_lock(tmp_path, monk
     application = app_module.create_app()
     normal_entered = threading.Event()
     release_normal = threading.Event()
-    reasoning = application.extensions["trove.reasoning_processes"]
+    manager = application.extensions["trove.jobs"]
 
-    def block_normal_shutdown(*, timeout):
+    def block_normal_shutdown(*, wait):
         normal_entered.set()
         assert release_normal.wait(2), "test did not release normal shutdown"
 
-    monkeypatch.setattr(reasoning, "shutdown", block_normal_shutdown)
+    monkeypatch.setattr(manager, "shutdown", block_normal_shutdown)
     normal_result = []
     normal_thread = threading.Thread(
         target=lambda: normal_result.append(

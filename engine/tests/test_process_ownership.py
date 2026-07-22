@@ -583,13 +583,7 @@ def test_production_service_has_no_unowned_raw_subprocess_calls():
         )
         RawSubprocessVisitor(str(relative), tree).visit(tree)
 
-    # The CLI-backed Codex provider is unreachable through Phase-0 routes while
-    # the security slice removes it. Keep this exception exact so any other raw
-    # launch fails immediately; deleting the dormant provider must delete it too.
-    assert raw_calls == [
-        ("clip/llm.py", "_spawn_reasoning_process", "subprocess.Popen"),
-        ("clip/llm.py", "_spawn_reasoning_process", "subprocess.Popen"),
-    ]
+    assert raw_calls == []
     routes_source = (_ENGINE_ROOT / "routes" / "api_v1.py").read_text(
         encoding="utf-8"
     )

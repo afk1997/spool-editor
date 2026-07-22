@@ -8,7 +8,6 @@ existing endpoint tests use.
 from __future__ import annotations
 import os
 import copy
-import inspect
 import json
 import threading
 import time
@@ -79,8 +78,12 @@ def test_capabilities_shape_and_unauthenticated(client, monkeypatch):
         assert key in body, key
     # Feature flags every client expects to see, regardless of value.
     for f in ("diarization", "transcripts", "sse_events",
-              "idempotency_keys", "transcript_chunk", "transcript_search"):
+              "idempotency_keys", "transcript_chunk", "transcript_search",
+              "remote_reasoning", "automated_discovery", "watch_reconcile"):
         assert f in body["features"], f
+    assert body["features"]["remote_reasoning"] is False
+    assert body["features"]["automated_discovery"] is False
+    assert body["features"]["watch_reconcile"] is False
     # Export formats == the ones /chunk + /export.<fmt> accept.
     assert set(body["formats"]["transcript_export"]) == {"txt", "srt", "vtt", "json"}
     # Scopes match safety.SCOPE_* — required so MCP/CLI can name them
@@ -2374,6 +2377,30 @@ def test_contract_fixture_openapi_documents_word_edit_and_bulk_submit(client):
     conflict_schema = word["responses"]["400"]["content"]["application/json"]["schema"]
     assert "conflicting_word_text" in conflict_schema["properties"]["error"]["enum"]
 
+
+def test_openapi_marks_every_reasoning_operation_unavailable_and_settings_fixed(client):
+    _, c = client
+    paths = c.get("/api/v1/openapi.json").get_json()["paths"]
+    expected = PHASE0_CONTRACT["remote_reasoning_unavailable"]
+
+    for path in (
+        "/agent",
+        "/sources/{source_id}/moments",
+        "/sources/{source_id}/produce",
+        "/watches/{watch_id}/scan",
+    ):
+        operation = paths[path]["post"]
+        response = operation["responses"]["409"]
+        assert "unavailable in Phase 0" in operation["summary"]
+        assert response["content"]["application/json"]["example"] == expected
+        schema = response["content"]["application/json"]["schema"]
+        assert schema["properties"]["error"]["enum"] == [expected["error"]]
+        assert schema["properties"]["message"]["enum"] == [expected["message"]]
+
+    settings = paths["/settings"]["patch"]["requestBody"]["content"]["application/json"]["schema"]
+    assert settings["properties"]["reasoning_provider"]["enum"] == ["none"]
+    assert settings["properties"]["reasoning_egress_consent"]["enum"] == [False]
+
     bulk = paths["/jobs/bulk"]["post"]
     bulk_request = bulk["requestBody"]["content"]["application/json"]["schema"]
     assert set(PHASE0_CONTRACT["bulk_submit"]["request"]) <= set(
@@ -2606,14 +2633,15 @@ def test_settings_clamps_numeric_and_rejects_bad_enums(client):
     assert c.get("/api/v1/settings").get_json()["default_preset"] == "tiktok"
 
 
-def test_settings_reject_remote_reasoning_atomically(client):
+@pytest.mark.parametrize("provider", ["codex", "CoDeX", " CODEX "])
+def test_settings_reject_remote_reasoning_atomically(client, provider):
     app, c = client
     store = app.extensions["trove.settings"]
     before_values = store.get()
     before_overrides = store.overrides()
 
     rejected = c.patch("/api/v1/settings", json={
-        "reasoning_provider": "codex",
+        "reasoning_provider": provider,
         "reasoning_egress_consent": True,
         "fast_default": False,
     })
@@ -2793,16 +2821,17 @@ def test_settings_patches_serialize_the_policy_through_route_return(client, monk
 
 
 @pytest.mark.parametrize(
-    "provider,consent,expected_provider,expected_consent",
+    ("provider", "consent"),
     [
-        ("codex", "1", "codex", True),
-        ("codex", None, "codex", False),
-        ("none", "1", "none", False),
-        ("invalid-provider", "1", "none", False),
+        ("codex", "1"),
+        ("CoDeX", "YES"),
+        ("codex", None),
+        ("none", "1"),
+        ("invalid-provider", "1"),
     ],
 )
-def test_create_app_seeds_only_valid_explicit_reasoning_consent(
-    tmp_path, monkeypatch, provider, consent, expected_provider, expected_consent,
+def test_create_app_canonicalizes_every_hostile_reasoning_environment(
+    tmp_path, monkeypatch, provider, consent,
 ):
     import app as _app_module
     dl = tmp_path / f"downloads-{provider}-{consent}"
@@ -2818,10 +2847,42 @@ def test_create_app_seeds_only_valid_explicit_reasoning_consent(
     application = _app_module.create_app()
     body = application.test_client().get("/api/v1/settings").get_json()
 
-    assert body["reasoning_provider"] == expected_provider
-    assert body["reasoning_egress_consent"] is expected_consent
-    assert os.environ["SPOOL_LLM_PROVIDER"] == expected_provider
-    assert (os.environ.get("SPOOL_LLM_EGRESS_CONSENT") == "1") is expected_consent
+    assert body["reasoning_provider"] == "none"
+    assert body["reasoning_egress_consent"] is False
+    assert os.environ["SPOOL_LLM_PROVIDER"] == "none"
+    assert "SPOOL_LLM_EGRESS_CONSENT" not in os.environ
+
+
+def test_internal_settings_hooks_cannot_enable_remote_reasoning(client):
+    app, _ = client
+    store = app.extensions["trove.settings"]
+    policy = app.extensions["trove.network_policy"]
+    before_values = store.get()
+    before_overrides = store.overrides()
+
+    os.environ["SPOOL_LLM_PROVIDER"] = "CoDeX"
+    os.environ["SPOOL_LLM_EGRESS_CONSENT"] = "YES"
+    app.extensions["trove.apply_settings"]({
+        "offline": False,
+        "reasoning_provider": "CoDeX",
+        "reasoning_egress_consent": True,
+    })
+    assert os.environ["SPOOL_LLM_PROVIDER"] == "none"
+    assert "SPOOL_LLM_EGRESS_CONSENT" not in os.environ
+
+    with pytest.raises(ValueError, match="invalid reasoning_provider"):
+        app.extensions["trove.commit_settings"]({
+            "reasoning_provider": "codex",
+            "reasoning_egress_consent": True,
+            "offline": True,
+        })
+
+    assert store.get() == before_values
+    assert store.overrides() == before_overrides
+    assert policy.offline is False
+    assert "SPOOL_OFFLINE" not in os.environ
+    assert os.environ["SPOOL_LLM_PROVIDER"] == "none"
+    assert "SPOOL_LLM_EGRESS_CONSENT" not in os.environ
 
 
 # ---- glass-box re-rank (POST /sources/<id>/rank) ------------------------
@@ -2962,13 +3023,7 @@ def test_source_signal_endpoints_forward_explicit_cache_policy(client, tmp_path,
     ]
 
 
-# ---- agent: NL → bounded ReAct tool-loop over the full /api/v1 surface ----
-
-def _allow_reasoning_for_route_unit(monkeypatch):
-    """Exercise post-preflight response shaping without exposing a production path."""
-    import routes.api_v1 as api_v1
-
-    monkeypatch.setattr(api_v1, "_reasoning_preflight", lambda: None)
+# ---- agent: remote turns unavailable in Phase 0 ---------------------
 
 
 @pytest.mark.parametrize(
@@ -3013,54 +3068,6 @@ def test_agent_route_rejects_privacy_state_before_client_or_provider_work(
     assert app.extensions["trove.network_policy"].active_leases == 0
 
 
-def test_agent_route_threads_the_app_policy_and_live_settings_getter(client, monkeypatch):
-    import clip.agent as clip_agent
-
-    app, c = client
-    _allow_reasoning_for_route_unit(monkeypatch)
-    captured = {}
-
-    def fake_run(message, **kwargs):
-        captured.update(kwargs)
-        return {"action": "reply", "reply": "ok", "tools": [], "jobs": []}
-
-    monkeypatch.setattr(clip_agent, "run_agent", fake_run)
-    response = c.post("/api/v1/agent", json={"message": "hi"})
-
-    assert response.status_code == 200
-    assert captured["network_policy"] is app.extensions["trove.network_policy"]
-    assert captured["privacy_state"] == app.extensions["trove.settings"].get
-    assert app.extensions["trove.clip_runner"].network_policy is captured["network_policy"]
-
-
-@pytest.mark.parametrize(
-    ("error", "expected_code"),
-    [
-        (lambda llm: llm.OfflineError("offline"), "offline_network_disabled"),
-        (lambda llm: llm.ReasoningDisabledError("none"), "reasoning_provider_required"),
-        (lambda llm: llm.EgressConsentError("revoked"), "egress_consent_required"),
-    ],
-)
-def test_agent_route_surfaces_last_moment_privacy_denials_as_exact_409(
-    client, monkeypatch, error, expected_code,
-):
-    import clip.agent as clip_agent
-    from clip import llm
-
-    _, c = client
-    _allow_reasoning_for_route_unit(monkeypatch)
-    monkeypatch.setattr(
-        clip_agent,
-        "run_agent",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(error(llm)),
-    )
-
-    response = c.post("/api/v1/agent", json={"message": "hi"})
-
-    assert response.status_code == 409
-    assert response.get_json() == {"error": expected_code}
-
-
 def test_rejected_reasoning_settings_never_acquire_a_network_lease(client):
     app, c = client
     policy = app.extensions["trove.network_policy"]
@@ -3074,121 +3081,9 @@ def test_rejected_reasoning_settings_never_acquire_a_network_lease(client):
     assert response.get_json() == PHASE0_CONTRACT["remote_reasoning_unavailable"]
     assert policy.active_leases == 0
 
-def test_agent_route_shapes_loop_result(client, monkeypatch):
-    # The route drives clip.agent.run_agent and returns its reply + real tool trace + jobs.
-    import clip.agent as clip_agent
-    captured = {}
-
-    def fake_run(message, *, client, transcript_lines=None, **kw):
-        captured["message"] = message
-        return {"action": "reply", "reply": "1 job in the queue, done.",
-                "tools": [{"name": "list_clip_jobs", "arg": "", "ms": 5, "ok": True}],
-                "jobs": [{"id": "j1", "kind": "produce", "status": "done"}]}
-
-    monkeypatch.setattr(clip_agent, "run_agent", fake_run)
-    _, c = client
-    _allow_reasoning_for_route_unit(monkeypatch)
-    r = c.post("/api/v1/agent", json={"message": "what's in the queue?"})
-    assert r.status_code == 200
-    b = r.get_json()
-    assert b["reply"] == "1 job in the queue, done." and b["action"] == "reply"
-    assert b["tools"][0]["name"] == "list_clip_jobs"          # REAL tool trace (not fabricated from jobs)
-    assert b["jobs"][0]["id"] == "j1"
-
-
-def test_agent_route_clarify_carries_kind(client, monkeypatch):
-    import clip.agent as clip_agent
-    monkeypatch.setattr(clip_agent, "run_agent", lambda m, **kw: {
-        "action": "clarify", "reply": "Which one?", "question": "Which source?",
-        "options": ["a", "b"], "kind": "enum", "tools": [], "jobs": []})
-    _, c = client
-    _allow_reasoning_for_route_unit(monkeypatch)
-    b = c.post("/api/v1/agent", json={"message": "clip it"}).get_json()
-    assert b["action"] == "clarify" and b["question"] == "Which source?"
-    assert b["options"] == ["a", "b"] and b["kind"] == "enum"
-
-
-def test_agent_route_returns_exact_mutation_disabled_envelope(client, monkeypatch):
-    import clip.agent as clip_agent
-    captured = {}
-
-    def disabled(message, **kwargs):
-        captured.update(kwargs)
-        return dict(PHASE0_CONTRACT["agent_mutation_disabled"])
-
-    monkeypatch.setattr(clip_agent, "run_agent", disabled)
-    _, c = client
-    _allow_reasoning_for_route_unit(monkeypatch)
-    r = c.post("/api/v1/agent", json={
-        "message": "delete my recipe",
-        "confirm_tool": "delete_recipe",
-    })
-
-    assert r.status_code == 409
-    assert r.get_json() == PHASE0_CONTRACT["agent_mutation_disabled"]
-    assert captured["confirmed_tool"] == "delete_recipe"
-
-
-def test_agent_route_returns_exact_remote_tools_disabled_envelope(client, monkeypatch):
-    import clip.agent as clip_agent
-
-    expected = PHASE0_CONTRACT["remote_agent_tools_disabled"]
-    monkeypatch.setattr(
-        clip_agent,
-        "run_agent",
-        lambda *_args, **_kwargs: {"error": "remote_agent_tools_disabled"},
-    )
-    _, c = client
-    _allow_reasoning_for_route_unit(monkeypatch)
-
-    response = c.post("/api/v1/agent", json={"message": "inspect my queue"})
-
-    assert response.status_code == 409
-    assert response.get_json() == expected
-
-
-def test_agent_route_does_not_append_source_id_when_remote_transcript_is_missing(
-    client, monkeypatch,
-):
-    import clip.agent as clip_agent
-
-    captured = {}
-
-    def fake_run(message, *, transcript_lines=None, **kwargs):
-        captured["message"] = message
-        captured["transcript_lines"] = transcript_lines
-        return {"action": "reply", "reply": "ok", "tools": [], "jobs": []}
-
-    monkeypatch.setattr(clip_agent, "run_agent", fake_run)
-    _, c = client
-    _allow_reasoning_for_route_unit(monkeypatch)
-
-    response = c.post(
-        "/api/v1/agent",
-        json={"message": "summarize it", "source_id": "private-local-source-id"},
-    )
-
-    assert response.status_code == 200
-    assert captured == {
-        "message": "summarize it",
-        "transcript_lines": None,
-    }
-
-
 def test_agent_route_missing_message_400(client):
     _, c = client
     assert c.post("/api/v1/agent", json={}).status_code == 400
-
-
-def test_agent_route_llm_unavailable_503(client, monkeypatch):
-    import clip.agent as clip_agent
-    from clip import llm
-    def boom(*a, **k):
-        raise llm.ProviderUnavailableError("missing")
-    monkeypatch.setattr(clip_agent, "run_agent", boom)
-    _, c = client
-    _allow_reasoning_for_route_unit(monkeypatch)
-    assert c.post("/api/v1/agent", json={"message": "hi"}).status_code == 503
 
 
 # ---- recipes (Phase 3): saved end-to-end pipelines that drive render.pipeline ----
@@ -3247,18 +3142,20 @@ def test_pipeline_unknown_recipe_404(client, tmp_path):
     assert r.status_code == 404
 
 
-# ---- produce: apply a recipe end-to-end (find→rank→top-N→pipeline) → review queue (Phase 3) ----
-# find_moments is stubbed so the async produce job never reaches the codex bridge in a unit test;
-# the fan-out logic itself is covered synchronously in test_clip_runner.
+# ---- produce: reasoning-dependent automation unavailable in Phase 0 ----
 
-def test_produce_endpoint_submits_a_produce_job(client, tmp_path, monkeypatch):
-    monkeypatch.setattr("clip.moments.find_moments", lambda *a, **k: [])
+def test_produce_endpoint_returns_exact_phase0_error_without_job(client, tmp_path):
     app, c = client
-    _allow_reasoning_for_route_unit(monkeypatch)
     _seed_done_transcript(app, tmp_path, words_data=_editable_words())   # source "abc"
     rid = c.post("/api/v1/recipes", json={"name": "R", "content_mode": "funny", "count": 3}).get_json()["id"]
+    before = app.extensions["trove.clips"].snapshot_jobs()
+
     r = c.post("/api/v1/sources/abc/produce", json={"recipe_id": rid})
-    assert r.status_code == 201 and r.get_json()["kind"] == "produce"
+
+    assert r.status_code == 409
+    assert r.get_json() == PHASE0_CONTRACT["remote_reasoning_unavailable"]
+    assert app.extensions["trove.clips"].snapshot_jobs() == before
+    assert app.extensions["trove.network_policy"].active_leases == 0
 
 
 def test_produce_endpoint_unknown_recipe_404(client, tmp_path):
@@ -3287,31 +3184,22 @@ def test_produce_inline_recipe_rejects_bad_enum(client, tmp_path):
     assert r.status_code == 400 and r.get_json()["error"] == "bad_recipe"
 
 
-def test_produce_inline_recipe_whitelists_keys_into_recipe(client, tmp_path, monkeypatch):
-    # The inline-recipe branch builds the recipe from a whitelist of body keys — assert the
-    # whitelisted (valid) keys reach produce_target and a junk key is dropped.
-    monkeypatch.setattr("clip.moments.find_moments", lambda *a, **k: [])
+def test_produce_inline_recipe_rejects_before_target_construction(client, tmp_path, monkeypatch):
     app, c = client
-    _allow_reasoning_for_route_unit(monkeypatch)
     _seed_done_transcript(app, tmp_path, words_data=_editable_words())   # source "abc"
-    captured = {}
-    real = app.extensions["trove.clip_runner"].produce_target
-
-    def _capture(*, source_id, recipe):
-        captured["recipe"] = recipe
-        return real(source_id=source_id, recipe=recipe)
-
-    monkeypatch.setattr(app.extensions["trove.clip_runner"], "produce_target", _capture)
+    calls = []
+    monkeypatch.setattr(
+        app.extensions["trove.clip_runner"],
+        "produce_target",
+        lambda **kwargs: calls.append(kwargs),
+    )
     r = c.post("/api/v1/sources/abc/produce", json={
         "content_mode": "funny", "count": 3, "aspect": "9:16", "reframe_mode": "pan",
         "caption_preset": "karaoke", "platform": "tiktok", "fast": True,
         "weights": {"energy": 2}, "brand_kit_id": "bk1", "junk": "nope"})
-    assert r.status_code == 201
-    rec = captured["recipe"]
-    assert rec == {"content_mode": "funny", "count": 3, "aspect": "9:16", "reframe_mode": "pan",
-                   "caption_preset": "karaoke", "platform": "tiktok", "fast": True,
-                   "weights": {"energy": 2}, "brand_kit_id": "bk1"}
-    assert "junk" not in rec
+    assert r.status_code == 409
+    assert r.get_json() == PHASE0_CONTRACT["remote_reasoning_unavailable"]
+    assert calls == []
 
 
 # ---- watches (Phase 3): folder / channel / playlist automations ----
@@ -3382,8 +3270,7 @@ def test_watch_update_returns_404_if_record_is_deleted_after_preread(
     assert response.get_json() == {"error": "not_found"}
 
 
-def test_watch_scan_ingests_new_folder_videos(client, tmp_path, monkeypatch):
-    monkeypatch.setattr("clip.moments.find_moments", lambda *a, **k: [])
+def test_watch_scan_rejects_before_listing_state_or_job_mutation(client, tmp_path, monkeypatch):
     app, c = client
     indir = tmp_path / "incoming"
     indir.mkdir()
@@ -3391,42 +3278,43 @@ def test_watch_scan_ingests_new_folder_videos(client, tmp_path, monkeypatch):
     p.write_bytes(b"x")
     old = time.time() - 3600
     os.utime(p, (old, old))
-    wid = c.post("/api/v1/watches", json={"name": "F", "kind": "folder",
-                                          "target": str(indir), "recipe_id": "r1"}).get_json()["id"]
-    r = c.post(f"/api/v1/watches/{wid}/scan")
-    assert r.status_code == 200 and len(r.get_json()["ingested"]) == 1     # the new file ingested
-    assert "talk.mp4" in c.get(f"/api/v1/watches/{wid}").get_json()["seen"]
-    assert c.post(f"/api/v1/watches/{wid}/scan").get_json()["ingested"] == []   # nothing new the 2nd scan
-
-
-def test_watch_ingest_queue_full_returns_429_without_retry_or_seen_state(
-    client, tmp_path, monkeypatch,
-):
-    app, c = client
-    inbox = tmp_path / "capacity-inbox"
-    inbox.mkdir()
-    (inbox / "queued.mp4").write_bytes(b"media")
     created = c.post("/api/v1/watches", json={
-        "name": "Capacity",
+        "name": "Phase 0 disabled",
         "kind": "folder",
-        "target": str(inbox),
+        "target": str(indir),
     }).get_json()
     store = app.extensions["trove.watches"]
     before = copy.deepcopy(store.get(created["id"]))
-    monkeypatch.setattr(watcher, "list_folder_items", lambda *_a, **_kw: ["queued.mp4"])
-
-    def saturated(*_args, **_kwargs):
-        raise QueueFullError("download queue full")
-
-    monkeypatch.setattr(app.extensions["trove.jobs"], "submit", saturated)
+    before_download_jobs = app.extensions["trove.jobs"].snapshot_jobs()
+    before_clip_jobs = app.extensions["trove.clips"].snapshot_jobs()
+    calls = []
+    monkeypatch.setattr(
+        watcher,
+        "list_folder_items",
+        lambda *_args, **_kwargs: calls.append("list") or ["talk.mp4"],
+    )
+    monkeypatch.setattr(
+        app.extensions["trove.jobs"],
+        "submit",
+        lambda *_args, **_kwargs: calls.append("download"),
+    )
+    monkeypatch.setattr(
+        app.extensions["trove.clips"],
+        "submit",
+        lambda *_args, **_kwargs: calls.append("clip"),
+    )
     response = c.post(f"/api/v1/watches/{created['id']}/scan")
 
-    _assert_queue_full_response(response)
+    assert response.status_code == 409
+    assert response.get_json() == PHASE0_CONTRACT["remote_reasoning_unavailable"]
+    assert calls == []
     assert store.get(created["id"]) == before
+    assert app.extensions["trove.jobs"].snapshot_jobs() == before_download_jobs
+    assert app.extensions["trove.clips"].snapshot_jobs() == before_clip_jobs
+    assert app.extensions["trove.network_policy"].active_leases == 0
 
 
-def test_offline_folder_watch_create_update_and_scan_remain_local(client, tmp_path, monkeypatch):
-    monkeypatch.setattr("clip.moments.find_moments", lambda *a, **k: [])
+def test_offline_folder_watch_create_update_but_scan_stays_disabled(client, tmp_path):
     app, c = client
     inbox = tmp_path / "offline-inbox"
     inbox.mkdir()
@@ -3444,14 +3332,15 @@ def test_offline_folder_watch_create_update_and_scan_remain_local(client, tmp_pa
     updated = c.patch(f"/api/v1/watches/{watch_id}", json={"name": "Still local"})
     assert updated.status_code == 200
     assert updated.get_json()["name"] == "Still local"
+    before = copy.deepcopy(app.extensions["trove.watches"].get(watch_id))
 
     scanned = c.post(f"/api/v1/watches/{watch_id}/scan")
-    assert scanned.status_code == 200
-    assert len(scanned.get_json()["ingested"]) == 1
-    assert "local.mp4" in c.get(f"/api/v1/watches/{watch_id}").get_json()["seen"]
+    assert scanned.status_code == 409
+    assert scanned.get_json() == {"error": "offline_network_disabled"}
+    assert app.extensions["trove.watches"].get(watch_id) == before
 
 
-def test_offline_background_reconcile_skips_remote_and_continues_local(client, tmp_path, monkeypatch):
+def test_background_reconcile_returns_before_reading_or_mutating_watches(client, tmp_path, monkeypatch):
     app, c = client
     remote = c.post("/api/v1/watches", json={
         "name": "Remote", "kind": "channel", "target": "https://93.184.216.34/@remote",
@@ -3462,6 +3351,7 @@ def test_offline_background_reconcile_skips_remote_and_continues_local(client, t
         "name": "Local", "kind": "folder", "target": str(folder),
     }).get_json()
     remote_before = app.extensions["trove.watches"].get(remote["id"])
+    local_before = app.extensions["trove.watches"].get(local["id"])
     playlist_calls = []
     folder_calls = []
     set_state_ids = []
@@ -3481,22 +3371,28 @@ def test_offline_background_reconcile_skips_remote_and_continues_local(client, t
         return real_set_state(watch_id, **state)
 
     monkeypatch.setattr(store, "set_state", record_set_state)
+    monkeypatch.setattr(
+        store,
+        "list",
+        lambda: (_ for _ in ()).throw(AssertionError("watch store was iterated")),
+    )
     monkeypatch.setattr(app.logger, "warning", lambda *a, **kw: warning_calls.append((a, kw)))
-    app.extensions["trove.network_policy"].enable_offline()
 
     app.extensions["trove.watch_reconcile_all"]()
 
     assert playlist_calls == []
-    assert folder_calls == [str(folder)]
-    assert remote["id"] not in set_state_ids
-    assert local["id"] in set_state_ids
+    assert folder_calls == []
+    assert set_state_ids == []
     assert store.get(remote["id"]) == remote_before
+    assert store.get(local["id"]) == local_before
     assert warning_calls == []
 
 
-def test_manual_remote_scan_invalidates_cache_after_waiting_for_same_watch_poll(
+def test_direct_manual_reconcile_rejects_before_cache_listing_or_state(
     client, monkeypatch,
 ):
+    from clip import llm
+
     app, c = client
     target = "https://93.184.216.34/list"
     watch = c.post("/api/v1/watches", json={
@@ -3504,69 +3400,37 @@ def test_manual_remote_scan_invalidates_cache_after_waiting_for_same_watch_poll(
     }).get_json()
     cache_key = (target, 30)
     watcher.clear_listing_cache()
-    poll_in_listing = threading.Event()
-    allow_poll_finish = threading.Event()
-    waiter_at_lock = threading.Event()
-    cache_present_at_listing = []
-    errors = []
-
-    reconcile_all = app.extensions["trove.watch_reconcile_all"]
-    reconcile_one = inspect.getclosurevars(reconcile_all).nonlocals["_reconcile_one"]
-    watch_lock = inspect.getclosurevars(reconcile_one).nonlocals["_watch_lock"]
-    watch_locks = inspect.getclosurevars(watch_lock).nonlocals["_watch_locks"]
-    real_lock = threading.Lock()
-
-    class _ObservedLock:
-        def __enter__(self):
-            if real_lock.locked():
-                waiter_at_lock.set()
-            real_lock.acquire()
-            return self
-
-        def __exit__(self, *_exc):
-            real_lock.release()
-
-    watch_locks[watch["id"]] = _ObservedLock()
-
-    def fake_listing(_target, **_kwargs):
-        cache_present_at_listing.append(cache_key in watcher._listing_cache)
-        if len(cache_present_at_listing) == 1:
-            poll_in_listing.set()
-            assert allow_poll_finish.wait(timeout=3)
-            watcher._listing_cache[cache_key] = {
-                "items": ["https://youtu.be/poll"], "expires": float("inf"), "fails": 0,
-            }
-        return []
-
-    monkeypatch.setattr(watcher, "list_playlist_items", fake_listing)
-
-    def run(callable_):
-        try:
-            callable_()
-        except BaseException as error:
-            errors.append(error)
-
-    poll = threading.Thread(target=lambda: run(reconcile_all))
-    manual = threading.Thread(
-        target=lambda: run(lambda: app.extensions["trove.watch_reconcile"](watch["id"])),
+    watcher._listing_cache[cache_key] = {
+        "items": ["https://youtu.be/cached"], "expires": float("inf"), "fails": 0,
+    }
+    before_cache = copy.deepcopy(watcher._listing_cache)
+    store = app.extensions["trove.watches"]
+    before_watch = copy.deepcopy(store.get(watch["id"]))
+    before_download_jobs = app.extensions["trove.jobs"].snapshot_jobs()
+    before_clip_jobs = app.extensions["trove.clips"].snapshot_jobs()
+    calls = []
+    monkeypatch.setattr(
+        watcher,
+        "list_playlist_items",
+        lambda *_args, **_kwargs: calls.append("list") or [],
+    )
+    monkeypatch.setattr(
+        store,
+        "set_state",
+        lambda *_args, **_kwargs: calls.append("state"),
     )
 
     try:
-        poll.start()
-        assert poll_in_listing.wait(timeout=3)
-        manual.start()
-        assert waiter_at_lock.wait(timeout=3)
-        allow_poll_finish.set()
-        poll.join(timeout=3)
-        manual.join(timeout=3)
+        with pytest.raises(llm.RemoteReasoningUnavailableError):
+            app.extensions["trove.watch_reconcile"](watch["id"])
 
-        assert not poll.is_alive() and not manual.is_alive()
-        assert errors == []
-        assert cache_present_at_listing == [False, False]
+        assert calls == []
+        assert watcher._listing_cache == before_cache
+        assert store.get(watch["id"]) == before_watch
+        assert app.extensions["trove.jobs"].snapshot_jobs() == before_download_jobs
+        assert app.extensions["trove.clips"].snapshot_jobs() == before_clip_jobs
+        assert app.extensions["trove.network_policy"].active_leases == 0
     finally:
-        allow_poll_finish.set()
-        poll.join(timeout=3)
-        manual.join(timeout=3)
         watcher.clear_listing_cache()
 
 
@@ -3600,9 +3464,8 @@ def test_update_watch_rejects_unsafe_retarget(client):
     assert r.get_json()["error"] == "unsafe_target"
 
 
-def test_two_watches_on_the_same_folder_ingest_a_file_once(client, tmp_path, monkeypatch):
-    monkeypatch.setattr("clip.moments.find_moments", lambda *a, **k: [])
-    _, c = client
+def test_two_disabled_watch_scans_ingest_nothing(client, tmp_path):
+    app, c = client
     inbox = tmp_path / "inbox"
     inbox.mkdir()
     f = inbox / "video.mp4"
@@ -3612,9 +3475,11 @@ def test_two_watches_on_the_same_folder_ingest_a_file_once(client, tmp_path, mon
 
     w1 = c.post("/api/v1/watches", json={"name": "a", "kind": "folder", "target": str(inbox)}).get_json()
     w2 = c.post("/api/v1/watches", json={"name": "b", "kind": "folder", "target": str(inbox)}).get_json()
-    c.post(f"/api/v1/watches/{w1['id']}/scan")
-    c.post(f"/api/v1/watches/{w2['id']}/scan")
+    first = c.post(f"/api/v1/watches/{w1['id']}/scan")
+    second = c.post(f"/api/v1/watches/{w2['id']}/scan")
 
     jobs = c.get("/api/v1/jobs?limit=100").get_json()["jobs"]
-    same_file = [j for j in jobs if j["url"].endswith("video.mp4")]
-    assert len(same_file) == 1, f"file ingested {len(same_file)}x across two watches"
+    assert first.status_code == second.status_code == 409
+    assert first.get_json() == second.get_json() == PHASE0_CONTRACT["remote_reasoning_unavailable"]
+    assert not [j for j in jobs if j["url"].endswith("video.mp4")]
+    assert app.extensions["trove.clips"].snapshot_jobs() == []
