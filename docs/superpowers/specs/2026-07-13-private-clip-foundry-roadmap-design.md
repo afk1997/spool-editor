@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-13
 
-**Status:** Approved master spec; implementation has not started
+**Status:** Phase 0 complete and verified on 2026-07-22; Phases 1-5 have not started
 
 **Owner:** Spool maintainers
 
@@ -164,7 +164,7 @@ disabled until compliant.
 | 4          | Phase 2 owns the typed timeline boundary. Anonymous durable time fields are not added before then.                          |
 | 5          | Phase 1 establishes Artifact publication; Phase 2 applies it to every media stage.                                          |
 | 6          | Phase 0 adds immediate state guards; Phase 1 makes generation checks durable.                                               |
-| 8          | Phase 0 adds truthful provider consent; Phase 4 adds full EgressReceipt behavior.                                           |
+| 8          | Phase 0 disables remote reasoning; Phase 4 adds explicit consent and full EgressReceipt behavior before re-enablement.      |
 | 9 and 10   | Phase 0 disables mutating agent actions. Phase 4 re-enables them only after plan, diff, approval, execution, and undo pass. |
 | 11         | Phase 0 repairs known drift; Phase 1 makes OpenAPI 3.1 authoritative.                                                       |
 | 12         | Effective immediately for all work in this program.                                                                         |
@@ -650,10 +650,13 @@ Compatibility policy:
   `429 queue_full` response with `Retry-After` and creates no executor work.
 - DOM media URLs work in authenticated mode through short-lived signed URLs or an equivalent
   same-origin authenticated proxy.
-- Until a local reasoning provider ships, remote discovery is off until the user explicitly
-  chooses a provider and approves transcript egress.
-- The UI reports one of `Fully local`, `Remote reasoning enabled`, or `Offline`; it never
-  claims all-local processing while a remote provider is active.
+- Phase 0 exposes no remote reasoning provider. Persisted and environment-supplied legacy
+  provider/consent values are canonicalized to `none`/`false`, and every reasoning-dependent
+  route fails before provider, lease, job, or subprocess work. A later phase may re-enable
+  remote reasoning only through a supported zero-tool transport plus explicit consent.
+- The Phase 0 UI reports `Fully local` or `Offline`. `Remote reasoning enabled` remains the
+  required label for any future remote-provider implementation; it is unreachable while the
+  provider capability is disabled.
 
 ## 7. Delivery roadmap
 
@@ -696,15 +699,16 @@ minimum security boundary around the current alpha.
 4. Remove fake local-file drop, fake Undo, dead Retry, fake quality choices, and fabricated
    numbers. A control is either wired to a real operation with errors or absent.
 5. Reject invalid URL imports before submission and display structured errors.
-6. Correct onboarding and settings copy. Remote reasoning requires provider selection and
-   one-time consent before the first egress.
+6. Correct onboarding and settings copy. Keep remote reasoning unavailable and canonicalize
+   provider state to `none`/`false` until a supported zero-tool transport can enforce the
+   promised transcript-only boundary; any future enablement still requires explicit consent.
 7. Fix mapped-IPv6 SSRF validation, hostile browser Origin rejection, trusted-proxy handling,
    bounded queues, and rate-limiter key retention.
 8. Make token-protected Studio API, SSE, playback, and downloads work.
 9. Repair known API/CLI/MCP contract drift, including transcript word-edit payloads and bulk
    response shapes. Replace or clearly remove the TypeScript MCP stub.
-10. Upgrade the vulnerable PostCSS dependency to a fixed release in an isolated dependency
-    change.
+10. Upgrade the vulnerable PostCSS dependency and any high-severity advisory present at the
+    final gate in isolated dependency changes.
 11. Disable mutating agent tools and their UI actions. Read-only inspection may remain;
     mutation returns a structured `agent_mutation_disabled` response until Phase 4 passes.
 
@@ -724,8 +728,8 @@ minimum security boundary around the current alpha.
 6. Studio completes its existing URL-to-clip E2E with token authentication enabled.
 7. Every production navigation item and visible control performs a real operation or is
    absent. Error responses are visible and actionable.
-8. Remote transcript reasoning cannot begin without explicit consent and active-provider
-   labeling.
+8. Remote transcript reasoning cannot begin in Phase 0. Provider state remains `none`/`false`,
+   hostile legacy state is repaired, and every route/direct boundary rejects before egress.
 9. Contract fixtures pass against Flask, the TypeScript client, Python client, CLI, and MCP.
 10. Mutating agent actions are absent or rejected with `agent_mutation_disabled`; no current
     mutation path bypasses the Phase 4 approval contract.
@@ -736,6 +740,11 @@ recovery path.
 
 **Estimated effort:** 3-5 focused engineering days, split into destruction/product-truth,
 security/resource, authentication, and contract PRs.
+
+**Completion record:** Phase 0 passed its final gates at behavior checkpoint `c8af69c` on
+2026-07-22. The committed evidence, review checkpoints, known frozen formatting baseline,
+and later-phase deferrals are recorded in Section 16 of the
+[Phase 0 implementation plan](../plans/2026-07-13-private-clip-foundry-phase-0-safety-fuse.md#16-phase-0-completion-record).
 
 ### Phase 1: durable domain core and recovery
 

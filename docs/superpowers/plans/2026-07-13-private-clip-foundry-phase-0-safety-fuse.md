@@ -2,9 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Status:** Complete and verified on 2026-07-22
+
+**Behavior checkpoint:** `c8af69c` (the documentation-only completion commit follows this checkpoint)
+
 **Goal:** Remove the current alpha's data-loss paths and false product promises, enforce a minimum local security boundary, and make the existing Studio/engine/CLI/MCP contract safe enough to build the durable domain core on top of.
 
-**Architecture:** Keep the current Flask, JSON stores, job managers, Next Studio, and `/api/v1` compatibility surface intact for Phase 0. Add narrow safety fuses around them: persisted history visibility instead of deletion, in-memory attempt identities around legacy workers, admission control before executors, explicit remote-reasoning consent, defense-in-depth agent mutation rejection, and a same-origin Studio proxy for authenticated JSON/SSE/media traffic. Phase 1 replaces these temporary legacy protections with SQLite domain identity and persisted attempt generations.
+**Architecture:** Keep the current Flask, JSON stores, job managers, Next Studio, and `/api/v1` compatibility surface intact for Phase 0. Add narrow safety fuses around them: persisted history visibility instead of deletion, in-memory attempt identities around legacy workers, admission control before executors, fail-closed remote reasoning, defense-in-depth agent mutation rejection, process-wide subprocess ownership, and a same-origin Studio proxy for authenticated JSON/SSE/media traffic. Phase 1 replaces these temporary legacy protections with SQLite domain identity and persisted attempt generations.
 
 **Tech Stack:** Python 3.12 · Flask · pytest · TypeScript 5 · Next.js 16 / React 19 · Vitest / Testing Library · Playwright · pnpm 10 / Turborepo.
 
@@ -31,7 +35,7 @@ Execution rules:
 6. Do not touch the pre-existing untracked paths `.claude/`, `docs/CODE_REVIEW.md`, or `docs/superpowers/plans/2026-06-12-code-review-high-medium-fixes.md`.
 7. Existing `/api/v1/events` remains a full-snapshot stream in Phase 0. Add fields only; do not remove or rename existing fields.
 8. Manual REST and CLI mutations remain available. Only agent-originated mutation surfaces are fused off.
-9. The PostCSS/dependency change is its own final commit and contains no behavior edits.
+9. Each PostCSS/dependency change is isolated in its own commit and contains no behavior edits.
 
 ## 2. Locked implementation decisions
 
@@ -74,7 +78,7 @@ Admission is reserved under the manager lock before a job record is inserted and
 - `X-Forwarded-For` is ignored by default. `TROVE_TRUST_PROXY_HOPS=N` enables exactly `N` trusted right-most proxy hops; malformed or undersized chains fall back to `request.remote_addr`.
 - Rate-limiter keys are capped at 4096 by default (`TROVE_RATE_LIMIT_MAX_KEYS`). Expired keys are pruned first; if a new key still arrives at capacity, evict the least-recently-seen key (lexical key order breaks timestamp ties) before inserting it.
 
-### 2.5 Remote reasoning consent
+### 2.5 Remote reasoning is fail-closed
 
 Persist two settings:
 
@@ -85,15 +89,26 @@ Persist two settings:
 }
 ```
 
-Phase 0 supports `none` and `codex`. `none` is the default. Changing provider resets consent unless the same validated update explicitly supplies consent for the new provider. Every egress provider call checks the persisted/env-applied consent immediately before network execution. `offline` remains the stronger gate and always blocks remote reasoning.
+Phase 0 supports only `none` and always stores consent as `false`. Persisted mixed-case legacy
+Codex values, hostile environment seeds, internal apply calls, and settings updates all
+canonicalize or reject atomically. Normal Agent, moments, produce, and watch-scan requests
+return `409 remote_reasoning_unavailable`; active Offline mode remains the stronger boundary
+and returns `409 offline_network_disabled`. No blocked case creates a job, constructs a
+provider/client, acquires an egress lease, starts a subprocess, or mutates watch state.
 
-`reasoning_egress_consent: true` is invalid while the effective provider is `none`; choosing `none` always stores consent as false. A consent-only patch is valid only when the already-persisted provider is `codex`.
-
-Manual discovery maps a missing provider to `409 { "error": "reasoning_provider_required" }`, missing consent to `409 { "error": "egress_consent_required" }`, and active offline mode to the existing structured offline response. No blocked case creates a ClipJob or invokes the provider.
+This is a deliberate strengthening of the original consent-only design. Inspection of the
+[Codex CLI 0.136 configuration schema](https://raw.githubusercontent.com/openai/codex/rust-v0.136.0/codex-rs/core/config.schema.json)
+found controls for environment, permissions, apps, and collaboration context, but no
+supported setting that guarantees a zero-tool request. The
+captured request envelope therefore could not enforce the promised transcript-only boundary.
+The CLI execution/auth core was removed instead of relying on an unsupported assumption.
+Remote reasoning may return only after a supported zero-tool transport is implemented and the
+consent/EgressReceipt contract is reviewed.
 
 One engine-wide `NetworkPolicy` makes `Offline` literal: no new URL download, remote model install, remote watch listing, or remote reasoning lease can begin. Switching Offline on is atomic and fails with `network_work_active` while an existing non-loopback lease is active; queued work rechecks before its first socket. Loopback API clients and local folder/transcription/render work remain allowed.
 
-The three UI labels are exactly `Fully local`, `Remote reasoning enabled`, and `Offline`.
+The reachable Phase 0 UI labels are exactly `Fully local` and `Offline`. `Remote reasoning
+enabled` remains reserved for a future provider that passes the zero-tool and consent gates.
 
 ### 2.6 Authenticated Studio transport
 
@@ -150,8 +165,10 @@ Always run engine pytest from `engine/`; the CLI tests intentionally depend on t
 - `engine/job_capacity.py` — shared capacity formula and `QueueFullError` only.
 - `engine/attempt_staging.py` — legacy attempt-local output roots and guarded same-filesystem promotions.
 - `engine/network_policy.py` — atomic Offline/non-loopback lease boundary.
+- `engine/process_ownership.py`, `engine/lifecycle.py` — process-wide subprocess-tree ownership and bounded normal/SIGTERM draining.
 - `engine/tests/test_phase0_artifact_safety.py` — cross-manager managed-artifact byte-identity and restart matrix.
 - `engine/tests/test_attempt_staging.py`, `engine/tests/test_network_policy.py` — cancellation publication and literal Offline regressions.
+- `engine/tests/test_process_ownership.py`, `engine/tests/test_lifecycle.py` — spawn inventory, process-group, deadline, race, and real-tree shutdown regressions.
 - `contracts/v1/phase0-contract.json` — canonical word-edit, bulk, queue-full, and agent-disabled fixtures consumed by Python and TypeScript tests.
 - `apps/studio/src/lib/engine-proxy.ts` — testable same-origin forwarding policy.
 - `apps/studio/src/lib/action-error.ts` — one structured API-error-to-actionable-copy helper for visible Studio mutations.
@@ -166,7 +183,7 @@ Always run engine pytest from `engine/`; the CLI tests intentionally depend on t
 - `engine/transcribe_jobs.py`, `engine/clip_jobs.py` — same lifecycle, capacity, and attempt rules.
 - `engine/app.py`, `engine/clip_runner.py` — initialize limits/settings; guard transcript publication and produce child fan-out.
 - `engine/safety.py`, `engine/config.py` — mapped IPv6 normalization, browser Origin gate, proxy-derived client IP, bounded limiter configuration.
-- `engine/settings.py`, `engine/clip/llm.py` — provider selection and egress consent enforcement.
+- `engine/settings.py`, `engine/clip/llm.py` — durable `none`/`false` canonicalization and a stable fail-closed reasoning compatibility boundary.
 - `engine/routes/api_v1.py` — additive lifecycle fields, structured errors, settings contract, word/bulk compatibility.
 - `engine/clip/agent.py`, `engine/clip/agent_tools.py`, `engine/mcp_server.py` — mutation fuse with read-only inspection preserved.
 - `engine/trove_client.py`, `engine/cli.py` — canonical word payload and shared contract fixtures.
@@ -205,7 +222,7 @@ Each slice must pass its focused tests and the full relevant side before the nex
 - Add: `docs/superpowers/plans/2026-07-13-private-clip-foundry-phase-0-safety-fuse.md`
 - Do not modify production files in this task.
 
-- [ ] **Step 1: Put this approved plan on the feature branch**
+- [x] **Step 1: Put this approved plan on the feature branch**
 
 From the current checkout, create the branch, commit only this approved plan, and return the checkout to `main`. The unrelated untracked files named in Section 1 must remain untouched:
 
@@ -217,7 +234,7 @@ git commit -m "docs(plan): define Phase 0 safety fuse"
 git switch main
 ```
 
-- [ ] **Step 2: Create the approved global worktree**
+- [x] **Step 2: Create the approved global worktree**
 
 Use this path so the repository needs no `.gitignore` setup change. It becomes the explicit worktree preference when the user approves this plan:
 
@@ -232,7 +249,7 @@ git status --short --branch
 
 Expected: branch `codex/phase-0-safety-fuse`, based on the committed master spec at `9deb66d`, with none of the main checkout's unrelated untracked files copied into it.
 
-- [ ] **Step 3: Verify the committed plan record in the worktree**
+- [x] **Step 3: Verify the committed plan record in the worktree**
 
 Verify the plan-only branch commit before installing dependencies:
 
@@ -240,7 +257,7 @@ Verify the plan-only branch commit before installing dependencies:
 git show --stat --oneline HEAD
 ```
 
-- [ ] **Step 4: Install/link dependencies and re-run the clean baseline inside the worktree**
+- [x] **Step 4: Install/link dependencies and re-run the clean baseline inside the worktree**
 
 The Python virtual environment is ignored and will not be present in a new linked worktree. Reuse the verified repository environment without copying it into Git, then install/link the pnpm workspace:
 
@@ -293,7 +310,7 @@ Expected: Python, typecheck, tests, and build match Section 3. `pnpm lint` retai
 - Modify: `apps/studio/src/components/spool/context.tsx`
 - Modify: `apps/studio/test/context.test.ts`
 
-- [ ] **Step 1: Invert the destructive legacy expectations**
+- [x] **Step 1: Invert the destructive legacy expectations**
 
 Change the existing terminal-cancel, dismiss, and sweep tests so they assert that the job record and final file remain. Use a deterministic persisted marker:
 
@@ -312,7 +329,7 @@ assert manager.get(job_id).dismissed_at == first_dismissed_at
 
 For an active job, assert `cancel()` changes only lifecycle state and never removes any already-published managed file. For `DONE`, `ERROR`, or already-`CANCELLED`, assert cancellation is a no-op: it returns `False`, preserves the existing terminal state, and preserves bytes.
 
-- [ ] **Step 2: Add the cross-manager artifact matrix**
+- [x] **Step 2: Add the cross-manager artifact matrix**
 
 In `test_phase0_artifact_safety.py`, keep an explicit list of published artifact paths and hash only those before and after the operation. Do not hash mutable metadata stores such as `jobs.json`, `transcribe_jobs.json`, `clip_jobs.json`, settings, indexes, or attempt-staging files:
 
@@ -334,7 +351,7 @@ Parameterize these cases:
 
 The fixture tree must contain source media, `.words.json`, `.srt`, `.vtt`, `.txt`, a clip intermediate, caption sidecar, rendered video, and export file. After each operation and restart, require exact hash-map equality and direct record retrieval by ID.
 
-- [ ] **Step 3: Observe the red tests**
+- [x] **Step 3: Observe the red tests**
 
 ```bash
 cd engine
@@ -348,7 +365,7 @@ cd engine
 
 Expected before implementation: failures show record removal and/or file removal. If a proposed assertion already passes, retain it only when it protects an uncovered invariant.
 
-- [ ] **Step 4: Persist history visibility without deleting identity**
+- [x] **Step 4: Persist history visibility without deleting identity**
 
 Add `dismissed_at: str | None = None` to each legacy job record and include it in serialization/deserialization. Missing fields in old JSON decode to `None`.
 
@@ -376,7 +393,7 @@ Give transcription and clip managers the same `ttl_seconds`, transient `last_acc
 
 Retire the download sweeper's `_keep_source`/`keep_predicate` preservation path: it existed only because sweep deleted the source record/file. With history-only marking, source identity remains available and no dependency needs to pin queue visibility.
 
-- [ ] **Step 5: Expose additive history fields and truthful projections**
+- [x] **Step 5: Expose additive history fields and truthful projections**
 
 Add these fields to download, transcription, and clip API views:
 
@@ -391,7 +408,7 @@ Add these fields to download, transcription, and clip API views:
 
 Add optional `dismissed`/`dismissed_at` fields to the TypeScript job views. In the Studio adapter, filter dismissed records only from Queue and Import-progress projections; keep completed download records in `mapSources` and completed clip records in `mapClips`. Add a context regression with one dismissed completed source and render: both remain in Library/Clips while neither appears in Queue/Import progress.
 
-- [ ] **Step 6: Run focused and full engine verification**
+- [x] **Step 6: Run focused and full engine verification**
 
 ```bash
 cd engine
@@ -408,7 +425,7 @@ pnpm --filter @spool/studio exec vitest run test/context.test.ts
 pnpm --filter @spool/studio typecheck
 ```
 
-- [ ] **Step 7: Commit Slice 0A**
+- [x] **Step 7: Commit Slice 0A**
 
 ```bash
 git add engine/jobs.py engine/jobs_store.py engine/transcribe_jobs.py engine/clip_jobs.py \
@@ -442,7 +459,7 @@ Rollback rule: if a consumer cannot tolerate the additive marker, keep unlink/po
 - Modify: `engine/tests/test_api_v1.py`
 - Modify: `engine/tests/test_api_v1_clips.py`
 
-- [ ] **Step 1: Write barrier-based queued-cancel tests for all managers**
+- [x] **Step 1: Write barrier-based queued-cancel tests for all managers**
 
 Block the sole worker with a first job, enqueue a second job, cancel the second, release the worker, and prove the second target was never called:
 
@@ -456,7 +473,7 @@ assert manager.get(cancelled_id).status == "cancelled"
 
 Cover initial download, download `resume()`, transcription, and clip submission.
 
-- [ ] **Step 2: Write running-cancel and stale-publication tests**
+- [x] **Step 2: Write running-cancel and stale-publication tests**
 
 For each manager, let the target start, cancel it, then make the target either return or raise. Assert the final status remains `cancelled`, no completion/error field is published, and later progress callbacks are ignored.
 
@@ -471,7 +488,7 @@ Add boundary regressions for:
 
 Add a pause/resume barrier: pausing preserves the attempt's yt-dlp `.part` staging files, but `resume()` returns structured `409 attempt_unwinding` until the paused worker has exited. Only then may the new attempt reuse that staging path. The old worker's `finally` must not clean a path now owned by a resume.
 
-- [ ] **Step 3: Observe the race tests fail**
+- [x] **Step 3: Observe the race tests fail**
 
 ```bash
 cd engine
@@ -487,7 +504,7 @@ cd engine
 
 Expected: transcribe/clip targets start after cancellation, exception paths can overwrite `cancelled`, or post-cancel publication/fan-out occurs.
 
-- [ ] **Step 4: Add atomic attempt transitions, not boolean prechecks**
+- [x] **Step 4: Add atomic attempt transitions, not boolean prechecks**
 
 Add transient `_attempt: int = field(default=0, repr=False, compare=False)` and `_worker_active: bool = field(default=False, repr=False, compare=False)` fields. Do not persist either field. Replace the managers' non-reentrant locks with `RLock` because guarded persistence and atomic child admission re-enter manager helpers.
 
@@ -515,7 +532,7 @@ Increment before every initial submission/resume and capture the number in the w
 
 Represent the pause race with a typed `AttemptUnwindingError`; `/jobs/<id>/resume` maps only that type to `409 {"error":"attempt_unwinding"}`. Preserve the existing not-found/not-resumable behavior for other false returns.
 
-- [ ] **Step 5: Stage every candidate output away from published paths**
+- [x] **Step 5: Stage every candidate output away from published paths**
 
 `attempt_staging.py` owns same-filesystem attempt directories and promotion descriptors:
 
@@ -533,7 +550,7 @@ Targets write only to their captured staging root and return local result/update
 
 Promotion occurs inside the same manager lock section that revalidates the captured object/attempt/status and applies the result. `os.replace` stays on the same filesystem. Phase 0 does not claim crash-atomic multi-file promotion; Phase 1 replaces this fuse with Artifact publication/reconciliation.
 
-- [ ] **Step 6: Guard errors, progress, cleanup, and child fan-out**
+- [x] **Step 6: Guard errors, progress, cleanup, and child fan-out**
 
 Exception handlers must mutate only through the atomic helper:
 
@@ -553,7 +570,7 @@ In `finally`, clean only the captured attempt's staging root after cancel/error.
 
 Add `ClipJobManager.submit_children_if_current(parent, attempt, specs)`: under the manager `RLock`, revalidate the parent once, create/submit all child specs, and apply the parent's child-ID result before releasing the lock. Worker closures cannot start until that lock is released. If cancellation linearized first, it creates zero children; if fan-out linearized first, cancellation does not retroactively erase admitted children.
 
-- [ ] **Step 7: Verify focused races, staging, then the entire engine**
+- [x] **Step 7: Verify focused races, staging, then the entire engine**
 
 ```bash
 cd engine
@@ -568,7 +585,7 @@ cd engine
 .venv/bin/python -m pytest -q
 ```
 
-- [ ] **Step 8: Commit Slice 0B**
+- [x] **Step 8: Commit Slice 0B**
 
 ```bash
 git add engine/attempt_staging.py engine/jobs.py engine/transcribe_jobs.py \
@@ -622,7 +639,7 @@ This slice has three independently revertible commits: visible product truth, pr
 - Modify: `apps/studio/src/app/watches/page.tsx`
 - Modify: `apps/studio/src/app/settings/page.tsx`
 
-- [ ] **Step 1: Add the complete visible-control regression inventory**
+- [x] **Step 1: Add the complete visible-control regression inventory**
 
 Render the relevant pages/components with a mocked `SpoolApiClient` and assert:
 
@@ -641,23 +658,23 @@ Render the relevant pages/components with a mocked `SpoolApiClient` and assert:
 - shared switches and segmented controls used by visible Studio surfaces are keyboard-operable and expose distinct accessible names plus checked/selected state;
 - repeated clicks cannot submit duplicate/conflicting row or batch mutations before React state or SSE catches up, and long-running completions never redirect a route the user has since left.
 
-- [ ] **Step 2: Observe the product-truth test fail**
+- [x] **Step 2: Observe the product-truth test fail**
 
 ```bash
 pnpm --filter @spool/studio exec vitest run test/product-truth.test.tsx
 ```
 
-- [ ] **Step 3: Remove or truthfully wire each inventory item**
+- [x] **Step 3: Remove or truthfully wire each inventory item**
 
 For URL import, validate with `new URL(value)` and allow only `http:`/`https:` before calling the client. Convert structured client errors to visible state; clear the input and show success only after a successful response.
 
 Hide navigation and action entry points only. Do not delete routes, Recipes/Watches/brand-kit data, or backend implementations. Replace analytics content with a plain unavailable-state explanation and no metric values.
 
-Add `action-error.ts` to extract `SpoolApiError.code` and map known actionable codes (`queue_full`, `invalid_url`, `origin_forbidden`, `agent_mutation_disabled`, `egress_consent_required`, `not_resumable`, `timeout`, and `unreachable`) to concise copy while retaining the code for diagnostics. Replace swallowed mutation rejections on every file listed in Section 9.1. A browser autoplay rejection may remain non-fatal; a failed engine mutation may not.
+Add `action-error.ts` to extract `SpoolApiError.code` and map known actionable codes (`queue_full`, `invalid_url`, `origin_forbidden`, `agent_mutation_disabled`, `remote_reasoning_unavailable`, `offline_network_disabled`, `not_resumable`, `timeout`, and `unreachable`) to concise copy while retaining the code for diagnostics. Replace swallowed mutation rejections on every file listed in Section 9.1. A browser autoplay rejection may remain non-fatal; a failed engine mutation may not.
 
 When the API client receives a non-2xx JSON response, preserve both `error` and `message` in `SpoolApiError`; do not collapse an unknown structured failure to its code alone.
 
-- [ ] **Step 4: Verify Studio behavior and commit it**
+- [x] **Step 4: Verify Studio behavior and commit it**
 
 ```bash
 pnpm --filter @spool/studio exec vitest run test/product-truth.test.tsx
@@ -690,7 +707,14 @@ git commit -m "fix(studio): remove false controls"
 
 Before committing, inspect `git diff --cached --name-only` and unstage any generated/cache file; every staged source path must be one of the files listed in Section 9.1.
 
-### 9.2 Require explicit egress consent and make Offline real
+### 9.2 Make Offline real and remote reasoning fail closed
+
+> **Completion amendment (2026-07-22):** The original steps in this subsection assumed the
+> Codex CLI could be constrained to a transcript-only, zero-tool request. Its reviewed 0.136
+> configuration/request surface did not provide a supported zero-tool switch, so the accepted
+> implementation uses the stronger boundary recorded in Section 2.5: provider `none`, consent
+> `false`, no CLI/auth/execution core, and exact pre-admission 409 responses. The network-policy
+> work below still applies to URL import, model download, and remote watch target operations.
 
 **Files:**
 
@@ -726,21 +750,24 @@ Before committing, inspect `git diff --cached --name-only` and unstage any gener
 - Modify: `apps/studio/src/components/spool/context.tsx`
 - Modify: `apps/studio/src/lib/action-error.ts`
 
-- [ ] **Step 1: Write provider, consent, and last-moment race tests**
+- [x] **Step 1: Write provider-state and reasoning-bypass tests**
 
 Engine tests must prove:
 
-1. defaults are `reasoning_provider == "none"` and `reasoning_egress_consent is False`;
-2. selecting `codex` without consent invokes no provider and creates no ClipJob;
-3. setting provider plus explicit consent permits the provider call;
-4. changing `codex -> none -> codex` resets consent;
-5. `offline=True` blocks egress even with consent;
-6. a failed atomic settings save cannot activate provider, consent, or offline state;
-7. a barrier holds execution after a consented Codex request is selected, consent is revoked, then the barrier releases; the provider spy stays at zero and the caller receives `egress_consent_required`.
+1. defaults and every persisted/runtime projection are `reasoning_provider == "none"` and
+   `reasoning_egress_consent is False`;
+2. persisted and mixed-case legacy Codex values are durably canonicalized without losing
+   unrelated settings;
+3. hostile environment seeds, store updates, and exposed internal apply/commit callables
+   cannot activate a provider or consent;
+4. Agent, moments, produce, and manual/background watches reject before jobs, clients,
+   providers, leases, subprocesses, listing, cache invalidation, or state mutation;
+5. Offline remains the stronger exact 409 response, and OpenAPI validates both envelopes;
+6. direct provider construction/completion and opaque `egress=True` injections fail closed,
+   while explicitly injected non-egress deterministic providers remain available to tests;
+7. no Codex CLI probe, auth read, raw subprocess path, or reasoning-process registry remains.
 
-The manual moments route preflights provider/consent before job admission so it can return the structured 409 with no ClipJob. The LLM adapter repeats the check against current settings immediately before network execution so queued or non-route callers cannot use a stale consent snapshot.
-
-- [ ] **Step 2: Write an engine-wide offline network-policy matrix**
+- [x] **Step 2: Write an engine-wide offline network-policy matrix**
 
 Create a small lock-protected `NetworkPolicy` whose `egress(purpose)` context manager rejects when offline and counts active non-loopback operations until `finally`. Its atomic `enable_offline()` fails with `network_work_active` while the count is non-zero, so the UI never displays Offline while a remote socket is active.
 
@@ -753,7 +780,7 @@ Tests with DNS, runner, `urlopen`, watcher, and provider spies must prove:
 - queued network work accepted before Offline was enabled rechecks the policy in its worker and performs zero network calls;
 - an active policy lease makes the Offline settings patch return `409 {"error":"network_work_active"}` without persisting the toggle.
 
-- [ ] **Step 3: Observe the privacy/offline tests fail**
+- [x] **Step 3: Observe the privacy/offline tests fail**
 
 ```bash
 cd engine
@@ -767,12 +794,12 @@ cd ..
 pnpm --filter @spool/studio exec vitest run test/privacy-mode.test.tsx
 ```
 
-- [ ] **Step 4: Implement atomic provider/settings semantics**
+- [x] **Step 4: Implement atomic provider/settings semantics**
 
 Extend settings validation and API types with:
 
 ```ts
-type ReasoningProvider = "none" | "codex";
+type ReasoningProvider = "none";
 
 interface EngineSettings {
   offline: boolean;
@@ -781,35 +808,39 @@ interface EngineSettings {
 }
 ```
 
-`SPOOL_LLM_PROVIDER` may seed `none|codex` at boot. `SPOOL_LLM_EGRESS_CONSENT=1` may seed consent only when the effective provider is `codex`; no environment default silently opts in. Provider changes reset consent unless the same valid patch explicitly grants it, and `none` always forces false.
+`SPOOL_LLM_PROVIDER` always publishes as `none`; hostile or legacy values do not opt in.
+`SPOOL_LLM_EGRESS_CONSENT` is removed from the live environment and persisted consent is
+always false. Invalid direct store/commit updates fail atomically. Loading a legacy record
+repairs it durably while preserving unrelated settings.
 
 Make `SettingsStore.update()` copy-on-write: build the next override dict, write/replace it atomically, then assign it in memory. The Offline transition holds the `NetworkPolicy` lock from active-lease validation through settings-file replacement and in-memory/env commit, so a new lease cannot enter between preflight and persistence. If validation or replacement fails, neither policy state, settings state, nor process environment changes.
 
-- [ ] **Step 5: Put every exposed non-loopback operation behind the policy**
+- [x] **Step 5: Put every exposed non-loopback operation behind the policy**
 
-Acquire a short `NetworkPolicy.egress("url_validation")` lease around DNS validation and any synchronous metadata probe before admission, then acquire a new worker lease around yt-dlp. Apply the same lease to model download, remote watcher listing/target validation, and Codex execution. The settings route, background poller, manual endpoints, CLI, MCP, and direct helper functions must all converge on those checks; a boolean precheck or UI-only toggle is insufficient.
+Acquire a short `NetworkPolicy.egress("url_validation")` lease around DNS validation and any synchronous metadata probe before admission, then acquire a new worker lease around yt-dlp. Apply the same lease to model download and remote watcher listing/target validation. Reasoning entry points fail before a lease because no remote provider is supported. The settings route, background poller, manual endpoints, CLI, MCP, and direct helper functions must all converge on those checks; a boolean precheck or UI-only toggle is insufficient.
 
-The direct boundaries are `safety.is_safe_url`, `runner.run_info`, `runner.run_download`,
-`models_store.download`, `watcher.list_playlist_items`, and `CodexProvider.complete`. Route
+The active network boundaries are `safety.is_safe_url`, `runner.run_info`,
+`runner.run_download`, `models_store.download`, and `watcher.list_playlist_items`. Route
 admission and queued-worker execution both recheck the same shared policy instance. Broad
 download/watch exception handlers must re-raise policy denials instead of swallowing them as
-ordinary probe/listing failures.
+ordinary probe/listing failures. `CodexProvider` is a compatibility stub that raises
+`RemoteReasoningUnavailableError` before auth, lease, or process work.
 
-- [ ] **Step 6: Correct privacy copy and labels**
+- [x] **Step 6: Correct privacy copy and labels**
 
-Onboarding and Settings name the selected provider and state that transcripts leave the machine for remote reasoning. Show consent only for `codex`; failed persistence leaves the UI disabled. Render exactly one status:
+Onboarding and Settings state that Phase 0 has no remote provider. They expose no provider
+selector or consent action. Render exactly one reachable status:
 
 ```ts
-offline
-  ? "Offline"
-  : reasoning_provider === "codex" && reasoning_egress_consent
-    ? "Remote reasoning enabled"
-    : "Fully local";
+offline ? "Offline" : "Fully local";
 ```
 
-`Fully local` is explicitly the reasoning mode while URL ingestion still discloses that it needs network access. When `Offline` is active, Studio disables URL import and remote model/watch actions, while local media operations remain usable. Remove blanket “everything runs on your machine” claims whenever remote reasoning is active.
+`Fully local` is explicitly the reasoning mode while URL ingestion still discloses that it
+needs network access. When `Offline` is active, Studio disables URL import and remote
+model/watch actions, while local media operations remain usable. Reasoning-dependent
+Discovery, produce, Agent, Recipes, and watch execution stay visibly unavailable.
 
-- [ ] **Step 7: Verify and commit the privacy/offline fuse alone**
+- [x] **Step 7: Verify and commit the privacy/offline fuse alone**
 
 ```bash
 cd engine
@@ -840,7 +871,7 @@ git add engine/network_policy.py engine/settings.py engine/app.py engine/clip/ll
   apps/studio/src/components/spool/shell.tsx \
   apps/studio/src/components/spool/context.tsx apps/studio/src/lib/action-error.ts
 git diff --cached --check
-git commit -m "fix(privacy): require consent and enforce offline mode"
+git commit -m "fix(privacy): enforce local-only reasoning and offline mode"
 ```
 
 ### 9.3 Reject every agent write
@@ -858,7 +889,7 @@ git commit -m "fix(privacy): require consent and enforce offline mode"
 - Modify: `engine/tests/test_mcp.py`
 - Modify: `engine/tests/test_api_v1.py`
 
-- [ ] **Step 1: Replace mutation approval tests with zero-write tests**
+- [x] **Step 1: Replace mutation approval tests with zero-write tests**
 
 Define an explicit frozen read-only allowlist from the current catalog (`list/get/search/status/storage/capabilities/source-energy/source-scenes/rank` operations). Add a classification test requiring every catalog entry to be either on that allowlist with `writes is False`, or outside it with `writes is True`; an unclassified future tool fails the suite. Force selection of every non-allowlisted tool and assert its implementation/client spy is never called and the result is exactly:
 
@@ -871,7 +902,7 @@ Define an explicit frozen read-only allowlist from the current catalog (`list/ge
 
 Enumerate mutating/exporting MCP tools. Keep their schemas advertised for Phase 0 contract compatibility, but route every invocation through one central named guard before any `TroveClient` call. Each returns the same disabled error; read-only inspection tools still execute. Assert the exact advertised tool-name set so a mutator cannot accidentally bypass the guard by being registered through a different path. In `context-mutations.test.tsx`, a stale/malicious confirmation response cannot trigger a second `agent()` call and `confirmTool` is never sent.
 
-- [ ] **Step 2: Observe the mutation suites fail**
+- [x] **Step 2: Observe the mutation suites fail**
 
 ```bash
 cd engine
@@ -882,7 +913,7 @@ cd ..
 pnpm --filter @spool/studio exec vitest run test/context-mutations.test.tsx
 ```
 
-- [ ] **Step 3: Add the defense-in-depth mutation fuse**
+- [x] **Step 3: Add the defense-in-depth mutation fuse**
 
 Render only the explicit read-only allowlist in the Phase 0 in-app agent prompt. Before any `Tool` implementation executes in `run_agent`, reject a tool outside that allowlist or with `tool.writes is True`; do not rely on prompt omission, the flag alone, or UI state.
 
@@ -890,7 +921,7 @@ For MCP, change the shared wrapper to accept tool identity (for example `_safe(t
 
 Remove confirmation replay, mutating slash commands, fake Undo, and mutating recipe chips from Studio. Manual REST and CLI mutation methods stay intact.
 
-- [ ] **Step 4: Verify and commit the agent fuse alone**
+- [x] **Step 4: Verify and commit the agent fuse alone**
 
 ```bash
 cd engine
@@ -934,7 +965,7 @@ Before each Section 9 commit, inspect `git diff --cached --name-only`; no genera
 
 ### 10.1 Security boundary
 
-- [ ] **Step 1: Add mapped-address, Origin, proxy, and limiter regressions**
+- [x] **Step 1: Add mapped-address, Origin, proxy, and limiter regressions**
 
 Parameterize direct literals and mocked DNS answers for:
 
@@ -959,7 +990,7 @@ Invalid or negative `TROVE_TRUST_PROXY_HOPS` safely becomes `0` (ignore XFF), an
 
 Retain explicit `test_config.py` coverage that the default bind is loopback and a non-loopback bind refuses startup without authentication; Phase 0 must not regress the security boundary already present.
 
-- [ ] **Step 2: Observe the focused security failures**
+- [x] **Step 2: Observe the focused security failures**
 
 ```bash
 cd engine
@@ -967,13 +998,13 @@ cd engine
   -k "mapped or origin or forwarded or proxy or rate_limit_retention"
 ```
 
-- [ ] **Step 3: Implement the smallest security boundary**
+- [x] **Step 3: Implement the smallest security boundary**
 
 Normalize `IPv6Address.ipv4_mapped` before blocked-range checks. Add a `before_request` mutation-Origin guard for `/api/*` and `POST|PUT|PATCH|DELETE` before view execution.
 
 Derive client IP from `request.remote_addr` unless an explicitly positive trusted-hop count validates the forwarding chain. Prune expired limiter entries under its existing lock before enforcing the configured deterministic key cap.
 
-- [ ] **Step 4: Verify and commit the security boundary alone**
+- [x] **Step 4: Verify and commit the security boundary alone**
 
 ```bash
 cd engine
@@ -989,7 +1020,7 @@ git commit -m "fix(security): harden local request boundaries"
 
 ### 10.2 Bounded admission
 
-- [ ] **Step 5: Write capacity-plus-one tests for every pool**
+- [x] **Step 5: Write capacity-plus-one tests for every pool**
 
 Create the shared contract test around:
 
@@ -1029,7 +1060,7 @@ Nested `produce` fan-out is all-or-none: `submit_children_if_current` calls `res
 
 Inject a mid-batch `executor.submit()` failure too. Because the manager lock is held, started wrappers cannot pass their current-attempt gate; cancel queued futures, invalidate/remove every provisional child, release reservations for futures that will not run, and let any already-running stale wrapper release its own reservation. The persisted store and parent result expose zero children.
 
-- [ ] **Step 6: Observe the admission tests fail**
+- [x] **Step 6: Observe the admission tests fail**
 
 ```bash
 cd engine
@@ -1039,7 +1070,7 @@ cd engine
   -k "capacity or queue_full or bulk_overflow or fanout_overflow"
 ```
 
-- [ ] **Step 7: Reserve atomically before creating work**
+- [x] **Step 7: Reserve atomically before creating work**
 
 Use one locked admitted-wrapper counter and idempotent reservation lease per manager. Reserve before record insertion, persistence, or executor submission. Normal cancellation only invalidates state; it leaves the queued future intact so its wrapper can enter, fail the current-attempt gate, and release in `finally`. If executor submission itself raises, release the lease, roll back the record atomically, and persist the restored state. For multi-submit rollback only, a successfully cancelled not-yet-started future releases its lease explicitly; an already-running stale wrapper releases its own lease in `finally`. `shutdown(wait=False)` calls executor shutdown without cancelling futures and permits the counter to drain asynchronously; `shutdown(wait=True)` guarantees zero before return.
 
@@ -1061,7 +1092,7 @@ Expose the exact additive capabilities shape:
 
 Values come from the live manager instances and their configured worker counts.
 
-- [ ] **Step 8: Run focused and full verification**
+- [x] **Step 8: Run focused and full verification**
 
 ```bash
 cd engine
@@ -1072,7 +1103,7 @@ cd engine
 .venv/bin/python -m pytest -q
 ```
 
-- [ ] **Step 9: Commit bounded admission alone**
+- [x] **Step 9: Commit bounded admission alone**
 
 ```bash
 git add engine/job_capacity.py engine/app.py engine/jobs.py engine/transcribe_jobs.py \
@@ -1158,7 +1189,14 @@ SPOOL_ENGINE_URL=http://127.0.0.1:8899
 
 - [x] **Step 5: Token-enable the existing Playwright golden flow**
 
-Start Flask with token auth enabled and Studio with the same server-only token. Add bearer auth to direct test-helper polling that intentionally bypasses Studio. At the beginning of the UI flow, open Settings, select Codex, acknowledge transcript egress, save successfully, and assert the `Remote reasoning enabled` label before starting discovery. Then drive import through Studio and verify:
+Start Flask with token auth enabled and Studio with the same server-only token. Boot the engine
+with hostile legacy `SPOOL_LLM_PROVIDER=CoDeX` and `SPOOL_LLM_EGRESS_CONSENT=YES` values.
+Add bearer auth to direct test-helper reads/calls that intentionally bypass Studio. At the
+beginning of the UI flow, verify direct settings are exactly `none`/`false`, the three
+reasoning capability flags are false, the UI exposes no provider/consent control, and Agent,
+moments, produce, and paused-watch scan return the exact 409 contract without jobs or state
+changes. Then drive URL import, wait for the real local transcript, select its first-to-last
+word range, cut manually, reframe/caption/render in the editor, and verify:
 
 - Studio connects through the proxy;
 - SSE reaches a completed snapshot;
@@ -1170,7 +1208,15 @@ Update the Playwright config/header comment to name the external token harness b
 
 - [x] **Step 6: Verify unit, build, and authenticated E2E**
 
-The checked-in runner is the canonical acceptance gate. It builds Studio for production, verifies every external prerequisite, refuses occupied ports, generates one shared token, launches Flask and `next start` against isolated state with explicit loopback binds, neutralizes inherited privacy/watch variables, forces local probes to bypass inherited HTTP proxies, performs bounded readiness and socket checks, and stops captured process trees with a bounded TERM grace period plus recursive KILL escalation. It preserves both server logs on failure. The Playwright process receives `E2E_ENGINE_API_URL`; `SPOOL_ENGINE_URL` remains the Studio server's engine origin and never includes `/api/v1`.
+The checked-in runner is the canonical acceptance gate. It builds Studio for production,
+verifies every external prerequisite, refuses occupied ports, generates one shared token,
+launches Flask and `next start` against isolated state with explicit loopback binds, injects
+hostile legacy reasoning values to prove canonicalization, forces local probes to bypass
+inherited HTTP proxies, performs bounded authenticated readiness and socket checks, and stops
+captured process trees with a bounded TERM grace period plus recursive KILL escalation. It
+preserves both server logs on failure. The Playwright process receives
+`E2E_ENGINE_API_URL`; `SPOOL_ENGINE_URL` remains the Studio server's engine origin and never
+includes `/api/v1`.
 
 ```bash
 set -euo pipefail
@@ -1184,7 +1230,12 @@ pnpm --filter @spool/studio build
 apps/studio/scripts/phase0-e2e.sh
 ```
 
-The E2E requires the repository's documented Chrome, ffmpeg/ffprobe, yt-dlp, network, linked active Whisper model, and Codex login. `TROVE_RATE_LIMIT=0` is scoped to the isolated acceptance process so UI/SSE/polling traffic cannot make the flow flaky. A missing prerequisite is reported separately from a behavioral failure, and a failed run prints the retained artifact directory instead of deleting the evidence.
+The E2E requires the repository's documented Chrome, ffmpeg/ffprobe, yt-dlp, network, and
+linked active Whisper model. It does not require Codex installation or login.
+`TROVE_RATE_LIMIT=0` is scoped to the isolated acceptance process so UI/SSE/polling traffic
+cannot make the flow flaky. A missing prerequisite is reported separately from a behavioral
+failure, and a failed run prints the retained artifact directory instead of deleting the
+evidence.
 
 - [x] **Step 7: Commit Slice 0E**
 
@@ -1225,7 +1276,7 @@ git commit -m "test(studio): authenticate golden proxy flow"
 - Modify: `docs/PROGRESS.md`
 - Modify: `pnpm-lock.yaml`
 
-- [ ] **Step 1: Check in the canonical fixture**
+- [x] **Step 1: Check in the canonical fixture**
 
 The JSON fixture contains concrete request/response cases, not schemas with unresolved placeholders. `response_subset` is intentionally named: the word record is additive and carries timestamps/edit metadata, so consumers assert these stable fields while typing the complete response as `TranscriptWord`.
 
@@ -1261,7 +1312,7 @@ The JSON fixture contains concrete request/response cases, not schemas with unre
 
 The Flask bulk fixture test replaces only `enqueue_download` with a deterministic in-memory stub returning `job_1`; it still exercises the real bulk route, safety validation, deferred-probe title, status, and response assembly without network or executor timing.
 
-- [ ] **Step 2: Make every surface consume the fixture and observe failures**
+- [x] **Step 2: Make every surface consume the fixture and observe failures**
 
 Add fixture-backed assertions for:
 
@@ -1286,7 +1337,7 @@ pnpm --filter @spool/studio exec vitest run test/api-client.test.ts
 
 Expected: Python/CLI still send `text`, the MCP tool schema still advertises `text`, and the TypeScript bulk return type still expects `{jobs}`. The already-landed MCP mutation fuse must continue to prevent an underlying call during this red test.
 
-- [ ] **Step 3: Repair the wire additively**
+- [x] **Step 3: Repair the wire additively**
 
 Define discriminated `BulkSubmitResult` success/error rows and:
 
@@ -1315,7 +1366,7 @@ export interface WordEditResponse {
 
 Make the TypeScript client, Python client, and CLI send `w`. Change the disabled MCP word-edit schema from `text` to `w`, but keep its central mutation guard ahead of the Python client so it returns `agent_mutation_disabled` and performs zero writes. Flask accepts `w` canonically; for a request using legacy `text`, apply the same operation and attach `Warning: 299 Spool "text is deprecated; use w"`. If both fields are supplied and differ, return structured `400 conflicting_word_text` rather than choosing silently.
 
-- [ ] **Step 4: Remove the unused TypeScript MCP stub clearly**
+- [x] **Step 4: Remove the unused TypeScript MCP stub clearly**
 
 Remove `@spool/mcp-client` from Studio dependencies and transpilation config, delete its three package files, and replace the current architecture claims in README, `docs/Spool_Engineering-Spec.md`, and `docs/PROGRESS.md` with the truthful Python MCP surface. Refresh only the affected lockfile entries:
 
@@ -1329,7 +1380,7 @@ pnpm install --frozen-lockfile
 
 Expected: the tracked current architecture surfaces return no matches. The protected untracked historical review at `docs/CODE_REVIEW.md` remains untouched. The Python MCP server stays in place and its fixture tests pass.
 
-- [ ] **Step 5: Verify every contract consumer and workspace gate**
+- [x] **Step 5: Verify every contract consumer and workspace gate**
 
 ```bash
 cd engine
@@ -1346,7 +1397,7 @@ pnpm typecheck
 pnpm build
 ```
 
-- [ ] **Step 6: Commit Slice 0F**
+- [x] **Step 6: Commit Slice 0F**
 
 ```bash
 git add contracts/v1/phase0-contract.json packages/types/src/index.ts \
@@ -1370,7 +1421,7 @@ git commit -m "fix(contract): align Phase 0 clients"
 - Modify: `package.json`
 - Modify: `pnpm-lock.yaml`
 
-- [ ] **Step 1: Record the vulnerable dependency paths before changing them**
+- [x] **Step 1: Record the vulnerable dependency paths before changing them**
 
 ```bash
 pnpm why -r postcss
@@ -1380,16 +1431,22 @@ pnpm audit --json > /tmp/spool-phase0-audit-before.json
 
 The 2026-07-13 baseline resolves vulnerable `postcss@8.4.31` through Next and `undici@7.27.0` through jsdom. Re-read the fresh audit rather than relying on version memory.
 
-- [ ] **Step 2: Apply only targeted root package-policy changes**
+- [x] **Step 2: Apply only targeted root package-policy changes**
 
-Use root `pnpm.overrides` with parent-qualified selectors so unrelated PostCSS/undici consumers do not move:
+Use root `pnpm.overrides` with parent-qualified selectors so unrelated consumers do not move.
+The final gate also found a newly published high-severity Sharp/libvips advisory, so the exact
+accepted override set is:
 
 ```json
 {
   "pnpm": {
     "overrides": {
       "next@16.2.7>postcss": "8.5.19",
-      "jsdom@29.1.1>undici": "7.28.0"
+      "next@16.2.7>sharp": "0.35.3",
+      "jsdom@29.1.1>undici": "7.28.0",
+      "minimatch@3.1.5>brace-expansion": "1.1.16",
+      "minimatch@10.2.5>brace-expansion": "5.0.7",
+      "@eslint/eslintrc@3.3.5>js-yaml": "4.3.0"
     }
   }
 }
@@ -1404,9 +1461,10 @@ pnpm install --lockfile-only
 pnpm install --frozen-lockfile
 pnpm why -r postcss
 pnpm why -r undici
+pnpm why sharp --filter @spool/studio
 ```
 
-- [ ] **Step 3: Prove the advisories and regressions are gone**
+- [x] **Step 3: Prove the advisories and regressions are gone**
 
 ```bash
 pnpm audit --json > /tmp/spool-phase0-audit-after.json
@@ -1418,9 +1476,14 @@ pnpm exec prettier --check package.json pnpm-lock.yaml
 git diff -- package.json pnpm-lock.yaml
 ```
 
-Acceptance: the targeted PostCSS advisory is absent. Any remaining high-severity advisory blocks this slice unless it is demonstrably outside the installed/runtime graph and is documented for explicit review. The two dependency files pass their targeted Prettier check. Preserve the known unrelated `packages/ui/src/ui.tsx` package-lint baseline when interpreting `pnpm lint`.
+Acceptance: the targeted advisories are absent, Studio resolves Sharp 0.35.3/libvips 8.18.3,
+and `pnpm audit --json` reports zero vulnerabilities. Any remaining high-severity advisory
+blocks this slice unless it is demonstrably outside the installed/runtime graph and is
+documented for explicit review. The two dependency files pass their targeted Prettier check.
+Preserve the known package-lint baseline in `packages/ui/src/ui.tsx` and
+`packages/api-client/src/index.ts` when interpreting `pnpm lint`.
 
-- [ ] **Step 4: Commit Slice 0G alone**
+- [x] **Step 4: Commit Slice 0G alone**
 
 ```bash
 git add package.json pnpm-lock.yaml
@@ -1433,7 +1496,7 @@ Expected staged names: exactly `package.json` and `pnpm-lock.yaml`.
 
 ## 14. Final Phase 0 verification and acceptance matrix
 
-- [ ] **Step 1: Run all repository gates from the correct working directories**
+- [x] **Step 1: Run all repository gates from the correct working directories**
 
 ```bash
 (cd engine && .venv/bin/python -m pytest -q)
@@ -1467,11 +1530,11 @@ git diff --check 9deb66d...HEAD
 
 No path absent from the frozen worktree baseline may become a new Prettier failure, and every changed eligible path that was clean at baseline must pass its targeted check. Changed legacy files already present in the baseline are not mechanically reformatted wholesale; `git diff --check` covers their edited hunks. Run `pnpm format:check` separately as an informational baseline comparison. `pnpm lint` may retain only its unrelated package-lint baseline. Report every remaining repo-wide formatting path explicitly, and do not claim either failing repo-wide command passed.
 
-- [ ] **Step 2: Run the token-authenticated golden flow**
+- [x] **Step 2: Run the token-authenticated golden flow**
 
 Repeat the complete isolated launch/readiness/Playwright/teardown harness from Section 11 Step 6; do not point this gate at pre-existing servers or user data. Capture evidence for authenticated JSON, SSE, inline/ranged playback, and rendered download.
 
-- [ ] **Step 3: Re-run the destructive-operation byte matrix**
+- [x] **Step 3: Re-run the destructive-operation byte matrix**
 
 ```bash
 (cd engine && .venv/bin/python -m pytest -q tests/test_phase0_artifact_safety.py)
@@ -1479,7 +1542,7 @@ Repeat the complete isolated launch/readiness/Playwright/teardown harness from S
 
 The test output must cover download, transcription, clip/render, clear-finished, TTL sweep where applicable, and restart.
 
-- [ ] **Step 4: Check all ten master acceptance gates**
+- [x] **Step 4: Check all ten master acceptance gates**
 
 | Master gate               | Evidence required                                                                                                                                                                                    |
 | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1490,11 +1553,11 @@ The test output must cover download, transcription, clip/render, clear-finished,
 | 5. Bounded capacity       | capacity-plus-one manager/API tests and zero hidden work                                                                                                                                             |
 | 6. Token Studio works     | Playwright URL-to-clip JSON/SSE/media/download proof                                                                                                                                                 |
 | 7. Product truth          | product-truth component inventory and visible errors                                                                                                                                                 |
-| 8. Egress consent         | provider spy remains zero until explicit active consent                                                                                                                                              |
+| 8. Reasoning/egress safe  | provider state stays `none`/`false`; every route/direct/watch boundary rejects before provider, lease, job, process, or state work                                                                   |
 | 9. Contracts agree        | shared fixture passes Flask, TS, Python, CLI, and MCP                                                                                                                                                |
 | 10. Agent writes disabled | enumerated in-app/MCP mutation tests with zero calls                                                                                                                                                 |
 
-- [ ] **Step 5: Audit the final diff for scope and accidental artifacts**
+- [x] **Step 5: Audit the final diff for scope and accidental artifacts**
 
 ```bash
 git status --short
@@ -1506,11 +1569,11 @@ git log --oneline --decorate main..HEAD
 
 Reject `.next`, `.turbo`, `test-results`, Python caches, local media, environment secrets, and changes to the protected pre-existing untracked files.
 
-- [ ] **Step 6: Request code review before merge**
+- [x] **Step 6: Request code review before merge**
 
 Use `superpowers:requesting-code-review` with the master spec, this plan, commit list, test evidence, known lint baseline, audit result, and rollback notes. Resolve high/medium findings before presenting the branch as complete.
 
-- [ ] **Step 7: Run verification again after review fixes**
+- [x] **Step 7: Run verification again after review fixes**
 
 Follow `superpowers:verification-before-completion`. Re-run every command affected by a review fix and then the complete gate in Step 1. Completion language is allowed only from this fresh output.
 
@@ -1520,9 +1583,130 @@ Each behavior slice is independently revertible in reverse order. If rollback be
 
 1. retain Slice 0A's non-destructive behavior even if a downstream projection regresses;
 2. retain Slice 0B's stale-attempt fences unless a more restrictive equivalent replaces them;
-3. retain the provider-consent and agent-mutation fuses while UI defects are repaired;
+3. retain the fail-closed reasoning and agent-mutation fuses while UI defects are repaired;
 4. retain hostile-Origin rejection and admission bounds while proxy/client issues are repaired;
 5. use direct authenticated loopback CLI/MCP as the recovery path if the Studio proxy is reverted;
 6. revert the dependency commit separately from behavior commits.
 
 Recommended execution mode: use `superpowers:subagent-driven-development` in this task, one fresh implementation subagent and one independent spec-review pass per task, while the primary agent owns integration, tests, and commits. Use `superpowers:executing-plans` only if implementation moves to a separate session.
+
+## 16. Phase 0 completion record
+
+**Completed:** 2026-07-22
+
+**Branch:** `codex/phase-0-safety-fuse`
+
+**Frozen base:** `9deb66d`
+
+**Behavior checkpoint:** `c8af69c`
+
+**Formatting-only checkpoint:** `ce36ee4`
+
+The documentation commit that contains this record follows those checkpoints. Phase 0 is
+complete; Phases 1-5 have not started. The branch has not been merged or pushed by this task.
+
+### 16.1 Accepted implementation
+
+- Dismiss, clear-finished, terminal cancel, and TTL cleanup are history-only. Published source,
+  transcript, clip, caption, render, and export bytes are never unlinked by queue cleanup.
+- Download, transcription, and clip managers use in-memory attempt identities, guarded
+  transitions, private same-filesystem staging, atomic single-file promotion, bounded
+  admission leases, and durable cancellation. A terminal success is not externally visible
+  until its private staging cleanup completes.
+- The engine defaults to loopback, refuses a public bind without token authentication, applies
+  Origin/trusted-proxy/rate-limit protections, and checks authentication in Doctor probes.
+- Studio uses one same-origin authenticated proxy for JSON, SSE, inline/ranged media, and
+  downloads. The browser never receives the engine bearer token.
+- All service-reachable subprocesses are registered as owned process groups. Normal return and
+  SIGTERM close admission and drain every registered tree under one absolute deadline, with
+  bounded TERM-to-KILL escalation. The production AST inventory contains zero raw subprocess
+  call sites outside the ownership wrappers.
+- Agent and MCP mutation surfaces are centrally fused off before client/tool execution. The
+  visible in-app Agent is message-only and reasoning-dependent submission is unavailable.
+- Provider state is only `none`/`false`. Hostile environment values, persisted legacy values,
+  settings calls, direct LLM construction, Agent/moments/produce calls, and manual/background
+  watch reconciliation cannot bypass the reasoning fuse. Offline keeps the stronger denial.
+- The UI exposes the connected manual Phase 0 workflow: URL import, local transcription,
+  transcript word-range selection, manual cut, editor reframe/captions, render, playback, and
+  download. Reasoning-dependent Discovery, Recipes, Agent submission, and watch execution are
+  absent or visibly unavailable.
+- Flask, shared fixtures, TypeScript/Python clients, CLI, MCP, capabilities, and OpenAPI agree
+  on the accepted Phase 0 shapes. OpenAPI models both exact reasoning-denial envelopes.
+- Parent-qualified package overrides close the audited PostCSS, Undici, brace-expansion,
+  js-yaml, and Sharp/libvips advisories without a broad dependency upgrade.
+
+### 16.2 Fresh verification evidence
+
+| Gate                                                     | Final result                                                                                                     |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Full engine                                              | `1284 passed`, 4 third-party deprecation warnings, 0 failures in 24.27s                                          |
+| Destructive-byte matrix                                  | `19 passed`; every covered managed artifact survives cleanup and restart byte-identically                        |
+| Manager/API/artifact regression after terminal-order fix | `225 passed`                                                                                                     |
+| Workspace tests, forced uncached                         | 7/7 Turbo tasks; Studio 15 files and `339 passed`                                                                |
+| Workspace typecheck, forced uncached                     | 7/7 Turbo tasks                                                                                                  |
+| Production build                                         | 4/4 packages; Next 16.2.7 compiled and generated 15 routes                                                       |
+| Studio lint                                              | 0 errors; one existing TanStack Virtual compiler warning at `virtual.tsx:43`                                     |
+| Root lint                                                | Expected frozen-baseline failure only in `packages/api-client/src/index.ts` and `packages/ui/src/ui.tsx`         |
+| Dependency audit                                         | 532 dependencies; 0 info/low/moderate/high/critical vulnerabilities                                              |
+| Sharp runtime                                            | Studio resolves Sharp 0.35.3 with libvips 8.18.3                                                                 |
+| Prettier baseline                                        | Frozen 47 paths; current 47 paths; 56 changed eligible paths; 22 required targeted checks passed; 0 new failures |
+| Diff integrity                                           | `git diff --check 9deb66d...HEAD` passed; no generated/cache/media/secret artifact is tracked                    |
+| Authenticated acceptance                                 | 1/1 Playwright test passed in 45.7s; harness teardown left ports 8899 and 3000 free                              |
+
+The authenticated acceptance run used isolated state and hostile legacy `CoDeX`/`YES` values.
+It proved direct settings `none`/`false`, false reasoning capabilities, exact Agent/moments/
+produce/watch 409 responses, unchanged paused-watch/job state, real URL download and local
+transcription, manual transcript cut, reframe, captions, render, authenticated SSE/proxy,
+inline and ranged media, browser download, ffprobe metadata, and full ffmpeg decode.
+
+The repo-wide `pnpm lint` and `pnpm format:check` commands are intentionally not reported as
+green: their remaining failures are the exact frozen baseline. Four newly introduced Studio
+test formatting failures found during final review were corrected in `ce36ee4`; the final
+comparison has zero paths outside the frozen baseline.
+
+### 16.3 Master acceptance matrix
+
+| #   | Master gate           | Evidence                                                                                                              |
+| --- | --------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| 1   | Managed bytes survive | 19-test cross-manager hash/restart matrix                                                                             |
+| 2   | Cancel races fenced   | queued/running/stale-attempt suites for all managers plus durable cancellation and terminal-cleanup ordering          |
+| 3   | Mapped IPv6 blocked   | parameterized direct/DNS URL-safety tests                                                                             |
+| 4   | Origin enforcement    | Flask Origin counter/limiter tests and same-origin token-proxy JSON/SSE/media acceptance                              |
+| 5   | Bounded capacity      | capacity-plus-one and submit-rollback tests for all managers/API surfaces, with no hidden work                        |
+| 6   | Token Studio works    | final 45.7s real URL-to-render Playwright acceptance                                                                  |
+| 7   | Product truth         | 339 Studio tests, visible-mutation inventory, unavailable reasoning surfaces, actionable errors                       |
+| 8   | Reasoning/egress safe | durable `none`/`false`, hostile-state repair, zero-work route/direct/watch fuses, Offline precedence                  |
+| 9   | Contracts agree       | shared fixtures across Flask, TypeScript/Python clients, CLI, MCP, capabilities, and dual-envelope OpenAPI validation |
+| 10  | Agent writes disabled | enumerated in-app and MCP mutation tests prove central rejection and zero client/tool calls                           |
+
+Additional Phase 0 hardening beyond the original ten gates passed independent checks for
+public-bind authentication, authenticated Doctor probes, process-wide subprocess ownership,
+normal/SIGTERM whole-tree draining, and zero audited dependency vulnerabilities.
+
+### 16.4 Independent review record
+
+- Studio truth checkpoint `e4af166`: approved; 189 focused tests, typecheck, and lint with only
+  the known TanStack warning.
+- Process lifecycle checkpoints `52e036c`/`5eec4a4` and integrated reasoning removal: approved;
+  26 focused tests, zero raw production spawn sites, and real parent/child absence before exit.
+- Backend reasoning checkpoint `fad95b7`: execution boundaries approved. Review found one
+  medium OpenAPI contradiction for Offline, fixed in `e3cd89e`; the exact dual-envelope schema
+  then passed independent live/adversarial validation.
+- Final integrated review at behavior `c8af69c` plus formatting `ce36ee4`: approved with all ten
+  master gates passing and no unresolved medium-or-higher finding.
+
+### 16.5 Deferred work
+
+These are deliberate later-phase boundaries, not Phase 0 completion claims:
+
+1. Move Source/Clip identity and attempts into the Phase 1 SQLite domain model with stable IDs,
+   persisted generations, compare-and-set transitions, and restart recovery.
+2. Replace the in-memory attempt fuse with crash-safe multi-file artifact transactions and a
+   reconciler. Phase 0 guarantees atomic individual promotion, not crash-atomic batches.
+3. Add durable parent/child watch-production rollups and retry/reconciliation state before
+   watch automation can return.
+4. Harden against an intentionally malicious descendant that escapes its owned process group;
+   the Phase 0 boundary covers normal service-spawned trees.
+5. Re-enable remote reasoning only through a supported zero-tool transport with explicit
+   consent, truthful capability/UI state, and the Phase 4 EgressReceipt/approval contract.
+6. Begin the master spec's Phases 1-5 only from new approved child plans and their own gates.
