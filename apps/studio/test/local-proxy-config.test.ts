@@ -81,9 +81,7 @@ describe("Studio local proxy configuration", () => {
     expect(harness).toContain(
       'wait_for_http "$ENGINE_PID" "http://127.0.0.1:8899/api/v1/doctor" "$TOKEN"',
     );
-    expect(harness).toMatch(
-      /DOCTOR_JSON=.*Authorization: Bearer \$TOKEN/su,
-    );
+    expect(harness).toMatch(/DOCTOR_JSON=.*Authorization: Bearer \$TOKEN/su);
     expect(harness).not.toContain("codex login status");
     expect(harness).toContain("require_command ffprobe");
     expect(harness).toContain("curl --noproxy '*'");

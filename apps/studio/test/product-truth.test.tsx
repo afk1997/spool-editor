@@ -916,22 +916,16 @@ describe("product truth: visible control inventory", () => {
     });
     render(<OnboardingScreen />);
 
+    expect(screen.getByText("Remote reasoning is unavailable in Phase 0.")).toBeInTheDocument();
     expect(
-      screen.getByText("Remote reasoning is unavailable in Phase 0."),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        /Remote reasoning is unavailable in Phase 0 and sends nothing/i,
-      ),
+      screen.getByText(/Remote reasoning is unavailable in Phase 0 and sends nothing/i),
     ).toBeInTheDocument();
     expect(screen.queryByText(/Codex/i)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Let’s set up" }));
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     expect(
-      screen.getByText(
-        "Remote reasoning unavailable in Phase 0 · no egress",
-      ),
+      screen.getByText("Remote reasoning unavailable in Phase 0 · no egress"),
     ).toBeInTheDocument();
   });
 
@@ -1840,7 +1834,9 @@ describe("product truth: visible mutations settle before success", () => {
     fireEvent.click(scan);
     expect(scanWatch).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Paused" })).toBeDisabled();
-    expect(screen.getByText(/Automatic production and Scan now are unavailable in Phase 0/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Automatic production and Scan now are unavailable in Phase 0/i),
+    ).toBeInTheDocument();
   });
 
   it("Brand keeps the edited record stable while a save is pending", async () => {

@@ -218,7 +218,9 @@ describe("visible mutation inventory: Library", () => {
     fireEvent.click(screen.getByRole("button", { name: "Select Test source" }));
     const find = screen.getByRole("button", { name: "Find clips" });
     expect(find).toBeDisabled();
-    expect(screen.getByText("Remote moment discovery is unavailable in Phase 0.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Remote moment discovery is unavailable in Phase 0."),
+    ).toBeInTheDocument();
     fireEvent.click(find);
     expect(findMoments).not.toHaveBeenCalled();
 
@@ -402,7 +404,10 @@ describe("visible mutation inventory: Source work", () => {
 
     expect(screen.queryByRole("button", { name: "Find clips" })).not.toBeInTheDocument();
     fireEvent.click(screen.getAllByRole("button", { name: "Cut from transcript" })[0]!);
-    expect(screen.getByRole("tab", { name: "Transcript" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Transcript" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     expect(nav).not.toHaveBeenCalled();
   });
 
@@ -418,9 +423,11 @@ describe("visible mutation inventory: Source work", () => {
       fireEvent.click(button);
     });
     expect(findMoments).not.toHaveBeenCalled();
-    expect(screen.getByText(
-      "Remote moment discovery is unavailable in Phase 0. Select words in the Transcript tab to cut a clip manually.",
-    )).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Remote moment discovery is unavailable in Phase 0. Select words in the Transcript tab to cut a clip manually.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("does not reload or claim a transcript edit before a structured rejection", async () => {
@@ -1168,41 +1175,44 @@ describe("visible mutation inventory: Offline watch gates", () => {
     blockedStates.flatMap((privacy) =>
       (["create", "update"] as const).map((operation) => ({ ...privacy, operation })),
     ),
-  )("keeps disabled folder-watch configuration $operation usable $state", async ({ ctx, operation }) => {
-    const watch = watchFixture("folder");
-    const createWatch = vi.fn().mockResolvedValue(watch);
-    const updateWatch = vi.fn().mockResolvedValue(watch);
-    const scanWatch = vi.fn().mockResolvedValue(scanResult);
-    harness.queryData = {
-      listWatches: { watches: operation === "create" ? [] : [watch] },
-      listRecipes: { recipes: [] },
-    };
-    harness.ctx = baseCtx({
-      ...ctx,
-      client: clientFixture({ createWatch, updateWatch, scanWatch }),
-    });
-    render(<WatchesScreen />);
+  )(
+    "keeps disabled folder-watch configuration $operation usable $state",
+    async ({ ctx, operation }) => {
+      const watch = watchFixture("folder");
+      const createWatch = vi.fn().mockResolvedValue(watch);
+      const updateWatch = vi.fn().mockResolvedValue(watch);
+      const scanWatch = vi.fn().mockResolvedValue(scanResult);
+      harness.queryData = {
+        listWatches: { watches: operation === "create" ? [] : [watch] },
+        listRecipes: { recipes: [] },
+      };
+      harness.ctx = baseCtx({
+        ...ctx,
+        client: clientFixture({ createWatch, updateWatch, scanWatch }),
+      });
+      render(<WatchesScreen />);
 
-    if (operation === "create") {
-      fireEvent.change(screen.getByPlaceholderText("Watch name"), {
-        target: { value: watch.name },
-      });
-      fireEvent.change(screen.getByPlaceholderText("/Users/you/Movies/clips-in"), {
-        target: { value: watch.target },
-      });
-      const create = screen.getByRole("button", { name: "Create" });
-      expect(create).toBeEnabled();
-      fireEvent.click(create);
-      await waitFor(() => expect(createWatch).toHaveBeenCalledTimes(1));
-    } else if (operation === "update") {
-      const save = screen.getByRole("button", { name: "Save" });
-      expect(save).toBeEnabled();
-      fireEvent.click(save);
-      await waitFor(() => expect(updateWatch).toHaveBeenCalledTimes(1));
-    }
-    expect(scanWatch).not.toHaveBeenCalled();
-    expect(harness.queryCalls).toContain("listWatches");
-  });
+      if (operation === "create") {
+        fireEvent.change(screen.getByPlaceholderText("Watch name"), {
+          target: { value: watch.name },
+        });
+        fireEvent.change(screen.getByPlaceholderText("/Users/you/Movies/clips-in"), {
+          target: { value: watch.target },
+        });
+        const create = screen.getByRole("button", { name: "Create" });
+        expect(create).toBeEnabled();
+        fireEvent.click(create);
+        await waitFor(() => expect(createWatch).toHaveBeenCalledTimes(1));
+      } else if (operation === "update") {
+        const save = screen.getByRole("button", { name: "Save" });
+        expect(save).toBeEnabled();
+        fireEvent.click(save);
+        await waitFor(() => expect(updateWatch).toHaveBeenCalledTimes(1));
+      }
+      expect(scanWatch).not.toHaveBeenCalled();
+      expect(harness.queryCalls).toContain("listWatches");
+    },
+  );
 
   it.each(["folder", "channel", "playlist"] as const)(
     "disables $kind Scan now and effective automation while remote reasoning is unavailable",
@@ -1218,7 +1228,9 @@ describe("visible mutation inventory: Offline watch gates", () => {
       fireEvent.click(scan);
       expect(scanWatch).not.toHaveBeenCalled();
       expect(screen.getByRole("button", { name: "Paused" })).toBeDisabled();
-      expect(screen.getByText(/Automatic production and Scan now are unavailable in Phase 0/i)).toBeInTheDocument();
+      expect(
+        screen.getByText(/Automatic production and Scan now are unavailable in Phase 0/i),
+      ).toBeInTheDocument();
     },
   );
 });

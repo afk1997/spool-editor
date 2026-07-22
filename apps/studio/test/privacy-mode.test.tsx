@@ -102,7 +102,9 @@ async function renderPrivacySettings(initial: EngineSettings) {
   settingsQuery = { data: initial, loading: false, reload: vi.fn() };
   const view = renderWithProvider(<SettingsScreen />);
   fireEvent.click(screen.getByRole("button", { name: "Privacy" }));
-  await waitFor(() => expect(screen.getByText("Unavailable in Phase 0", { exact: true })).toBeInTheDocument());
+  await waitFor(() =>
+    expect(screen.getByText("Unavailable in Phase 0", { exact: true })).toBeInTheDocument(),
+  );
   return view;
 }
 
@@ -245,17 +247,20 @@ describe("authoritative privacy settings", () => {
     { reasoning_provider: "codex" as unknown as ReasoningProvider },
     { reasoning_provider: "CoDeX" as unknown as ReasoningProvider },
     { reasoning_egress_consent: true },
-  ])("rejects unsupported remote settings locally without issuing PATCH: $reasoning_provider$reasoning_egress_consent", async (patch) => {
-    settingsQuery = { data: engineSettings(), loading: false, reload: vi.fn() };
-    const ctx = mountContext();
-    await waitFor(() => expect(ctx.get().settingsReady).toBe(true));
+  ])(
+    "rejects unsupported remote settings locally without issuing PATCH: $reasoning_provider$reasoning_egress_consent",
+    async (patch) => {
+      settingsQuery = { data: engineSettings(), loading: false, reload: vi.fn() };
+      const ctx = mountContext();
+      await waitFor(() => expect(ctx.get().settingsReady).toBe(true));
 
-    await expect(ctx.get().updateSettings(patch)).rejects.toMatchObject({
-      status: 409,
-      code: "remote_reasoning_unavailable",
-    });
-    expect(client.updateSettings).not.toHaveBeenCalled();
-  });
+      await expect(ctx.get().updateSettings(patch)).rejects.toMatchObject({
+        status: 409,
+        code: "remote_reasoning_unavailable",
+      });
+      expect(client.updateSettings).not.toHaveBeenCalled();
+    },
+  );
 
   it("serializes settings writes and publishes only confirmed responses", async () => {
     const initial = engineSettings();
@@ -339,10 +344,12 @@ describe("privacy settings UI", () => {
   });
 
   it("stays fail-closed when an old engine record still contains Codex and consent", async () => {
-    await renderPrivacySettings(legacyEngineSettings({
-      reasoning_provider: "codex",
-      reasoning_egress_consent: true,
-    }));
+    await renderPrivacySettings(
+      legacyEngineSettings({
+        reasoning_provider: "codex",
+        reasoning_egress_consent: true,
+      }),
+    );
 
     expect(screen.getByText("None", { exact: true })).toBeInTheDocument();
     expect(screen.getByText("Unavailable in Phase 0", { exact: true })).toBeInTheDocument();
@@ -363,7 +370,10 @@ describe("canonical privacy status label", () => {
       label: "Offline",
     },
     {
-      settings: legacyEngineSettings({ reasoning_provider: "codex", reasoning_egress_consent: true }),
+      settings: legacyEngineSettings({
+        reasoning_provider: "codex",
+        reasoning_egress_consent: true,
+      }),
       label: "Fully local",
     },
     {
@@ -417,10 +427,7 @@ describe("truthful privacy copy", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByText(
-          "Remote moment-finding is unavailable in Phase 0.",
-          { exact: true },
-        ),
+        screen.getByText("Remote moment-finding is unavailable in Phase 0.", { exact: true }),
       ).toBeInTheDocument(),
     );
     expect(
@@ -451,9 +458,7 @@ describe("truthful privacy copy", () => {
 
     expect(screen.getByText(/URL downloads use the network/i)).toBeInTheDocument();
     expect(
-      screen.getByText(
-        /Remote reasoning is unavailable in Phase 0 and sends nothing/i,
-      ),
+      screen.getByText(/Remote reasoning is unavailable in Phase 0 and sends nothing/i),
     ).toBeInTheDocument();
     expect(screen.queryByText(/Codex/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/Everything runs on your machine/i)).not.toBeInTheDocument();
@@ -474,9 +479,7 @@ describe("truthful privacy copy", () => {
     });
     const settingsView = await renderPrivacySettings(offlineCodex);
 
-    expect(
-      screen.getByText("unavailable · no egress", { exact: true }),
-    ).toBeInTheDocument();
+    expect(screen.getByText("unavailable · no egress", { exact: true })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Models" }));
     expect(screen.getByText("Unavailable", { exact: true })).toBeInTheDocument();
     settingsView.unmount();
