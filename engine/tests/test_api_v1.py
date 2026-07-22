@@ -13,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 import pytest
+from jsonschema import ValidationError, validate
 from app import create_app
 from job_capacity import QueueFullError
 from jobs import Job, JobStatus
@@ -2382,6 +2383,7 @@ def test_openapi_marks_every_reasoning_operation_unavailable_and_settings_fixed(
     _, c = client
     paths = c.get("/api/v1/openapi.json").get_json()["paths"]
     expected = PHASE0_CONTRACT["remote_reasoning_unavailable"]
+    offline = {"error": "offline_network_disabled"}
 
     for path in (
         "/agent",
@@ -2392,10 +2394,18 @@ def test_openapi_marks_every_reasoning_operation_unavailable_and_settings_fixed(
         operation = paths[path]["post"]
         response = operation["responses"]["409"]
         assert "unavailable in Phase 0" in operation["summary"]
-        assert response["content"]["application/json"]["example"] == expected
-        schema = response["content"]["application/json"]["schema"]
-        assert schema["properties"]["error"]["enum"] == [expected["error"]]
-        assert schema["properties"]["message"]["enum"] == [expected["message"]]
+        content = response["content"]["application/json"]
+        assert content["examples"] == {
+            "remote_reasoning_unavailable": {"value": expected},
+            "offline_network_disabled": {"value": offline},
+        }
+        schema = content["schema"]
+        validate(expected, schema)
+        validate(offline, schema)
+        with pytest.raises(ValidationError):
+            validate({"error": expected["error"]}, schema)
+        with pytest.raises(ValidationError):
+            validate({**offline, "message": expected["message"]}, schema)
 
     settings = paths["/settings"]["patch"]["requestBody"]["content"]["application/json"]["schema"]
     assert settings["properties"]["reasoning_provider"]["enum"] == ["none"]

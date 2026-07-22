@@ -2588,17 +2588,46 @@ _REMOTE_REASONING_UNAVAILABLE_SCHEMA = {
     },
 }
 
+_OFFLINE_NETWORK_DISABLED = {"error": "offline_network_disabled"}
+_OFFLINE_NETWORK_DISABLED_SCHEMA = {
+    "type": "object",
+    "required": ["error"],
+    "additionalProperties": False,
+    "properties": {
+        "error": {
+            "type": "string",
+            "enum": [_OFFLINE_NETWORK_DISABLED["error"]],
+        },
+    },
+}
+_PHASE0_REASONING_UNAVAILABLE_SCHEMA = {
+    "oneOf": [
+        _REMOTE_REASONING_UNAVAILABLE_SCHEMA,
+        _OFFLINE_NETWORK_DISABLED_SCHEMA,
+    ],
+}
+
 
 def _phase0_reasoning_unavailable_operation(label: str) -> dict:
     return {
         "summary": f"Remote reasoning unavailable in Phase 0: {label}",
         "responses": {
             "409": {
-                "description": "Phase 0 has no supported zero-tool remote transport",
+                "description": (
+                    "Phase 0 has no supported zero-tool remote transport; "
+                    "Offline mode may deny the network boundary first"
+                ),
                 "content": {
                     "application/json": {
-                        "schema": _REMOTE_REASONING_UNAVAILABLE_SCHEMA,
-                        "example": _REMOTE_REASONING_UNAVAILABLE,
+                        "schema": _PHASE0_REASONING_UNAVAILABLE_SCHEMA,
+                        "examples": {
+                            "remote_reasoning_unavailable": {
+                                "value": _REMOTE_REASONING_UNAVAILABLE,
+                            },
+                            "offline_network_disabled": {
+                                "value": _OFFLINE_NETWORK_DISABLED,
+                            },
+                        },
                     },
                 },
             },
