@@ -377,6 +377,44 @@ def _wait_worker_inactive(mgr, jid, timeout=5.0):
     return False
 
 
+def test_transcribe_success_is_not_visible_before_attempt_cleanup(tmp_path, monkeypatch):
+    from attempt_staging import AttemptOutcome, Promotion, cleanup_attempt as real_cleanup
+    import transcribe_jobs as transcribe_module
+
+    manager = TranscribeJobManager(max_workers=1, store_path=tmp_path / "tj.json")
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    published = tmp_path / "source.words.json"
+
+    def delayed_cleanup(root):
+        cleanup_started.set()
+        assert release_cleanup.wait(5), "test did not release staging cleanup"
+        real_cleanup(root)
+
+    def target(job, *, model_path, attempt):
+        staged = Path(job._staging_root) / published.name
+        staged.write_bytes(b"published")
+        return AttemptOutcome(
+            updates={"duration_seconds": 1.0},
+            promotions=(Promotion(staged, published),),
+        )
+
+    monkeypatch.setattr(transcribe_module, "cleanup_attempt", delayed_cleanup)
+    jid = manager.submit(parent_job_id="source", model_path="m.bin", target=target)
+    captured = manager._jobs[jid]
+    try:
+        assert cleanup_started.wait(2), "worker never reached staging cleanup"
+        assert captured.status is TranscribeStatus.RUNNING
+        release_cleanup.set()
+        _wait_tj(manager, jid)
+        assert manager.get(jid).status is TranscribeStatus.DONE
+        assert not Path(manager.get(jid)._staging_root).exists()
+        assert published.read_bytes() == b"published"
+    finally:
+        release_cleanup.set()
+        manager.shutdown(wait=True)
+
+
 def test_queued_cancel_transcribe_never_runs_target(tmp_path):
     mgr = TranscribeJobManager(max_workers=1, store_path=tmp_path / "tj.json")
     gate = threading.Event()

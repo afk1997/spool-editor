@@ -362,6 +362,15 @@ class JobManager:
                     committed = commit_outcome(outcome)
                     apply_updates(current, committed.updates)
                     after_commit = committed.after_commit
+                if current._staging_root:
+                    try:
+                        cleanup_attempt(current._staging_root)
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "download attempt cleanup failed for %s",
+                            current.id,
+                            exc_info=True,
+                        )
                 current.status = JobStatus.DONE
                 current._was_paused = False
                 current.process = None
@@ -396,7 +405,10 @@ class JobManager:
                 with self._lock:
                     current = self._jobs.get(job.id)
                     if current is job:
-                        if current.status is not JobStatus.PAUSED and current._staging_root:
+                        if current.status not in {
+                            JobStatus.PAUSED,
+                            JobStatus.DONE,
+                        } and current._staging_root:
                             try:
                                 cleanup_attempt(current._staging_root)
                             except Exception:

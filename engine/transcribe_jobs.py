@@ -327,6 +327,15 @@ class TranscribeJobManager:
                     committed = commit_outcome(outcome)
                     apply_updates(current, committed.updates)
                     after_commit = committed.after_commit
+                if current._staging_root:
+                    try:
+                        cleanup_attempt(current._staging_root)
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "transcribe attempt cleanup failed for %s",
+                            current.id,
+                            exc_info=True,
+                        )
                 current.status = TranscribeStatus.DONE
                 current.progress_pct = 100
                 current.process_handle = None
@@ -355,7 +364,10 @@ class TranscribeJobManager:
                 with self._lock:
                     current = self._jobs.get(job.id)
                     if current is job:
-                        if current._staging_root:
+                        if (
+                            current.status is not TranscribeStatus.DONE
+                            and current._staging_root
+                        ):
                             try:
                                 cleanup_attempt(current._staging_root)
                             except Exception:

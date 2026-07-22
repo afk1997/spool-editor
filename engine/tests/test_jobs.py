@@ -690,6 +690,43 @@ def _wait_worker_inactive(mgr, jid, timeout=5.0):
     return False
 
 
+def test_download_success_is_not_visible_before_attempt_cleanup(tmp_path, monkeypatch):
+    from attempt_staging import AttemptOutcome, Promotion, cleanup_attempt as real_cleanup
+    import jobs as jobs_module
+
+    manager = JobManager(max_workers=1, store_path=tmp_path / "jobs.json")
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    published = tmp_path / "published.mp4"
+
+    def delayed_cleanup(root):
+        cleanup_started.set()
+        assert release_cleanup.wait(5), "test did not release staging cleanup"
+        real_cleanup(root)
+
+    def target(job, *, attempt):
+        staged = Path(job._staging_root) / "candidate.mp4"
+        staged.write_bytes(b"published")
+        return AttemptOutcome(
+            updates={"file_path": str(staged), "filename": published.name},
+            promotions=(Promotion(staged, published),),
+        )
+
+    monkeypatch.setattr(jobs_module, "cleanup_attempt", delayed_cleanup)
+    jid = manager.submit(target=target, title="cleanup ordering", url="https://x")
+    captured = manager._jobs[jid]
+    try:
+        assert cleanup_started.wait(2), "worker never reached staging cleanup"
+        assert captured.status is JobStatus.DOWNLOADING
+        release_cleanup.set()
+        assert _wait_status(manager, jid, JobStatus.DONE)
+        assert not Path(manager.get(jid)._staging_root).exists()
+        assert published.read_bytes() == b"published"
+    finally:
+        release_cleanup.set()
+        manager.shutdown(wait=True)
+
+
 def test_queued_cancel_download_resume_never_runs_target(tmp_path):
     mgr = JobManager(max_workers=1, store_path=tmp_path / "jobs.json")
     blocker = threading.Event()

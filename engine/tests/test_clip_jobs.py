@@ -422,6 +422,44 @@ def _wait_worker_inactive(mgr, jid, timeout=5.0):
     return False
 
 
+def test_clip_success_is_not_visible_before_attempt_cleanup(tmp_path, monkeypatch):
+    from attempt_staging import AttemptOutcome, Promotion, cleanup_attempt as real_cleanup
+    import clip_jobs as clip_module
+
+    manager = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    published = tmp_path / "clips" / "clip-a" / "clip.mp4"
+
+    def delayed_cleanup(root):
+        cleanup_started.set()
+        assert release_cleanup.wait(5), "test did not release staging cleanup"
+        real_cleanup(root)
+
+    def target(job, *, attempt):
+        staged = Path(job._staging_root) / "clip-a" / "clip.mp4"
+        staged.parent.mkdir(parents=True)
+        staged.write_bytes(b"published")
+        return AttemptOutcome(
+            updates={"clip_id": "clip-a", "result": {"clip_path": str(staged)}},
+            promotions=(Promotion(staged, published),),
+        )
+
+    monkeypatch.setattr(clip_module, "cleanup_attempt", delayed_cleanup)
+    jid = manager.submit(kind="cut", source_id="source", target=target)
+    captured = manager._jobs[jid]
+    try:
+        assert cleanup_started.wait(2), "worker never reached staging cleanup"
+        assert captured.status is ClipStatus.RUNNING
+        release_cleanup.set()
+        _await(manager, jid, ClipStatus.DONE)
+        assert not Path(manager.get(jid)._staging_root).exists()
+        assert published.read_bytes() == b"published"
+    finally:
+        release_cleanup.set()
+        manager.shutdown(wait=True)
+
+
 def test_queued_cancel_clip_never_runs_target(tmp_path):
     mgr = ClipJobManager(max_workers=1, store_path=tmp_path / "clip.json")
     gate = threading.Event()
