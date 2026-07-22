@@ -17,6 +17,9 @@ REMOTE_REASONING_UNAVAILABLE = {
 def watch_app(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "DOWNLOAD_DIR", tmp_path / "downloads")
     monkeypatch.setenv("SPOOL_WATCH_INTERVAL", "0")
+    monkeypatch.delenv("SPOOL_OFFLINE", raising=False)
+    monkeypatch.delenv("SPOOL_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("SPOOL_LLM_EGRESS_CONSENT", raising=False)
     application = app_module.create_app()
     yield application
     application.extensions["trove.jobs"].shutdown(wait=True)
