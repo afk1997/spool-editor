@@ -242,7 +242,12 @@ def test_failed_runtime_apply_rolls_back_store_environment_and_policy(
         assert SettingsStore(path).get() == before_values
         assert live_env == before_env
     finally:
-        application.extensions["trove.shutdown"](wait=True)
+        # This test creates an app inside the shared pytest process. Shutting the
+        # process-wide service registry would permanently close subprocess
+        # admission for later tests, so only drain this app's worker managers.
+        application.extensions["trove.jobs"].shutdown(wait=True)
+        application.extensions["trove.transcribe"].shutdown(wait=True)
+        application.extensions["trove.clips"].shutdown(wait=True)
 
 
 def test_failed_publish_after_runtime_apply_rolls_back_every_state(
@@ -306,4 +311,8 @@ def test_failed_publish_after_runtime_apply_rolls_back_every_state(
             for key in before_env
         } == before_env
     finally:
-        application.extensions["trove.shutdown"](wait=True)
+        # Keep the process-wide service registry open for the rest of the test
+        # session; production closes it only when the engine process exits.
+        application.extensions["trove.jobs"].shutdown(wait=True)
+        application.extensions["trove.transcribe"].shutdown(wait=True)
+        application.extensions["trove.clips"].shutdown(wait=True)
