@@ -29,6 +29,7 @@ import transcript_index as transcript_index_mod
 import clip_runner
 from clip import llm as clip_llm
 from network_policy import NetworkPolicy, NetworkPolicyError
+from process_ownership import service_processes
 import time as _time
 from util import link_or_copy, sanitize_filename
 
@@ -57,6 +58,7 @@ RATE_LIMIT_PER_MIN = int(os.environ.get("TROVE_RATE_LIMIT", "30"))
 # response payload under ~1 MB. The hero form mirrors the cap so users
 # get an inline error before they hit submit.
 BATCH_MAX_URLS = int(os.environ.get("TROVE_BATCH_MAX_URLS", "50"))
+NORMAL_SHUTDOWN_TIMEOUT = 5.0
 
 
 def create_app() -> Flask:
@@ -994,8 +996,22 @@ def create_app() -> Flask:
     # each underlying shutdown operation is intentionally safe to repeat.
     _shutdown_lock = threading.RLock()
 
+    def _signal_shutdown(*, deadline: float) -> None:
+        # The SIGTERM path must never wait for the application shutdown lock or
+        # for manager/reasoning locks. Every service subprocess is independently
+        # registered at creation, so the process-wide owner is the complete and
+        # deadline-aware signal boundary.
+        service_processes.close()
+        service_processes.shutdown_until(deadline=deadline)
+
     def _shutdown(*, wait: bool = False) -> None:
+        deadline = _time.monotonic() + NORMAL_SHUTDOWN_TIMEOUT
         failures = []
+        service_processes.close()
+        try:
+            service_processes.shutdown_until(deadline=deadline)
+        except BaseException as exc:  # manager cleanup must still be attempted
+            failures.append(exc)
         with _shutdown_lock:
             try:
                 reasoning_processes.shutdown(timeout=5.0)
@@ -1009,6 +1025,7 @@ def create_app() -> Flask:
         if failures:
             raise failures[0]
 
+    app.extensions["trove.signal_shutdown"] = _signal_shutdown
     app.extensions["trove.shutdown"] = _shutdown
 
     return app

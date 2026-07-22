@@ -3,27 +3,33 @@
 Python delivers signals on the main interpreter thread, where taking application
 locks or waiting for subprocesses can deadlock.  The SIGTERM handler below only
 writes one byte to a non-blocking pipe.  A dedicated thread performs the real
-engine shutdown and exits after all registered reasoning process trees are gone.
+engine shutdown and exits after all registered service process trees are gone.
 """
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-import logging
 import os
 import signal
 import threading
 import time
 from typing import Callable
 
+from process_ownership import service_processes
 
-_log = logging.getLogger(__name__)
 _STOP = b"S"
 _TERMINATE = b"T"
+SIGTERM_SHUTDOWN_TIMEOUT = 5.0
 
 
 class _SigtermShutdown(AbstractContextManager):
-    def __init__(self, shutdown: Callable[[], None]):
+    def __init__(
+        self,
+        shutdown: Callable[[float], None],
+        *,
+        timeout: float = SIGTERM_SHUTDOWN_TIMEOUT,
+    ):
         self._shutdown = shutdown
+        self._timeout = max(0.0, timeout)
         self._read_fd: int | None = None
         self._write_fd: int | None = None
         self._previous_handler = None
@@ -85,25 +91,19 @@ class _SigtermShutdown(AbstractContextManager):
                 return
             if command != _TERMINATE:
                 continue
-            delay = 0.05
-            while True:
-                try:
-                    self._shutdown()
-                except BaseException as shutdown_error:
-                    # Logging handlers own unbounded locks. Preserve the exception
-                    # in memory, but never let diagnostics delay the next drain.
-                    self._last_shutdown_error = shutdown_error
-                    # One termination request owns the drain through completion.
-                    # Each registry attempt is bounded; SIGKILL remains the
-                    # operator's explicit escape if a process tree never exits.
-                    try:
-                        time.sleep(delay)
-                    except BaseException:
-                        pass
-                    delay = min(1.0, delay * 2)
-                    continue
-                os._exit(128 + signal.SIGTERM)
-                return
+            deadline = time.monotonic() + self._timeout
+            self._last_shutdown_error = None
+            try:
+                self._shutdown(deadline)
+            except BaseException as shutdown_error:
+                # Preserve the failure without entering logging locks. The relay
+                # returns to the pipe so a fresh SIGTERM can make one fresh,
+                # independently bounded attempt; it never spins or extends this
+                # signal's absolute deadline.
+                self._last_shutdown_error = shutdown_error
+                continue
+            os._exit(128 + signal.SIGTERM)
+            return
 
     def __exit__(self, exc_type, exc_value, traceback):
         if self._write_fd is None:
@@ -130,9 +130,13 @@ class _SigtermShutdown(AbstractContextManager):
         self._read_fd = None
 
 
-def sigterm_shutdown(shutdown: Callable[[], None]) -> AbstractContextManager:
+def sigterm_shutdown(
+    shutdown: Callable[[float], None],
+    *,
+    timeout: float = SIGTERM_SHUTDOWN_TIMEOUT,
+) -> AbstractContextManager:
     """Relay SIGTERM to ``shutdown`` without doing unsafe work in the handler."""
-    return _SigtermShutdown(shutdown)
+    return _SigtermShutdown(shutdown, timeout=timeout)
 
 
 def run_flask_app(app=None, *, app_factory=None, **run_options):
@@ -140,46 +144,20 @@ def run_flask_app(app=None, *, app_factory=None, **run_options):
     if (app is None) == (app_factory is None):
         raise ValueError("provide exactly one of app or app_factory")
 
-    app_ready = threading.Event()
-    shutdown_holder = {}
-
-    def shutdown_from_signal():
-        # SIGTERM may arrive midway through app construction. Wait for the
-        # factory to either publish its complete ownership boundary or fail.
-        app_ready.wait()
-        shutdown = shutdown_holder.get("shutdown")
-        if callable(shutdown):
-            shutdown(wait=False)
+    def shutdown_from_signal(deadline: float) -> None:
+        # The process-wide latch is first and lock-free. No app construction,
+        # application shutdown lock, or worker may admit a fresh subprocess
+        # after a termination signal has begun.
+        service_processes.close()
+        service_processes.shutdown_until(deadline=deadline)
 
     with sigterm_shutdown(shutdown_from_signal):
         if app_factory is not None:
-            try:
-                app = app_factory()
-            finally:
-                if app is None:
-                    app_ready.set()
+            app = app_factory()
         shutdown = app.extensions.get("trove.shutdown")
-        shutdown_holder["shutdown"] = shutdown
-        app_ready.set()
         if not callable(shutdown):
             return app.run(**run_options)
         try:
             return app.run(**run_options)
         finally:
-            delay = 0.05
-            while True:
-                try:
-                    shutdown(wait=True)
-                except BaseException as shutdown_error:
-                    # Keep retry diagnostics without synchronously entering logger
-                    # handler locks on the process-exit path.
-                    shutdown_holder["last_error"] = shutdown_error
-                    try:
-                        time.sleep(delay)
-                    except BaseException:
-                        # Repeated Ctrl-C must not bypass ownership cleanup. An
-                        # operator can still use SIGKILL for an explicit hard stop.
-                        pass
-                    delay = min(1.0, delay * 2)
-                    continue
-                break
+            shutdown(wait=True)
