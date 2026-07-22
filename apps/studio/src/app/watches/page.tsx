@@ -7,10 +7,8 @@ import { useEngineQuery } from "@/lib/engine-context";
 import { describeActionError } from "@/lib/action-error";
 import { Btn, Icon } from "@spool/ui";
 
-/* Watches (Phase 3) — folder / channel / playlist automations. Point at a local folder or a
- * channel/playlist URL + a recipe; new videos auto-produce ranked clips into the review queue
- * (drop-a-video → review, NOT auto-published). Persisted via the engine's /watches store; "Scan
- * now" runs the real reconciler (ingest new → produce once transcribed). Zero dummy. */
+/* Watch configurations remain manageable in Phase 0, but they are saved paused. Scan now and
+ * automatic production depend on remote moment reasoning and are visibly unavailable. */
 
 const KINDS: { key: string; label: string; hint: string }[] = [
   { key: "folder", label: "Folder", hint: "A local folder — drop video files in" },
@@ -19,11 +17,11 @@ const KINDS: { key: string; label: string; hint: string }[] = [
 ];
 
 interface Form { name: string; kind: string; target: string; recipe_id: string; enabled: boolean }
-const EMPTY: Form = { name: "", kind: "folder", target: "", recipe_id: "", enabled: true };
+const EMPTY: Form = { name: "", kind: "folder", target: "", recipe_id: "", enabled: false };
 const isRemoteKind = (kind: string) => kind === "channel" || kind === "playlist";
 const toForm = (w: Watch): Form => ({
   name: w.name || "", kind: w.kind || "folder", target: w.target || "",
-  recipe_id: w.recipe_id || "", enabled: w.enabled ?? true,
+  recipe_id: w.recipe_id || "", enabled: false,
 });
 
 export default function WatchesScreen() {
@@ -37,7 +35,7 @@ export default function WatchesScreen() {
   const [f, setF] = useState<Form>(EMPTY);
   const [synced, setSynced] = useState(false);
   const [busy, setBusy] = useState(false);
-  const operationRef = useRef<"save" | "delete" | "scan" | null>(null);
+  const operationRef = useRef<"save" | "delete" | null>(null);
   const remoteWatchBlock = !ctx.settingsReady || !ctx.settings
     ? ctx.settingsLoading
       ? "Checking privacy settings. Remote watch actions are disabled."
@@ -93,33 +91,14 @@ export default function WatchesScreen() {
       setBusy(false);
     }
   };
-  const scan = async (w: Watch) => {
-    if (operationRef.current || (isRemoteKind(w.kind) && remoteWatchBlock)) return;
-    operationRef.current = "scan";
-    setBusy(true);
-    try {
-      const result = await ctx.client.scanWatch(w.id);
-      watchesQ.reload();
-      ctx.pushToast({ icon: "eye", tone: "info", title: `Scanned “${w.name}”`,
-        body: `${result.ingested.length} ingested · ${result.produced.length} produced · ${Object.keys(result.producing).length} producing · ${Object.keys(result.pending).length} transcribing · ${Object.keys(result.ingesting).length} ingesting` });
-    } catch (error) {
-      const failure = describeActionError(error);
-      ctx.pushToast({ icon: "alert", tone: "warn", title: "Scan failed", body: `${failure.code}: ${failure.message}` });
-    } finally {
-      if (operationRef.current === "scan") operationRef.current = null;
-      setBusy(false);
-    }
-  };
-
   const kindHint = KINDS.find((k) => k.key === f.kind)?.hint ?? "";
   const saveRemoteBlocked = saveTouchesRemote && remoteWatchBlock !== null;
-  const scanRemoteBlocked = !!selWatch && isRemoteKind(selWatch.kind) && remoteWatchBlock !== null;
-  const visibleRemoteBlock = saveRemoteBlocked || scanRemoteBlocked ? remoteWatchBlock : null;
+  const visibleRemoteBlock = saveRemoteBlocked ? remoteWatchBlock : null;
 
   return (
     <div className="mainpad fadein" style={{ maxWidth: 1100 }}>
       <div className="row" style={{ marginBottom: 18 }}>
-        <div><div className="eyebrow" style={{ marginBottom: 6 }}>Watches</div><h1 style={{ fontSize: 28 }}>Hands-off production</h1></div>
+        <div><div className="eyebrow" style={{ marginBottom: 6 }}>Watches</div><h1 style={{ fontSize: 28 }}>Paused watch configurations</h1></div>
         <span className="spacer" />
         <Btn variant="ghost" icon="plus" onClick={newWatch} disabled={busy}>New watch</Btn>
       </div>
@@ -127,11 +106,11 @@ export default function WatchesScreen() {
       <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 20, alignItems: "start" }}>
         {/* watch list */}
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {watches.length === 0 && <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.6 }}>No watches yet — point one at a folder or a channel/playlist + a recipe. New videos auto-produce ranked clips into the review queue.</div>}
+          {watches.length === 0 && <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.6 }}>No watches yet. You can save a paused configuration, but automatic production is unavailable in Phase 0.</div>}
           {watches.map((w) => (
             <button type="button" key={w.id} className="card" aria-pressed={sel === w.id} disabled={busy} onClick={() => selectWatch(w)} style={{ padding: 13, cursor: busy ? "not-allowed" : "pointer", borderColor: sel === w.id ? "var(--accent)" : "var(--line)", opacity: busy && sel !== w.id ? 0.65 : 1, width: "100%", textAlign: "left", color: "inherit", fontFamily: "inherit" }}>
               <div className="row" style={{ gap: 8, marginBottom: 5 }}>
-                <span style={{ width: 7, height: 7, borderRadius: "50%", background: w.enabled ?? true ? "var(--ok)" : "var(--text-faint)" }} />
+                <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--text-faint)" }} />
                 <span style={{ fontWeight: 600, fontSize: 13.5 }}>{w.name}</span>
                 <span className="spacer" />
                 <span className="chip" style={{ height: 22, textTransform: "capitalize" }}>{w.kind}</span>
@@ -148,7 +127,7 @@ export default function WatchesScreen() {
             <input value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="Watch name"
               style={{ font: "inherit", fontSize: 17, fontWeight: 600, background: "transparent", border: 0, borderBottom: "1px solid var(--line)", color: "var(--text)", outline: "none", padding: "2px 0", flex: 1 }} />
             <span className="spacer" />
-            {selWatch && <Btn variant="ghost" icon="eye" onClick={() => scan(selWatch)} disabled={busy || scanRemoteBlocked} aria-describedby={scanRemoteBlocked ? "remote-watch-status" : undefined}>Scan now</Btn>}
+            {selWatch && <Btn variant="ghost" icon="eye" disabled aria-describedby="watch-reasoning-status">Scan now</Btn>}
             {sel && <button className="btn subtle sm" disabled={busy} style={{ color: "var(--err, #e5484d)" }} onClick={del} title="Delete watch"><Icon name="trash" size={14} /></button>}
             <Btn variant="primary" icon="check" onClick={save} disabled={busy || saveRemoteBlocked} aria-describedby={saveRemoteBlocked ? "remote-watch-status" : undefined}>{sel ? "Save" : "Create"}</Btn>
           </div>
@@ -159,13 +138,17 @@ export default function WatchesScreen() {
             </div>
           )}
 
+          <div id="watch-reasoning-status" className="mono" style={{ color: "var(--warn)", fontSize: 11.5 }}>
+            Automatic production and Scan now are unavailable in Phase 0. Watch configurations are saved paused.
+          </div>
+
           <div className="row" style={{ gap: 28, flexWrap: "wrap", alignItems: "flex-start" }}>
             <div><div className="eyebrow" style={{ marginBottom: 8 }}>Kind</div>
               <div className="row" style={{ gap: 7 }}>{KINDS.map((k) => <button key={k.key} className={"chip" + (f.kind === k.key ? " solid" : "")} style={{ cursor: "pointer", height: 30 }} onClick={() => set("kind", k.key)}>{k.label}</button>)}</div>
               <div className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 6 }}>{kindHint}</div>
             </div>
             <div><div className="eyebrow" style={{ marginBottom: 8 }}>Status</div>
-              <button className={"chip" + (f.enabled ? " solid" : "")} style={{ cursor: "pointer", height: 30 }} onClick={() => set("enabled", !f.enabled)}>{f.enabled ? "Enabled" : "Paused"}</button>
+              <button className="chip" disabled aria-describedby="watch-reasoning-status" style={{ cursor: "not-allowed", height: 30 }}>Paused</button>
             </div>
           </div>
 
@@ -186,7 +169,7 @@ export default function WatchesScreen() {
           </div>
 
           <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", lineHeight: 1.6, borderTop: "1px solid var(--line)", paddingTop: 14 }}>
-            New videos are downloaded/imported, transcribed, then run through “{recipeName(f.recipe_id)}” — ranked moments are cut, reframed and captioned, landing in the Queue + Clips for review. Nothing is published automatically. “Scan now” checks immediately; set <span className="mono">SPOOL_WATCH_INTERVAL</span> to poll in the background.
+            This paused configuration references “{recipeName(f.recipe_id)}”. Automatic import-to-ranked-clips production will remain off until a supported remote-reasoning transport ships.
           </div>
         </div>
       </div>

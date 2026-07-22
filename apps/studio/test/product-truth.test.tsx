@@ -335,6 +335,16 @@ describe("product truth: live view models", () => {
     expect(container.querySelector(".thumb .tr")).toBeNull();
   });
 
+  it("routes the media-card scissors action to manual transcript cutting", () => {
+    const nav = vi.fn();
+    importHarness.ctx = baseCtx({ nav });
+    render(<MediaCard s={sourceFixture()} onOpen={vi.fn()} />);
+
+    fireEvent.click(screen.getByTitle("Open transcript to cut manually"));
+    expect(nav).toHaveBeenCalledWith("project", { id: "source-1", tab: "Transcript" });
+    expect(nav).not.toHaveBeenCalledWith("discovery", expect.anything());
+  });
+
   it("ignores dismissed clip failures without discarding successful artifact metadata", () => {
     const base = {
       source_id: "source-1",
@@ -852,7 +862,7 @@ describe("product truth: visible control inventory", () => {
     expect(screen.queryByText(/manual mode and agent mode never diverge/i)).not.toBeInTheDocument();
   });
 
-  it("states the exact Codex message and transcript egress boundary in Privacy", () => {
+  it("states that remote reasoning is unavailable and has no Phase 0 egress", () => {
     importHarness.queryData = {
       doctor: { tools: {}, machine: {}, encoders: [] },
       getSettings: {
@@ -873,28 +883,23 @@ describe("product truth: visible control inventory", () => {
     render(<SettingsScreen />);
     fireEvent.click(screen.getByRole("button", { name: "Privacy" }));
 
-    expect(screen.getByText("Codex Agent access")).toBeInTheDocument();
-    expect(screen.getByText("message + transcript only")).toBeInTheDocument();
+    expect(screen.getByText("Remote reasoning")).toBeInTheDocument();
+    expect(screen.getByText("Unavailable in Phase 0")).toBeInTheDocument();
     expect(
       screen.getByText(
-        /Codex cannot inspect your library, queues, watches, models, storage, files, or other local app state/i,
+        /Remote reasoning stays disabled until Spool has a supported transport that sends no local tools or machine context/i,
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("switch", {
+      screen.queryByRole("switch", {
         name: "Allow your message and any attached transcript text to leave this machine for Codex",
       }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/the text you send and any attached transcript text are sent to Codex/i),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/your message \+ attached transcript text → Codex \(consented\)/i),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("transcript text → Codex (consented)")).not.toBeInTheDocument();
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Codex" })).not.toBeInTheDocument();
+    expect(screen.getByText("unavailable · no egress")).toBeInTheDocument();
   });
 
-  it("inventories onboarding as message-plus-transcript egress, not local inspection", () => {
+  it("inventories onboarding remote reasoning as unavailable with no egress", () => {
     importHarness.queryData = {
       doctor: { tools: {}, machine: {}, encoders: [] },
     };
@@ -909,20 +914,20 @@ describe("product truth: visible control inventory", () => {
     render(<OnboardingScreen />);
 
     expect(
-      screen.getByText("Codex reasoning is enabled for messages and attached transcripts."),
+      screen.getByText("Remote reasoning is unavailable in Phase 0."),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        /Codex receives only the message you send and any attached transcript text/i,
+        /Remote reasoning is unavailable in Phase 0 and sends nothing/i,
       ),
     ).toBeInTheDocument();
-    expect(screen.getByText(/media and local app state are not sent/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Codex/i)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Let’s set up" }));
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     expect(
       screen.getByText(
-        "Codex remote reasoning · your message + attached transcript text leave with consent",
+        "Remote reasoning unavailable in Phase 0 · no egress",
       ),
     ).toBeInTheDocument();
   });
@@ -1007,11 +1012,11 @@ describe("product truth: visible control inventory", () => {
     expect(nav).toHaveBeenCalledWith("import");
   });
 
-  it("renders the Codex agent as text-only and submits a plain-language query", () => {
+  it("renders Agent as unavailable and cannot submit by Enter or click", () => {
     expect(INITIAL_AGENT).toEqual([
       {
         role: "agent",
-        text: "Hi — I'm your text-only clip assistant. I can answer from the message you send here. I can't inspect your library, queues, watches, models, storage, files, transcripts, or other local app state.",
+        text: "Remote reasoning is unavailable in Phase 0. Local import, transcription, editing, and rendering remain available.",
       },
     ]);
     const askAgent = vi.fn();
@@ -1022,38 +1027,31 @@ describe("product truth: visible control inventory", () => {
     });
     render(<AgentPanel />);
 
-    expect(screen.getByText("Agent · text-only")).toBeInTheDocument();
-    expect(screen.getByText("Message only · no attachments")).toBeInTheDocument();
-    const input = screen.getByPlaceholderText("Ask Codex from this message…");
-    fireEvent.change(input, { target: { value: "What does this passage mean?" } });
+    expect(screen.getByText("Agent · unavailable")).toBeInTheDocument();
+    expect(screen.getByText("Remote reasoning unavailable in Phase 0")).toBeInTheDocument();
+    const input = screen.getByPlaceholderText("Remote reasoning unavailable in Phase 0");
+    expect(input).toBeDisabled();
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(askAgent.mock.calls).toEqual([["What does this passage mean?"]]);
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+    expect(askAgent).not.toHaveBeenCalled();
     expect(input).toHaveValue("");
-    expect(screen.queryByText(/attached transcript/i)).not.toBeInTheDocument();
-    expect(screen.queryByText("Agent · read-only")).not.toBeInTheDocument();
-    expect(screen.queryByText("Inspection only")).not.toBeInTheDocument();
-    for (const fake of ["Undo last agent action", "Detected 2 speakers", "Run recipe"])
-      expect(screen.queryByText(fake)).not.toBeInTheDocument();
   });
 
-  it("describes and submits the visible home Agent as message-only", () => {
+  it("keeps Home import-only and does not clear non-URL text as if Agent succeeded", () => {
     const askAgent = vi.fn();
     const openAgent = vi.fn();
     importHarness.ctx = baseCtx({ askAgent, openAgent });
     render(<HomeScreen />);
 
-    expect(screen.getByText("Import media or ask Codex a question")).toBeInTheDocument();
-    const input = screen.getByPlaceholderText("Paste a URL, or ask Codex a question…");
+    expect(screen.getByText("Import media to start creating")).toBeInTheDocument();
+    const input = screen.getByPlaceholderText("Paste one or more video URLs…");
     fireEvent.change(input, { target: { value: "Summarize this message" } });
-    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
-    expect(askAgent.mock.calls).toEqual([["Summarize this message"]]);
-    expect(openAgent).toHaveBeenCalledTimes(1);
-    expect(input).toHaveValue("");
-    expect(
-      screen.getByText("Codex sees only the message you send here—not local app state"),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/attached transcript/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/agent inspection is read-only/i)).not.toBeInTheDocument();
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    expect(askAgent).not.toHaveBeenCalled();
+    expect(openAgent).not.toHaveBeenCalled();
+    expect(input).toHaveValue("Summarize this message");
+    expect(screen.getByText("Remote reasoning is unavailable in Phase 0.")).toBeInTheDocument();
   });
 
   it("renders only the supported URL import and format controls", () => {
@@ -1249,14 +1247,10 @@ describe("product truth: structured action errors", () => {
     origin_forbidden: "That source is blocked by the engine's origin policy.",
     agent_mutation_disabled:
       "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
-    remote_agent_tools_disabled:
-      "Remote Agent tools are disabled. Codex receives only your message and attached transcript text; it cannot inspect local app state.",
     offline_network_disabled: "Turn off Offline mode before using this network action.",
     network_work_active: "Wait for active network work to finish before turning on Offline mode.",
-    reasoning_provider_required: "Select Codex as the reasoning provider before using this action.",
-    egress_consent_required:
-      "Allow your message and any attached transcript text to be sent to Codex before using remote reasoning.",
-    egress_consent_requires_codex: "Select Codex before granting remote-reasoning consent.",
+    remote_reasoning_unavailable:
+      "Remote reasoning is unavailable in Phase 0 until a supported zero-tool transport ships.",
     settings_persist_failed:
       "The engine could not save settings. Your confirmed settings were kept.",
     not_resumable: "This job cannot be resumed. Start it again instead.",
@@ -1797,76 +1791,29 @@ describe("product truth: visible mutations settle before success", () => {
     expect(nav).toHaveBeenCalledWith("queue");
   });
 
-  it("Recipes withhold navigation and expose the structured produce rejection", async () => {
-    const delayed = deferred<unknown>();
-    const pushToast = vi.fn();
+  it("Recipes keep configuration editable but make reasoning-dependent runs inert", () => {
+    const produce = vi.fn();
     importHarness.queryData = {
       listRecipes: { recipes: [] },
       listBrandKits: { brand_kits: [] },
     };
     importHarness.ctx = baseCtx({
       sources: [sourceFixture()],
-      client: clientFixture({ produce: vi.fn().mockReturnValue(delayed.promise) }),
-      pushToast,
+      client: clientFixture({ produce }),
     });
     render(<RecipesScreen />);
     const projectSelect = screen.getAllByRole("combobox").at(-1)!;
-    fireEvent.change(projectSelect, { target: { value: "source-1" } });
-    fireEvent.click(screen.getByRole("button", { name: "Run recipe" }));
-
-    expect(screen.getByRole("button", { name: "Starting…" })).toBeDisabled();
-    expect(pushToast).not.toHaveBeenCalled();
-    expect(importHarness.router.push).not.toHaveBeenCalled();
-
-    await act(async () => {
-      delayed.reject(new SpoolApiError(429, "queue_full", "capacity"));
-      await delayed.promise.catch(() => undefined);
-    });
-    await waitFor(() =>
-      expect(pushToast).toHaveBeenCalledWith(
-        expect.objectContaining({
-          title: "Couldn't run the recipe",
-          body: expect.stringMatching(/^queue_full:/),
-        }),
-      ),
-    );
+    expect(projectSelect).toBeDisabled();
+    const run = screen.getByRole("button", { name: "Run recipe" });
+    expect(run).toBeDisabled();
+    fireEvent.click(run);
+    expect(produce).not.toHaveBeenCalled();
+    expect(screen.getByText(/Remote recipe runs are unavailable in Phase 0/i)).toBeInTheDocument();
     expect(importHarness.router.push).not.toHaveBeenCalled();
   });
 
-  it("Recipes never announce success or redirect after the initiating route is left", async () => {
-    const delayed = deferred<unknown>();
-    const pushToast = vi.fn();
-    importHarness.queryData = {
-      listRecipes: { recipes: [] },
-      listBrandKits: { brand_kits: [] },
-    };
-    importHarness.ctx = baseCtx({
-      sources: [sourceFixture()],
-      client: clientFixture({ produce: vi.fn().mockReturnValue(delayed.promise) }),
-      pushToast,
-    });
-    window.history.replaceState({}, "", "/recipes");
-    render(
-      <StrictMode>
-        <RecipesScreen />
-      </StrictMode>,
-    );
-    fireEvent.change(screen.getAllByRole("combobox").at(-1)!, { target: { value: "source-1" } });
-    fireEvent.click(screen.getByRole("button", { name: "Run recipe" }));
-    window.history.pushState({}, "", "/library");
-
-    await act(async () => {
-      delayed.resolve({ jobs: [] });
-      await delayed.promise;
-    });
-
-    expect(pushToast).not.toHaveBeenCalled();
-    expect(importHarness.router.push).not.toHaveBeenCalled();
-  });
-
-  it("Watches expose a delayed scan rejection without an early success toast", async () => {
-    const delayed = deferred<unknown>();
-    const pushToast = vi.fn();
+  it("Watches keep Scan now and automation inert for folder watches too", () => {
+    const scanWatch = vi.fn();
     const watch = {
       id: "watch-1",
       name: "Incoming videos",
@@ -1882,25 +1829,15 @@ describe("product truth: visible mutations settle before success", () => {
       listRecipes: { recipes: [] },
     };
     importHarness.ctx = baseCtx({
-      client: clientFixture({ scanWatch: vi.fn().mockReturnValue(delayed.promise) }),
-      pushToast,
+      client: clientFixture({ scanWatch }),
     });
     render(<WatchesScreen />);
-    fireEvent.click(screen.getByRole("button", { name: "Scan now" }));
-
-    expect(pushToast).not.toHaveBeenCalled();
-    await act(async () => {
-      delayed.reject(new SpoolApiError(0, "unreachable", "offline"));
-      await delayed.promise.catch(() => undefined);
-    });
-    await waitFor(() =>
-      expect(pushToast).toHaveBeenCalledWith(
-        expect.objectContaining({
-          title: "Scan failed",
-          body: expect.stringMatching(/^unreachable:/),
-        }),
-      ),
-    );
+    const scan = screen.getByRole("button", { name: "Scan now" });
+    expect(scan).toBeDisabled();
+    fireEvent.click(scan);
+    expect(scanWatch).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Paused" })).toBeDisabled();
+    expect(screen.getByText(/Automatic production and Scan now are unavailable in Phase 0/i)).toBeInTheDocument();
   });
 
   it("Brand keeps the edited record stable while a save is pending", async () => {

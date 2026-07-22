@@ -107,7 +107,7 @@ export default function ProjectScreen() {
           <h1 style={{ fontSize: 24, marginBottom: 8, lineHeight: 1.2 }}>{s.title}</h1>
           <div className="row" style={{ gap: 8, color: "var(--text-faint)", fontSize: 13, marginBottom: 16 }}>{knownOrigin && <SourceGlyph type={s.src} />} {s.channel} · {s.lang} · added {s.added}</div>
           <div className="row" style={{ gap: 9, flexWrap: "wrap" }}>
-            <Btn variant="primary" icon="scissors" onClick={() => ctx.nav("discovery", { id: s.id })}>Find clips</Btn>
+            <Btn variant="primary" icon="scissors" onClick={() => setTab("Transcript")}>Cut from transcript</Btn>
             <Btn variant="ghost" icon="refresh" disabled={retranscribeBusy} onClick={retranscribe}>{retranscribeLabel}</Btn>
           </div>
           {visibleActionError && <div role="alert" className="card" style={{ marginTop: 12, padding: 10, color: "var(--err)", borderColor: "rgba(190,81,73,0.4)", background: "var(--err-soft)", fontSize: 12.5 }}><span className="mono">{visibleActionError.code}</span> · {visibleActionError.message}</div>}
@@ -162,17 +162,17 @@ export default function ProjectScreen() {
                 <Stat v={s.size} l="Size" />
               </div>
               <div className="divider" style={{ margin: "18px 0" }} />
-              <Btn variant="primary" icon="scissors" onClick={() => ctx.nav("discovery", { id: s.id })} style={{ width: "100%" }}>Find clips</Btn>
+              <Btn variant="primary" icon="scissors" onClick={() => setTab("Transcript")} style={{ width: "100%" }}>Cut from transcript</Btn>
             </div>
           </div>
         )
       )}
       {tab === "Transcript" && <TranscriptView lines={lines} speakers={speakers} tid={s.transcriptId} sourceId={s.id} onEdited={doc.reload} />}
       {tab === "Candidates" && (candidates.length === 0 && !finding
-        ? <Empty icon="scan" title="No candidates yet" action={<Btn variant="primary" icon="scissors" onClick={() => ctx.nav("discovery", { id: s.id })}>Find clips</Btn>}>Run discovery to scan the transcript for clip-worthy moments.</Empty>
+        ? <Empty icon="scan" title="Remote discovery unavailable" action={<Btn variant="primary" icon="scissors" onClick={() => setTab("Transcript")}>Cut from transcript</Btn>}>Select words in the Transcript tab, then cut a clip from that selection.</Empty>
         : <DiscoveryBody key={candidates[0]?.id.split("-")[0] ?? "none"} candidates={candidates} sourceId={s.id} finding={finding} />)}
       {tab === "Clips" && (myClips.length === 0
-        ? <Empty icon="film" title="No clips from this source yet" action={<Btn variant="primary" icon="scissors" onClick={() => ctx.nav("discovery", { id: s.id })}>Make clips</Btn>} />
+        ? <Empty icon="film" title="No clips from this source yet" action={<Btn variant="primary" icon="scissors" onClick={() => setTab("Transcript")}>Cut from transcript</Btn>} />
         : <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(180px,1fr))", gap: 16 }}>{myClips.map((c) => <ClipCard key={c.id} c={c} />)}</div>)}
     </div>
   );

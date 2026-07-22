@@ -606,7 +606,7 @@ describe("editor controls expose their real accessible actions", () => {
     expect(screen.getByRole("button", { name: "Close agent panel" })).toBeInTheDocument();
   });
 
-  it("keeps text-only Agent clarifications answerable and blocks mutation confirmations", () => {
+  it("keeps all stale Agent clarifications inert while remote reasoning is unavailable", () => {
     const answerElicit = vi.fn();
     const clarification = {
       role: "elicit" as const,
@@ -633,7 +633,9 @@ describe("editor controls expose their real accessible actions", () => {
 
     render(<AgentPanel />);
     fireEvent.click(screen.getByRole("button", { name: "Keynote" }));
-    expect(answerElicit).toHaveBeenCalledWith(clarification, "Keynote");
+    expect(answerElicit).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Interview" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Keynote" })).toBeDisabled();
     expect(screen.getByText("Allow delete_recipe?")).toBeInTheDocument();
     expect(screen.getAllByText(/Agent changes are unavailable in Phase 0/)).toHaveLength(1);
     expect(screen.queryByRole("button", { name: "Confirm" })).not.toBeInTheDocument();

@@ -206,66 +206,24 @@ beforeEach(() => {
 });
 
 describe("visible mutation inventory: Library", () => {
-  it("waits for every find-clips request and reports a structured partial failure", async () => {
-    const delayed = deferred<{ id: string }>();
-    const pushToast = vi.fn();
-    const findMoments = vi
-      .fn()
-      .mockReturnValueOnce(delayed.promise)
-      .mockRejectedValueOnce(structuredFailure());
-    harness.ctx = baseCtx({
-      sources: [sourceFixture(), sourceFixture({ id: "source-2", title: "Second source" })],
-      client: clientFixture({ findMoments }),
-      pushToast,
-    });
-    render(<LibraryScreen />);
-
-    fireEvent.click(screen.getByRole("button", { name: "Select Test source" }));
-    fireEvent.click(screen.getByRole("button", { name: "Select Second source" }));
-    fireEvent.click(screen.getByRole("button", { name: "Find clips" }));
-
-    expect(findMoments).toHaveBeenCalledTimes(2);
-    expect(pushToast).not.toHaveBeenCalled();
-    expect(screen.getByText("2 selected")).toBeInTheDocument();
-
-    await act(async () => {
-      delayed.resolve({ id: "moments-1" });
-      await delayed.promise;
-    });
-    await waitFor(() =>
-      expect(pushToast).toHaveBeenCalledWith(
-        expect.objectContaining({
-          title: "Find-clips requests settled",
-          body: expect.stringMatching(/^1 succeeded · 1 failed · queue_full:/),
-        }),
-      ),
-    );
-    expect(screen.getByText("1 selected")).toBeInTheDocument();
-  });
-
-  it("starts one find-clips batch across same-tick repeated clicks", async () => {
-    const delayed = deferred<{ id: string }>();
-    const findMoments = vi.fn().mockReturnValue(delayed.promise);
+  it("keeps local transcription available while remote Find clips is inert", async () => {
+    const findMoments = vi.fn();
+    const startTranscribe = vi.fn().mockResolvedValue({ id: "transcribe-1" });
     harness.ctx = baseCtx({
       sources: [sourceFixture()],
-      client: clientFixture({ findMoments }),
+      client: clientFixture({ findMoments, startTranscribe }),
     });
     render(<LibraryScreen />);
 
     fireEvent.click(screen.getByRole("button", { name: "Select Test source" }));
     const find = screen.getByRole("button", { name: "Find clips" });
-    act(() => {
-      find.click();
-      find.click();
-    });
-    const callsBeforeSettlement = findMoments.mock.calls.length;
+    expect(find).toBeDisabled();
+    expect(screen.getByText("Remote moment discovery is unavailable in Phase 0.")).toBeInTheDocument();
+    fireEvent.click(find);
+    expect(findMoments).not.toHaveBeenCalled();
 
-    await act(async () => {
-      delayed.resolve({ id: "moments-1" });
-      await delayed.promise;
-      await Promise.resolve();
-    });
-    expect(callsBeforeSettlement).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "Transcribe" }));
+    await waitFor(() => expect(startTranscribe).toHaveBeenCalledWith("source-1"));
   });
 });
 
@@ -432,108 +390,37 @@ describe("visible mutation inventory: Source work", () => {
     expect(screen.getByRole("button", { name: "Transcribing…" })).toBeDisabled();
   });
 
-  it("waits for all discovery modes before surfacing a structured scan failure", async () => {
-    const delayed = deferred<{ id: string }>();
-    const pushToast = vi.fn();
+  it("routes source clip CTAs to the supported manual transcript workflow", () => {
     const nav = vi.fn();
-    const findMoments = vi.fn((_sourceId: string, options: { mode: string }) => {
-      if (options.mode === "funny") return delayed.promise;
-      if (options.mode === "insightful") return Promise.reject(structuredFailure());
-      return Promise.resolve({ id: `moments-${options.mode}` });
-    });
-    harness.ctx = baseCtx({ client: clientFixture({ findMoments }), pushToast, nav });
-    render(<DiscoveryBody candidates={[]} sourceId="source-1" finding={false} />);
+    harness.params = { id: "source-1" };
+    harness.queryData = {
+      getTranscriptDoc: { words: [] },
+      sourceEnergy: { bars: [], buckets: 0 },
+    };
+    harness.ctx = baseCtx({ sources: [sourceFixture()], nav });
+    render(<ProjectScreen />);
 
-    fireEvent.click(screen.getAllByRole("button", { name: "Scan all modes" })[0]!);
-    expect(findMoments).toHaveBeenCalledTimes(6);
-    expect(pushToast).not.toHaveBeenCalled();
-    expect(nav).not.toHaveBeenCalled();
-
-    await act(async () => {
-      delayed.resolve({ id: "moments-funny" });
-      await delayed.promise;
-    });
-    await waitFor(() =>
-      expect(pushToast).toHaveBeenCalledWith(
-        expect.objectContaining({
-          title: "Some scans could not start",
-          body: expect.stringMatching(/^5 succeeded · 1 failed\./),
-        }),
-      ),
-    );
-    expect(pushToast.mock.calls[0]?.[0].body).toMatch(/queue_full/);
+    expect(screen.queryByRole("button", { name: "Find clips" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "Cut from transcript" })[0]!);
+    expect(screen.getByRole("tab", { name: "Transcript" })).toHaveAttribute("aria-selected", "true");
     expect(nav).not.toHaveBeenCalled();
   });
 
-  it("keeps discovery scans locked from admission through terminal settlement", async () => {
-    const terminal = deferred<void>();
-    const pushToast = vi.fn();
-    const findMoments = vi.fn((_sourceId: string, options: { mode: string }) =>
-      Promise.resolve({ id: `moments-${options.mode}` }),
-    );
-    const awaitClipJob = vi.fn((id?: string) =>
-      id === "moments-funny" ? terminal.promise : Promise.resolve(),
-    );
-    harness.ctx = baseCtx({
-      client: clientFixture({ findMoments }),
-      awaitClipJob,
-      pushToast,
-    });
+  it("keeps every discovery scan action inert and points to manual transcript cutting", () => {
+    const findMoments = vi.fn();
+    harness.ctx = baseCtx({ client: clientFixture({ findMoments }) });
     render(<DiscoveryBody candidates={[]} sourceId="source-1" finding={false} />);
 
-    fireEvent.click(screen.getAllByRole("button", { name: "Scan all modes" })[0]!);
-    await waitFor(() => expect(findMoments).toHaveBeenCalledTimes(6));
-    await waitFor(() => expect(awaitClipJob).toHaveBeenCalledTimes(6));
-
-    const busy = screen.getAllByRole("button", { name: "Starting scans…" })[0]!;
-    expect(busy).toBeDisabled();
-    expect(pushToast).not.toHaveBeenCalled();
-    fireEvent.click(busy);
-    fireEvent.click(busy);
-    expect(findMoments).toHaveBeenCalledTimes(6);
-
-    await act(async () => {
-      terminal.resolve();
-      await terminal.promise;
+    const scanButtons = screen.getAllByRole("button", { name: "Scan all modes" });
+    expect(scanButtons).toHaveLength(2);
+    scanButtons.forEach((button) => {
+      expect(button).toBeDisabled();
+      fireEvent.click(button);
     });
-    await waitFor(() =>
-      expect(pushToast).toHaveBeenCalledWith(
-        expect.objectContaining({
-          title: "Moment scans complete",
-          body: expect.stringMatching(/^6 succeeded · 0 failed\./),
-        }),
-      ),
-    );
-    expect(screen.getAllByRole("button", { name: "Scan all modes" })[0]).toBeEnabled();
-  });
-
-  it("reports a discovery job that fails after admission", async () => {
-    const pushToast = vi.fn();
-    const findMoments = vi.fn((_sourceId: string, options: { mode: string }) =>
-      Promise.resolve({ id: `moments-${options.mode}` }),
-    );
-    const awaitClipJob = vi.fn((id?: string) =>
-      id === "moments-insightful" ? Promise.reject(structuredFailure()) : Promise.resolve(),
-    );
-    harness.ctx = baseCtx({
-      client: clientFixture({ findMoments }),
-      awaitClipJob,
-      pushToast,
-    });
-    render(<DiscoveryBody candidates={[]} sourceId="source-1" finding={false} />);
-
-    fireEvent.click(screen.getAllByRole("button", { name: "Scan all modes" })[0]!);
-
-    await waitFor(() =>
-      expect(pushToast).toHaveBeenCalledWith(
-        expect.objectContaining({
-          title: "Some moment scans failed",
-          body: expect.stringMatching(/^5 succeeded · 1 failed\./),
-        }),
-      ),
-    );
-    expect(pushToast.mock.calls[0]?.[0].body).toMatch(/queue_full/);
-    expect(awaitClipJob).toHaveBeenCalledTimes(6);
+    expect(findMoments).not.toHaveBeenCalled();
+    expect(screen.getByText(
+      "Remote moment discovery is unavailable in Phase 0. Select words in the Transcript tab to cut a clip manually.",
+    )).toBeInTheDocument();
   });
 
   it("does not reload or claim a transcript edit before a structured rejection", async () => {
@@ -1049,15 +936,14 @@ describe("visible mutation inventory: same-tick persistence locks", () => {
     },
   );
 
-  it.each(["save", "delete", "run"] as const)(
+  it.each(["save", "delete"] as const)(
     "Recipes %s excludes its repeat and competing mutations",
     async (primary) => {
       const savePending = deferred<Record<string, unknown>>();
       const deletePending = deferred<void>();
-      const runPending = deferred<void>();
       const updateRecipe = vi.fn().mockReturnValue(savePending.promise);
       const deleteRecipe = vi.fn().mockReturnValue(deletePending.promise);
-      const produce = vi.fn().mockReturnValue(runPending.promise);
+      const produce = vi.fn();
       harness.queryData = persistedFixtures.recipe.queries;
       harness.queryReload = { listRecipes: vi.fn(), listBrandKits: vi.fn() };
       harness.ctx = baseCtx({
@@ -1084,40 +970,32 @@ describe("visible mutation inventory: same-tick persistence locks", () => {
       const callsBeforeSettlement = {
         save: updateRecipe.mock.calls.length,
         delete: deleteRecipe.mock.calls.length,
-        run: produce.mock.calls.length,
       };
+      expect(buttons.run).toBeDisabled();
+      expect(produce).not.toHaveBeenCalled();
 
       await act(async () => {
         savePending.resolve(persistedFixtures.recipe.queries.listRecipes.recipes[0]);
         deletePending.resolve();
-        runPending.resolve();
-        await Promise.all([savePending.promise, deletePending.promise, runPending.promise]);
+        await Promise.all([savePending.promise, deletePending.promise]);
         await Promise.resolve();
         await Promise.resolve();
       });
       expect(callsBeforeSettlement).toEqual({
         save: primary === "save" ? 1 : 0,
         delete: primary === "delete" ? 1 : 0,
-        run: primary === "run" ? 1 : 0,
       });
     },
   );
 
-  it.each(["save", "delete", "scan"] as const)(
+  it.each(["save", "delete"] as const)(
     "Watches %s excludes its repeat and competing mutations",
     async (primary) => {
       const savePending = deferred<Record<string, unknown>>();
       const deletePending = deferred<void>();
-      const scanPending = deferred<{
-        ingested: string[];
-        produced: string[];
-        producing: Record<string, unknown>;
-        pending: Record<string, unknown>;
-        ingesting: Record<string, unknown>;
-      }>();
       const updateWatch = vi.fn().mockReturnValue(savePending.promise);
       const deleteWatch = vi.fn().mockReturnValue(deletePending.promise);
-      const scanWatch = vi.fn().mockReturnValue(scanPending.promise);
+      const scanWatch = vi.fn();
       harness.queryData = persistedFixtures.watch.queries;
       harness.queryReload = { listWatches: vi.fn(), listRecipes: vi.fn() };
       harness.ctx = baseCtx({
@@ -1140,27 +1018,20 @@ describe("visible mutation inventory: same-tick persistence locks", () => {
       const callsBeforeSettlement = {
         save: updateWatch.mock.calls.length,
         delete: deleteWatch.mock.calls.length,
-        scan: scanWatch.mock.calls.length,
       };
+      expect(buttons.scan).toBeDisabled();
+      expect(scanWatch).not.toHaveBeenCalled();
 
       await act(async () => {
         savePending.resolve(persistedFixtures.watch.queries.listWatches.watches[0]);
         deletePending.resolve();
-        scanPending.resolve({
-          ingested: [],
-          produced: [],
-          producing: {},
-          pending: {},
-          ingesting: {},
-        });
-        await Promise.all([savePending.promise, deletePending.promise, scanPending.promise]);
+        await Promise.all([savePending.promise, deletePending.promise]);
         await Promise.resolve();
         await Promise.resolve();
       });
       expect(callsBeforeSettlement).toEqual({
         save: primary === "save" ? 1 : 0,
         delete: primary === "delete" ? 1 : 0,
-        scan: primary === "scan" ? 1 : 0,
       });
     },
   );
@@ -1295,9 +1166,9 @@ describe("visible mutation inventory: Offline watch gates", () => {
 
   it.each(
     blockedStates.flatMap((privacy) =>
-      (["create", "update", "scan"] as const).map((operation) => ({ ...privacy, operation })),
+      (["create", "update"] as const).map((operation) => ({ ...privacy, operation })),
     ),
-  )("keeps folder $operation usable $state", async ({ ctx, operation }) => {
+  )("keeps disabled folder-watch configuration $operation usable $state", async ({ ctx, operation }) => {
     const watch = watchFixture("folder");
     const createWatch = vi.fn().mockResolvedValue(watch);
     const updateWatch = vi.fn().mockResolvedValue(watch);
@@ -1328,14 +1199,28 @@ describe("visible mutation inventory: Offline watch gates", () => {
       expect(save).toBeEnabled();
       fireEvent.click(save);
       await waitFor(() => expect(updateWatch).toHaveBeenCalledTimes(1));
-    } else {
-      const scan = screen.getByRole("button", { name: "Scan now" });
-      expect(scan).toBeEnabled();
-      fireEvent.click(scan);
-      await waitFor(() => expect(scanWatch).toHaveBeenCalledTimes(1));
     }
+    expect(scanWatch).not.toHaveBeenCalled();
     expect(harness.queryCalls).toContain("listWatches");
   });
+
+  it.each(["folder", "channel", "playlist"] as const)(
+    "disables $kind Scan now and effective automation while remote reasoning is unavailable",
+    (kind) => {
+      const watch = watchFixture(kind);
+      const scanWatch = vi.fn();
+      harness.queryData = { listWatches: { watches: [watch] }, listRecipes: { recipes: [] } };
+      harness.ctx = baseCtx({ client: clientFixture({ scanWatch }) });
+      render(<WatchesScreen />);
+
+      const scan = screen.getByRole("button", { name: "Scan now" });
+      expect(scan).toBeDisabled();
+      fireEvent.click(scan);
+      expect(scanWatch).not.toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: "Paused" })).toBeDisabled();
+      expect(screen.getByText(/Automatic production and Scan now are unavailable in Phase 0/i)).toBeInTheDocument();
+    },
+  );
 });
 
 describe("visible mutation inventory: Settings", () => {

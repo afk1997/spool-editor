@@ -4,8 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import { useSpool, type AgentMessage } from "./context";
 import { Icon, Progress } from "@spool/ui";
 
-/* The visible Phase 0 Codex agent is message-only. These surfaces attach no transcript,
- * local tool catalog, or application state. */
+/* Phase 0 has no supported remote-reasoning transport. The panel remains as an explicit
+ * unavailable-state explanation; every composer and stale clarification action is inert. */
 
 function ToolTrace({ tools }: { tools: NonNullable<AgentMessage["tools"]> }) {
   return (
@@ -62,18 +62,14 @@ function ClarificationCard({ msg, onAnswer, disabled = false }: { msg: AgentMess
 
 export function AgentPanel() {
   const ctx = useSpool();
-  const [text, setText] = useState("");
   const streamRef = useRef<HTMLDivElement>(null);
   useEffect(() => { if (streamRef.current) streamRef.current.scrollTop = streamRef.current.scrollHeight; }, [ctx.agentMessages]);
-
-  const send = () => { if (ctx.working || !text.trim()) return; ctx.askAgent(text.trim()); setText(""); };
 
   return (
     <div className={"agent" + (ctx.agentOpen ? "" : " hidden")}>
       <div className="agent-head">
         <span className="dotpulse" />
-        <b style={{ fontSize: 13.5 }}>Agent · text-only</b>
-        {ctx.working && <span className="chip info" style={{ marginLeft: 4 }}><Icon name="spinner" size={12} style={{ animation: "spin 1s linear infinite" }} />working</span>}
+        <b style={{ fontSize: 13.5 }}>Agent · unavailable</b>
         <span className="spacer" />
         <button className="iconbtn" aria-label="Close agent panel" onClick={ctx.toggleAgent}><Icon name="x" size={16} /></button>
       </div>
@@ -91,23 +87,21 @@ export function AgentPanel() {
           if (m.role === "elicit" && m.confirmFor) return (
             <div key={i} className="msg"><div className="bubble">
               <div style={{ fontWeight: 600, marginBottom: 4 }}>{m.q || "This request needs an action."}</div>
-              <div style={{ color: "var(--text-faint)", fontSize: 12 }}>Agent changes are unavailable in Phase 0. Codex can answer only from the message you send here.</div>
+              <div style={{ color: "var(--text-faint)", fontSize: 12 }}>Remote reasoning and Agent changes are unavailable in Phase 0.</div>
             </div></div>
           );
-          if (m.role === "elicit") return <ClarificationCard key={i} msg={m} onAnswer={ctx.answerElicit} disabled={ctx.working} />;
+          if (m.role === "elicit") return <ClarificationCard key={i} msg={m} onAnswer={ctx.answerElicit} disabled />;
           return <div key={i} className="msg"><div className="who"><Icon name="sparkles" size={12} style={{ color: "var(--accent)" }} />spool</div><div className="bubble">{m.text}</div></div>;
         })}
       </div>
 
       <div className="agent-foot">
         <div className="agent-input">
-          <textarea rows={1} placeholder="Ask Codex from this message…" value={text} disabled={ctx.working}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
+          <textarea rows={1} placeholder="Remote reasoning unavailable in Phase 0" value="" disabled readOnly />
           <div className="row" style={{ gap: 6 }}>
-            <span style={{ fontSize: 10.5, color: "var(--text-faint)" }}>Message only · no attachments</span>
+            <span style={{ fontSize: 10.5, color: "var(--text-faint)" }}>Remote reasoning unavailable in Phase 0</span>
             <span className="spacer" />
-            <button className="iconbtn" aria-label="Send question" disabled={ctx.working || !text.trim()} style={{ width: 30, height: 30, background: "var(--accent)", color: "var(--accent-ink)" }} onClick={send}><Icon name="arrowR" size={16} /></button>
+            <button className="iconbtn" aria-label="Send question" disabled style={{ width: 30, height: 30, background: "var(--bg-3)", color: "var(--text-faint)" }}><Icon name="arrowR" size={16} /></button>
           </div>
         </div>
       </div>

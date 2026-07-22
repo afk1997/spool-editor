@@ -31,7 +31,7 @@ export function MediaCard({ s, onOpen }: { s: SpoolSource; onOpen: (s: SpoolSour
         )}
         <div className="hoveractions">
           <button className="roundbtn" title="Open project" onClick={(e) => { e.stopPropagation(); onOpen(s); }}><Icon name="play" size={16} /></button>
-          <button className="roundbtn" title="Make clips" onClick={(e) => { e.stopPropagation(); ctx.nav("discovery", { id: s.id }); }}><Icon name="scissors" size={16} /></button>
+          <button className="roundbtn" title="Open transcript to cut manually" onClick={(e) => { e.stopPropagation(); ctx.nav("project", { id: s.id, tab: "Transcript" }); }}><Icon name="scissors" size={16} /></button>
           <button className="roundbtn" title="Transcript" onClick={(e) => { e.stopPropagation(); ctx.nav("project", { id: s.id }); }}><Icon name="type" size={16} /></button>
         </div>
       </Thumb>

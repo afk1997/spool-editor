@@ -44,32 +44,10 @@ export default function OnboardingScreen() {
       : "Privacy settings unavailable."
     : ctx.offline
       ? "Offline mode blocks network access."
-      : ctx.reasoningProvider === "codex" && ctx.reasoningEgressConsent
-        ? "Codex reasoning is enabled for messages and attached transcripts."
-        : "Remote reasoning is off.";
-  const momentFindingSummary = !ctx.settingsReady
-    ? "Privacy settings not loaded"
-    : ctx.offline
-      ? ctx.reasoningProvider === "codex" && ctx.reasoningEgressConsent
-        ? "Codex configured with consent · no current message or transcript egress"
-        : "Offline mode · no current message or transcript egress"
-      : ctx.reasoningProvider !== "codex"
-        ? "No remote provider selected · messages and transcripts stay on this machine"
-        : ctx.reasoningEgressConsent
-          ? "Codex remote reasoning · your message + attached transcript text leave with consent"
-          : "Codex selected · messages and transcripts stay on this machine until you consent";
-  const momentFindingTone = !ctx.settingsReady || ctx.offline || (ctx.reasoningProvider === "codex" && !ctx.reasoningEgressConsent)
-    ? "warn"
-    : "ok";
-  const momentFindingState = !ctx.settingsReady
-    ? "checking"
-    : ctx.offline
-      ? "blocked by Offline"
-      : ctx.reasoningProvider !== "codex"
-        ? "disabled"
-        : ctx.reasoningEgressConsent
-          ? "enabled"
-          : "consent required";
+      : "Remote reasoning is unavailable in Phase 0.";
+  const momentFindingSummary = "Remote reasoning unavailable in Phase 0 · no egress";
+  const momentFindingTone = "warn";
+  const momentFindingState = "unavailable";
 
   const fix = (id: string, hint: string) => { ctx.pushToast({ icon: "terminal", tone: "info", title: `Install ${id}`, body: hint ? `Run: ${hint}` : "See the docs, then re-check." }); doctor.reload(); };
 
@@ -100,7 +78,7 @@ export default function OnboardingScreen() {
             <div>
               <div className="eyebrow" style={{ marginBottom: 14 }}>Welcome to Spool</div>
               <h1 style={{ fontSize: 34, lineHeight: 1.1, marginBottom: 16 }}>Turn long videos into platform-ready shorts with local media processing.</h1>
-              <p style={{ color: "var(--text-dim)", fontSize: 15, lineHeight: 1.6, marginBottom: 28 }}>URL downloads use the network. Transcription and rendering run on this machine. Codex receives only the message you send and any attached transcript text when remote reasoning is selected and consented; media and local app state are not sent.</p>
+              <p style={{ color: "var(--text-dim)", fontSize: 15, lineHeight: 1.6, marginBottom: 28 }}>URL downloads use the network. Transcription and rendering run on this machine. Remote reasoning is unavailable in Phase 0 and sends nothing.</p>
               <div className="row" style={{ gap: 12 }}><Btn variant="primary" size="lg" iconR="arrowR" onClick={() => setStep(1)}>Let&rsquo;s set up</Btn><Btn variant="ghost" size="lg" onClick={() => ctx.nav("home")}>Skip for now</Btn></div>
             </div>
           )}

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, act, waitFor } from "@testing-library/react";
+import { render, act } from "@testing-library/react";
 import type { EventsSnapshot } from "@spool/types";
 import type { EngineSettings } from "@spool/api-client";
 
@@ -241,26 +241,19 @@ describe("offline setting mutation", () => {
   });
 });
 
-describe("agent Phase 0 mutation replay fuse", () => {
-  it("does not turn a malicious confirm response into an approval card", async () => {
-    const agentCall = vi.fn().mockResolvedValueOnce({
-      reply: "", action: "confirm", jobs: [], tools: [],
-      question: "Allow delete_recipe?", options: ["Confirm", "Cancel"], kind: "confirm",
-      pending: { tool: "delete_recipe", args: { recipe_id: "r1" } },
-    });
-    client = {
-      getSettings: vi.fn().mockResolvedValue({ offline: false }),
-      agent: agentCall,
-    };
+describe("agent Phase 0 remote-reasoning fuse", () => {
+  it("fails locally without calling the Agent endpoint", async () => {
+    const agentCall = vi.fn();
+    client = { agent: agentCall };
     const ctx = mountCtx();
 
-    act(() => { ctx.get().askAgent("delete my recipe"); });
+    act(() => { ctx.get().askAgent("inspect my library"); });
 
-    await waitFor(() => expect(ctx.get().working).toBe(false));
-    expect(agentCall).toHaveBeenCalledTimes(1);
-    expect(agentCall.mock.calls[0]?.[1]).toEqual({ sourceId: undefined });
-    expect(agentCall.mock.calls[0]?.[1]).not.toHaveProperty("confirmTool");
-    expect(ctx.get().agentMessages.some((x) => x.confirmFor)).toBe(false);
+    expect(agentCall).not.toHaveBeenCalled();
+    expect(ctx.get().working).toBe(false);
+    expect(ctx.get().agentMessages.at(-1)?.text).toBe(
+      "Remote reasoning is unavailable in Phase 0 until a supported zero-tool transport ships. (remote_reasoning_unavailable)",
+    );
   });
 
   it("a stale confirmation card cannot trigger a second Agent turn", async () => {
@@ -286,54 +279,6 @@ describe("agent Phase 0 mutation replay fuse", () => {
     expect(ctx.get().agentMessages.some((x) =>
       x.text === "Agent changes are disabled until the Phase 4 approval and undo contract ships.",
     )).toBe(true);
-  });
-});
-
-describe("agent clarification admission", () => {
-  it("does not consume an old clarification while a newer agent request is running", async () => {
-    let release!: () => void;
-    const newerRequest = new Promise<{
-      reply: string;
-      action: string;
-      jobs: never[];
-      tools: never[];
-    }>((resolve) => {
-      release = () => resolve({ reply: "newer answer", action: "reply", jobs: [], tools: [] });
-    });
-    client = {
-      agent: vi
-        .fn()
-        .mockResolvedValueOnce({
-          reply: "I need one detail.",
-          action: "clarify",
-          jobs: [],
-          tools: [],
-          question: "Which source?",
-          options: ["Interview", "Keynote"],
-          kind: "enum",
-        })
-        .mockReturnValueOnce(newerRequest),
-    };
-    const ctx = mountCtx();
-
-    act(() => { ctx.get().askAgent("inspect a source"); });
-    await waitFor(() =>
-      expect(ctx.get().agentMessages.some((message) => message.role === "elicit")).toBe(true),
-    );
-    const clarification = ctx.get().agentMessages.find((message) => message.role === "elicit")!;
-
-    act(() => {
-      ctx.get().askAgent("inspect the queue instead");
-      ctx.get().answerElicit(clarification, "Keynote");
-    });
-
-    expect(client.agent).toHaveBeenCalledTimes(2);
-    expect(ctx.get().agentMessages.find((message) => message.id === clarification.id)?.answered).not.toBe(true);
-
-    await act(async () => {
-      release();
-      await newerRequest;
-    });
   });
 });
 

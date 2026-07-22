@@ -9,10 +9,9 @@ import { formatActionError } from "@/lib/action-error";
 
 /* The demo's `useSpool()` context, backed by the LIVE engine instead of mock data.
  * Maps the SSE snapshot into the demo's source/clip/job shapes so the ported demo
- * components render unchanged. `nav` drives Next routes; the agent loop calls the real
- * `/agent` endpoint and elicitation = the agent's `clarify` turn; "make clips" runs real
- * render pipelines. Per-source data (candidates, transcript) is mapped on demand by the
- * detail pages. Zero mock data (spec §6.2). */
+ * components render unchanged. `nav` drives Next routes; remote reasoning fails closed in
+ * Phase 0; "make clips" runs real local render pipelines. Per-source data (candidates,
+ * transcript) is mapped on demand by the detail pages. Zero mock data (spec §6.2). */
 
 export interface SpoolSource {
   id: string; title: string; src: string; dur: number; status: string;
@@ -85,8 +84,20 @@ export interface AgentMessage {
 }
 
 export const INITIAL_AGENT: AgentMessage[] = [
-  { role: "agent", text: "Hi — I'm your text-only clip assistant. I can answer from the message you send here. I can't inspect your library, queues, watches, models, storage, files, transcripts, or other local app state." },
+  { role: "agent", text: "Remote reasoning is unavailable in Phase 0. Local import, transcription, editing, and rendering remain available." },
 ];
+
+const REMOTE_REASONING_UNAVAILABLE =
+  "Remote reasoning is unavailable in Phase 0 until a supported zero-tool transport ships.";
+
+/** Treat old persisted/server records as unsupported input, never as an effective capability. */
+function effectivePhase0Settings(value: EngineSettings): EngineSettings {
+  return {
+    ...value,
+    reasoning_provider: "none",
+    reasoning_egress_consent: false,
+  };
+}
 
 function originOf(url: string | null | undefined): string | undefined {
   if (!url) return undefined;
@@ -367,7 +378,7 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [agentMessages, setAgentMessages] = useState<AgentMessage[]>(INITIAL_AGENT);
-  const [working, setWorking] = useState(false);
+  const working = false;
   // One confirmed settings record owns every privacy projection. Until GET /settings succeeds,
   // the context is intentionally fail-closed: callers see no provider/consent and Offline=true.
   const settingsQ = useEngineQuery((c) => c.getSettings());
@@ -390,15 +401,16 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
       || settingsDataGeneration <= ignoreSettingsQueriesThrough.current
       || settingsRef.current === settingsQ.data
     ) return;
-    settingsRef.current = settingsQ.data;
-    setSettings(settingsQ.data);
+    const effective = effectivePhase0Settings(settingsQ.data);
+    settingsRef.current = effective;
+    setSettings(effective);
   }, [settingsDataGeneration, settingsQ.data]);
 
   const settingsReady = settings !== null;
   const settingsLoading = !settingsReady && settingsQ.loading;
   const settingsError = !settingsReady ? settingsQ.error ?? null : null;
-  const reasoningProvider = settings?.reasoning_provider ?? null;
-  const reasoningEgressConsent = settings?.reasoning_egress_consent ?? false;
+  const reasoningProvider = settings ? "none" : null;
+  const reasoningEgressConsent = false;
   const offline = settings?.offline ?? true;
   const [settingsPendingCount, setSettingsPendingCount] = useState(0);
   const settingsPending = settingsPendingCount > 0;
@@ -415,9 +427,6 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
     providerMounted.current = true;
     return () => { providerMounted.current = false; };
   }, []);
-  const elicitSeq = useRef(0); // monotonic, collision-free ids for elicitation cards
-  const agentInFlight = useRef(false);
-
   const pushToast = useCallback((t: Omit<Toast, "id">) => {
     const id = Date.now() + Math.random();
     setToasts((ts) => [...ts, { ...t, id }]);
@@ -446,19 +455,30 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
 
     void request.then(
       (next) => {
+        const effective = effectivePhase0Settings(next);
         ignoreSettingsQueriesThrough.current = Math.max(
           ignoreSettingsQueriesThrough.current,
           settingsRequestGenerationReaderRef.current(),
         );
-        settingsRef.current = next;
-        if (providerMounted.current) setSettings(next);
-        finish(() => task.resolve(next));
+        settingsRef.current = effective;
+        if (providerMounted.current) setSettings(effective);
+        finish(() => task.resolve(effective));
       },
       (error: unknown) => finish(() => task.reject(error)),
     );
   }, [client]);
 
   const updateSettings = useCallback((patch: Partial<EngineSettings>): Promise<EngineSettings> => {
+    if (
+      (patch.reasoning_provider !== undefined && patch.reasoning_provider !== "none")
+      || patch.reasoning_egress_consent === true
+    ) {
+      return Promise.reject(new SpoolApiError(
+        409,
+        "remote_reasoning_unavailable",
+        REMOTE_REASONING_UNAVAILABLE,
+      ));
+    }
     if (!settingsRef.current) {
       return Promise.reject(new SpoolApiError(
         409,
@@ -506,32 +526,22 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   const push = useCallback((m: AgentMessage) => setAgentMessages((a) => [...a, m]), []);
 
   const askAgent = useCallback((text: string, sourceId?: string) => {
-    if (!text.trim() || agentInFlight.current) return;
-    agentInFlight.current = true;
+    if (!text.trim()) return;
     setAgentOpen(true);
     push({ role: "user", text });
-    setWorking(true);
-    client
-      .agent(text, { sourceId })
-      .then((r) => {
-        // Real per-step tool trace from the ReAct loop (read tools that start no job are visible too).
-        if (r.tools?.length)
-          push({ role: "trace", tools: r.tools.map((t) => ({ name: t.name, arg: t.arg ?? "", ms: t.ms ?? 0 })) });
-        push({ role: "agent", text: r.reply });
-        if (r.action === "clarify" && r.question)
-          push({ role: "elicit", id: "e" + ++elicitSeq.current, kind: (r.kind as AgentMessage["kind"]) ?? "enum", tag: "agent needs you", q: r.question, options: r.options ?? [], sourceId });
-      })
-      .catch((error: unknown) => {
-        push({ role: "agent", text: formatActionError(error) });
-      })
-      .finally(() => {
-        agentInFlight.current = false;
-        setWorking(false);
-      });
-  }, [client, push]);
+    push({
+      role: "agent",
+      text: formatActionError(new SpoolApiError(
+        409,
+        "remote_reasoning_unavailable",
+        REMOTE_REASONING_UNAVAILABLE,
+      )),
+    });
+    void sourceId;
+  }, [push]);
 
   const answerElicit = useCallback((msg: AgentMessage, answer: unknown) => {
-    if (agentInFlight.current || msg.answered) return;
+    if (msg.answered) return;
     setAgentMessages((a) => a.map((m) => (m === msg || (msg.id && m.id === msg.id) ? { ...m, answered: true, answer } : m)));
     if (msg.confirmFor) {
       push({

@@ -1,18 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useMemo, useRef, useState } from "react";
 import type { Recipe } from "@spool/api-client";
 import { useSpool, ENGINE_DEFAULT_WEIGHTS } from "@/components/spool/context";
 import { useEngineQuery } from "@/lib/engine-context";
 import { describeActionError } from "@/lib/action-error";
 import { Btn, Icon } from "@spool/ui";
 
-/* Recipes (Phase 3) — a saved end-to-end pipeline: the reusable decisions (content mode + count,
- * optional ranking weights, and the render settings) that drive render.pipeline. Persisted via the
- * engine's /recipes store; "Run on a project" applies the recipe end-to-end (find → rank → top-N →
- * render pipeline per moment) → ranked clips in the review queue. The unattended drop-a-video→
- * auto-clips→review flow is the watch-folder step. Zero dummy — every control calls the real engine. */
+/* Recipes keep reusable pipeline configuration editable in Phase 0. Running a recipe depends on
+ * remote moment reasoning, so its project selector and Run action remain visibly unavailable. */
 
 const CONTENT_MODES = ["funny", "insightful", "hot-take", "story", "how-to", "q&a"];
 const ASPECTS = ["9:16", "16:9", "1:1", "4:5"];
@@ -60,7 +56,6 @@ function Chips({ options, value, onPick }: { options: string[]; value: string; o
 
 export default function RecipesScreen() {
   const ctx = useSpool();
-  const router = useRouter();
   const recipesQ = useEngineQuery((c) => c.listRecipes(), []);
   const kitsQ = useEngineQuery((c) => c.listBrandKits(), []);
   const recipes = useMemo(() => recipesQ.data?.recipes ?? [], [recipesQ.data]);
@@ -69,15 +64,8 @@ export default function RecipesScreen() {
   const [sel, setSel] = useState<string | null>(null);   // null = new (unsaved) recipe
   const [f, setF] = useState<Form>(EMPTY);
   const [synced, setSynced] = useState(false);
-  const [runSrc, setRunSrc] = useState("");
   const [saving, setSaving] = useState(false);
-  const [running, setRunning] = useState(false);
-  const operationRef = useRef<"save" | "delete" | "run" | null>(null);
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; };
-  }, []);
+  const operationRef = useRef<"save" | "delete" | null>(null);
 
   // Load the first recipe into the editor once it arrives (set-state-during-render sync, once).
   if (!synced && sel === null && recipes[0]) { setSel(recipes[0].id); setF(toForm(recipes[0])); setSynced(true); }
@@ -124,52 +112,20 @@ export default function RecipesScreen() {
     }
   };
 
-  // Run a recipe on a project: apply it END-TO-END — find → glass-box rank → top-N → a render
-  // pipeline per moment with the recipe's aspect/reframe/caption/brand-kit/platform → the review
-  // queue (the same /produce the watch's "Scan now" runs). A saved recipe runs by id (provenance);
-  // an unsaved draft runs inline so all its settings still ride along.
-  // A saved recipe runs by id, so the toast + sidebar copy must describe the SAVED recipe — not the
-  // unsaved editor form, which may have drifted from what's actually being produced. An unsaved
-  // draft runs inline, so it's the form that rides along.
-  const ranSel = sel ? recipes.find((r) => r.id === sel) : null;
-  const runName = ranSel?.name ?? f.name, runCount = ranSel?.count ?? f.count, runMode = ranSel?.content_mode ?? f.content_mode;
-
-  const run = async () => {
-    if (!runSrc || operationRef.current) return;
-    const startedAtLocation = window.location.href;
-    operationRef.current = "run";
-    setRunning(true);
-    try {
-      const body = sel ? { recipe_id: sel } : toRecipe(f);
-      await ctx.client.produce(runSrc, body);
-      if (!mounted.current || window.location.href !== startedAtLocation) return;
-      ctx.pushToast({ icon: "wand", tone: "info", title: `Running “${runName || "recipe"}”`, body: `Producing ${runCount} ranked ${runMode} clips — they'll land in the review queue.` });
-      router.push("/queue");
-    } catch (error) {
-      if (mounted.current && window.location.href === startedAtLocation) {
-        const failure = describeActionError(error);
-        ctx.pushToast({ icon: "alert", tone: "warn", title: "Couldn't run the recipe", body: `${failure.code}: ${failure.message}` });
-      }
-    } finally {
-      if (operationRef.current === "run") operationRef.current = null;
-      if (mounted.current) setRunning(false);
-    }
-  };
-
   return (
     <div className="mainpad fadein" style={{ maxWidth: 1240 }}>
       <div className="row" style={{ marginBottom: 18 }}>
         <div><div className="eyebrow" style={{ marginBottom: 6 }}>Recipes</div><h1 style={{ fontSize: 28 }}>A saved pipeline</h1></div>
         <span className="spacer" />
-        <Btn variant="ghost" icon="plus" onClick={newRecipe} disabled={saving || running}>New recipe</Btn>
+        <Btn variant="ghost" icon="plus" onClick={newRecipe} disabled={saving}>New recipe</Btn>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "240px 1fr 300px", gap: 20, alignItems: "start" }}>
         {/* recipe list */}
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {recipes.length === 0 && <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.6 }}>No recipes yet — set a content mode, aspect, caption look and platform, then Save. Run it on any project to produce ranked clips.</div>}
+          {recipes.length === 0 && <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.6 }}>No recipes yet — set a content mode, aspect, caption look and platform, then Save. Running recipes is unavailable in Phase 0.</div>}
           {recipes.map((r) => (
-            <button type="button" key={r.id} className="card" aria-pressed={sel === r.id} disabled={saving || running} onClick={() => selectRecipe(r)} style={{ padding: 13, cursor: saving || running ? "not-allowed" : "pointer", borderColor: sel === r.id ? "var(--accent)" : "var(--line)", opacity: (saving || running) && sel !== r.id ? 0.65 : 1, width: "100%", textAlign: "left", color: "inherit", fontFamily: "inherit" }}>
+            <button type="button" key={r.id} className="card" aria-pressed={sel === r.id} disabled={saving} onClick={() => selectRecipe(r)} style={{ padding: 13, cursor: saving ? "not-allowed" : "pointer", borderColor: sel === r.id ? "var(--accent)" : "var(--line)", opacity: saving && sel !== r.id ? 0.65 : 1, width: "100%", textAlign: "left", color: "inherit", fontFamily: "inherit" }}>
               <div style={{ fontWeight: 600, fontSize: 13.5, marginBottom: 5 }}>{r.name}</div>
               <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", textTransform: "capitalize" }}>{summary(r)}</div>
             </button>
@@ -182,8 +138,8 @@ export default function RecipesScreen() {
             <input value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="Recipe name"
               style={{ font: "inherit", fontSize: 17, fontWeight: 600, background: "transparent", border: 0, borderBottom: "1px solid var(--line)", color: "var(--text)", outline: "none", padding: "2px 0", flex: 1 }} />
             <span className="spacer" />
-            {sel && <button className="btn subtle sm" disabled={saving || running} style={{ color: "var(--err, #e5484d)" }} onClick={del} title="Delete recipe"><Icon name="trash" size={14} /></button>}
-            <Btn variant="primary" icon="check" onClick={save} disabled={saving || running}>{sel ? "Save" : "Create"}</Btn>
+            {sel && <button className="btn subtle sm" disabled={saving} style={{ color: "var(--err, #e5484d)" }} onClick={del} title="Delete recipe"><Icon name="trash" size={14} /></button>}
+            <Btn variant="primary" icon="check" onClick={save} disabled={saving}>{sel ? "Save" : "Create"}</Btn>
           </div>
 
           <div className="row" style={{ gap: 28, flexWrap: "wrap" }}>
@@ -236,12 +192,12 @@ export default function RecipesScreen() {
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <div className="card" style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
             <div className="eyebrow">Run on a project</div>
-            <select value={runSrc} onChange={(e) => setRunSrc(e.target.value)} style={{ font: "inherit", fontSize: 13, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line-str)", background: "var(--bg-1)", color: "var(--text)" }}>
+            <select value="" disabled aria-describedby="recipe-run-status" style={{ font: "inherit", fontSize: 13, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line-str)", background: "var(--bg-1)", color: "var(--text)" }}>
               <option value="">Choose a project…</option>
               {ctx.sources.filter((s) => s.status !== "transcribing").map((s) => <option key={s.id} value={s.id}>{s.title}</option>)}
             </select>
-            <Btn variant="primary" icon="wand" onClick={run} disabled={!runSrc || running || saving}>{running ? "Starting…" : "Run recipe"}</Btn>
-            <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", lineHeight: 1.6 }}>Produces {runCount} ranked {runMode} clips end-to-end with this recipe&apos;s reframe, captions and platform — they land in the review queue. Unattended drop-a-video→review is the watch-folder step.</div>
+            <Btn variant="primary" icon="wand" disabled aria-describedby="recipe-run-status">Run recipe</Btn>
+            <div id="recipe-run-status" className="mono" style={{ fontSize: 11, color: "var(--warn)", lineHeight: 1.6 }}>Remote recipe runs are unavailable in Phase 0. You can save configuration now and cut clips manually from a transcript.</div>
           </div>
         </div>
       </div>

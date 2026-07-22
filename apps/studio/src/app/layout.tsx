@@ -5,7 +5,7 @@ import { Providers } from "./providers";
 export const metadata: Metadata = {
   title: "Spool",
   description:
-    "Local-first clip studio for platform-ready vertical clips, with optional consented Codex reasoning.",
+    "Local-first clip studio for platform-ready vertical clips with on-device transcription and rendering.",
 };
 
 export default function RootLayout({

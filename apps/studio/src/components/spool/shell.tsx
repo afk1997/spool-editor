@@ -107,9 +107,7 @@ function TopBar() {
       : "Privacy status unavailable"
     : ctx.offline
       ? "Offline"
-      : ctx.reasoningProvider === "codex" && ctx.reasoningEgressConsent
-        ? "Remote reasoning enabled"
-        : "Fully local";
+      : "Fully local";
   return (
     <div className="topbar">
       <div className="row" style={{ gap: 9, paddingRight: 8 }}>
@@ -128,7 +126,7 @@ function TopBar() {
       <button className="iconbtn" aria-label="Settings" onClick={() => ctx.nav("settings")}><Icon name="settings" size={17} /></button>
       <button className="iconbtn" aria-label="Keyboard shortcuts" onClick={ctx.openShortcuts}><Icon name="help" size={17} /></button>
       <div className="divider" style={{ width: 1, height: 22, background: "var(--line)", margin: "0 2px" }} />
-      <button className="iconbtn" aria-label="Toggle agent panel" onClick={ctx.toggleAgent} title="Toggle agent" style={{ color: ctx.agentOpen ? "var(--accent)" : "var(--text-dim)" }}><Icon name="sparkles" size={18} /></button>
+      <button className="iconbtn" aria-label="Remote reasoning unavailable" onClick={ctx.toggleAgent} title="Remote reasoning unavailable in Phase 0" style={{ color: ctx.agentOpen ? "var(--accent)" : "var(--text-dim)" }}><Icon name="sparkles" size={18} /></button>
     </div>
   );
 }

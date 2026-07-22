@@ -154,16 +154,6 @@ export default function SettingsScreen() {
     ? storageQ.data.download_dir
     : null;
   const sections: [string, string][] = [["General", "settings"], ["Models", "cpu"], ["Hardware", "drive"], ["Integrations", "link"], ["MCP server", "terminal"], ["Privacy", "shield"], ["Storage", "folder"], ["About", "help"]];
-  const providerName = !ctx.settingsReady ? "not loaded" : s?.reasoning_provider === "codex" ? "Codex" : "None";
-  const egressState = !ctx.settingsReady
-    ? "settings unavailable"
-    : s?.offline
-      ? "blocked by Offline"
-      : s?.reasoning_provider !== "codex"
-        ? "disabled"
-        : s.reasoning_egress_consent
-          ? "consented"
-          : "consent required";
   const privacyReadiness = ctx.settingsReady
     ? null
     : ctx.settingsLoading
@@ -201,8 +191,8 @@ export default function SettingsScreen() {
                 <Row l="Engine" r={mono(`whisper.cpp ${ver("whisper_cpp")} · on-device`)} />
               </SettingCard>
               <SettingCard title="Moment-finding LLM">
-                <Row l="Provider" r={mono(providerName)} sub="Choose the remote reasoning provider in Privacy. None disables moment-finding reasoning." />
-                <Row l="Codex text egress" r={mono(egressState, egressState === "consented" ? "var(--warn)" : "var(--text-dim)")} sub="Codex remote reasoning sends your message and any attached transcript text only after explicit consent; media files and local app state are not sent." />
+                <Row l="Provider" r={mono("None")} sub="Remote moment-finding is unavailable in Phase 0." />
+                <Row l="Remote reasoning" r={mono("Unavailable", "var(--warn)")} sub="Spool has no supported zero-tool, zero-machine-context remote transport yet." />
               </SettingCard>
             </div>
           )}
@@ -244,47 +234,21 @@ export default function SettingsScreen() {
                 <Row
                   l="Offline mode"
                   r={<Switch label="Offline mode" on={!!s?.offline} disabled={settingDisabled("offline")} onClick={() => save({ offline: !s?.offline })} />}
-                  sub="Blocks all non-loopback network access, including URL downloads, remote models, watches, and Codex. Local media work remains available." />
+                  sub="Blocks all non-loopback network access, including URL downloads, remote models, and watches. Local media work remains available." />
                 <Row
                   l="Reasoning provider"
-                  r={<Seg
-                    value={s?.reasoning_provider ?? "none"}
-                    disabled={settingDisabled("reasoning_provider", "reasoning_egress_consent")}
-                    onChange={(provider) => {
-                      if (provider === "none" || provider === "codex") save({ reasoning_provider: provider });
-                    }}
-                    options={[{ value: "none", label: "None" }, { value: "codex", label: "Codex" }]}
-                  />}
-                  sub="None disables moment-finding reasoning. Codex is remote and requires explicit consent." />
+                  r={mono("None")}
+                  sub="Phase 0 exposes no remote provider." />
                 <Row
-                  l="Codex Agent access"
-                  r={mono("message + transcript only", "var(--warn)")}
-                  sub="Codex cannot inspect your library, queues, watches, models, storage, files, or other local app state, and it cannot run local Agent tools." />
-                {s?.reasoning_provider === "codex" && (
-                  <Row
-                    l="Codex text consent"
-                    r={<Switch
-                      label="Allow your message and any attached transcript text to leave this machine for Codex"
-                      on={s.reasoning_egress_consent}
-                      disabled={settingDisabled("reasoning_provider", "reasoning_egress_consent")}
-                      onClick={() => save({ reasoning_egress_consent: !s.reasoning_egress_consent })}
-                    />}
-                    sub="When enabled, the text you send and any attached transcript text are sent to Codex for remote reasoning. Media files and local app state are not sent." />
-                )}
+                  l="Remote reasoning"
+                  r={mono("Unavailable in Phase 0", "var(--warn)")}
+                  sub="Remote reasoning stays disabled until Spool has a supported transport that sends no local tools or machine context." />
               </SettingCard>
               <SettingCard title="What leaves your machine">
                 <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.9 }}>
                   <div>URL import → the site you paste · <span style={{ color: "var(--warn)" }}>network download (you start it)</span></div>
                   <div>whisper · <span style={{ color: "var(--ok)" }}>on-device</span></div>
-                  <div>remote reasoning · {ctx.settingsReady
-                    ? s?.offline
-                      ? <span style={{ color: "var(--warn)" }}>blocked by Offline · no current egress</span>
-                      : s?.reasoning_provider === "codex" && s.reasoning_egress_consent
-                        ? <span style={{ color: "var(--warn)" }}>your message + attached transcript text → Codex (consented)</span>
-                        : s?.reasoning_provider === "codex"
-                          ? "Codex selected · message and transcript egress blocked until consent"
-                          : "disabled"
-                    : "settings unavailable"}</div>
+                  <div>remote reasoning · <span style={{ color: "var(--warn)" }}>unavailable · no egress</span></div>
                 </div>
               </SettingCard>
             </div>

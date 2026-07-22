@@ -98,7 +98,7 @@ async function renderPrivacySettings(initial: EngineSettings) {
   settingsQuery = { data: initial, loading: false, reload: vi.fn() };
   const view = renderWithProvider(<SettingsScreen />);
   fireEvent.click(screen.getByRole("button", { name: "Privacy" }));
-  await waitFor(() => expect(screen.getByRole("button", { name: "None" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByText("Unavailable in Phase 0", { exact: true })).toBeInTheDocument());
   return view;
 }
 
@@ -127,9 +127,13 @@ describe("authoritative privacy settings", () => {
     ctx.rerender();
 
     await waitFor(() => expect(ctx.get().settingsReady).toBe(true));
-    expect(ctx.get().settings).toEqual(loaded);
-    expect(ctx.get().reasoningProvider).toBe("codex");
-    expect(ctx.get().reasoningEgressConsent).toBe(true);
+    expect(ctx.get().settings).toEqual({
+      ...loaded,
+      reasoning_provider: "none",
+      reasoning_egress_consent: false,
+    });
+    expect(ctx.get().reasoningProvider).toBe("none");
+    expect(ctx.get().reasoningEgressConsent).toBe(false);
     expect(ctx.get().offline).toBe(false);
   });
 
@@ -150,14 +154,12 @@ describe("authoritative privacy settings", () => {
     const initial = engineSettings();
     const canonical = engineSettings({
       offline: true,
-      reasoning_provider: "codex",
-      reasoning_egress_consent: true,
+      fast_default: false,
     });
     const stale = engineSettings({ offline: false });
     const refreshed = engineSettings({
       offline: false,
-      reasoning_provider: "codex",
-      reasoning_egress_consent: false,
+      default_preset: "reels",
     });
     let startedGeneration = 1;
     const getRequestGeneration = () => startedGeneration;
@@ -228,19 +230,35 @@ describe("authoritative privacy settings", () => {
     await waitFor(() => expect(ctx.get().settingsReady).toBe(true));
 
     await act(async () => {
-      await expect(ctx.get().updateSettings({ reasoning_provider: "codex" })).rejects.toBe(failed);
+      await expect(ctx.get().updateSettings({ fast_default: false })).rejects.toBe(failed);
     });
 
     expect(ctx.get().settings).toEqual(initial);
     expect(ctx.get().settingsPending).toBe(false);
   });
 
+  it.each([
+    { reasoning_provider: "codex" as const },
+    { reasoning_provider: "CoDeX" as unknown as ReasoningProvider },
+    { reasoning_egress_consent: true },
+  ])("rejects unsupported remote settings locally without issuing PATCH: $reasoning_provider$reasoning_egress_consent", async (patch) => {
+    settingsQuery = { data: engineSettings(), loading: false, reload: vi.fn() };
+    const ctx = mountContext();
+    await waitFor(() => expect(ctx.get().settingsReady).toBe(true));
+
+    await expect(ctx.get().updateSettings(patch)).rejects.toMatchObject({
+      status: 409,
+      code: "remote_reasoning_unavailable",
+    });
+    expect(client.updateSettings).not.toHaveBeenCalled();
+  });
+
   it("serializes settings writes and publishes only confirmed responses", async () => {
     const initial = engineSettings();
-    const firstResponse = engineSettings({ reasoning_provider: "codex" });
+    const firstResponse = engineSettings({ fast_default: false });
     const secondResponse = engineSettings({
-      reasoning_provider: "codex",
-      reasoning_egress_consent: true,
+      fast_default: false,
+      default_preset: "reels",
     });
     const first = deferred<EngineSettings>();
     const second = deferred<EngineSettings>();
@@ -252,8 +270,8 @@ describe("authoritative privacy settings", () => {
     let one!: Promise<EngineSettings>;
     let two!: Promise<EngineSettings>;
     act(() => {
-      one = ctx.get().updateSettings({ reasoning_provider: "codex" });
-      two = ctx.get().updateSettings({ reasoning_egress_consent: true });
+      one = ctx.get().updateSettings({ fast_default: false });
+      two = ctx.get().updateSettings({ default_preset: "reels" });
     });
     expect(client.updateSettings).toHaveBeenCalledTimes(1);
     expect(ctx.get().settings).toEqual(initial);
@@ -301,17 +319,14 @@ describe("authoritative privacy settings", () => {
 });
 
 describe("privacy settings UI", () => {
-  it("keeps privacy controls disabled until authoritative settings are ready", () => {
+  it("keeps Offline disabled until settings load and never renders a remote selector or consent action", () => {
     renderWithProvider(<SettingsScreen />);
     fireEvent.click(screen.getByRole("button", { name: "Privacy" }));
 
-    const none = screen.queryByRole("button", { name: "None" });
-    const codex = screen.queryByRole("button", { name: "Codex" });
-    expect(none).not.toBeNull();
-    expect(codex).not.toBeNull();
-    expect(none).toBeDisabled();
-    expect(codex).toBeDisabled();
     expect(screen.getByRole("switch", { name: "Offline mode" })).toBeDisabled();
+    expect(screen.getByText("None", { exact: true })).toBeInTheDocument();
+    expect(screen.getByText("Unavailable in Phase 0", { exact: true })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Codex" })).not.toBeInTheDocument();
     expect(
       screen.queryByRole("switch", {
         name: /Allow your message and any attached transcript text to leave/i,
@@ -319,123 +334,21 @@ describe("privacy settings UI", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows consent only after the canonical provider becomes Codex", async () => {
-    const write = deferred<EngineSettings>();
-    const initial = engineSettings();
-    const canonical = engineSettings({ reasoning_provider: "codex" });
-    client.updateSettings.mockReturnValue(write.promise);
-    await renderPrivacySettings(initial);
+  it("stays fail-closed when an old engine record still contains Codex and consent", async () => {
+    await renderPrivacySettings(engineSettings({
+      reasoning_provider: "codex",
+      reasoning_egress_consent: true,
+    }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
-
-    expect(client.updateSettings).toHaveBeenCalledWith({ reasoning_provider: "codex" });
-    expect(screen.getByRole("button", { name: "None" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: "Codex" })).toBeDisabled();
+    expect(screen.getByText("None", { exact: true })).toBeInTheDocument();
+    expect(screen.getByText("Unavailable in Phase 0", { exact: true })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Codex" })).not.toBeInTheDocument();
     expect(
       screen.queryByRole("switch", {
         name: /Allow your message and any attached transcript text to leave/i,
       }),
     ).not.toBeInTheDocument();
-
-    await act(async () => {
-      write.resolve(canonical);
-      await write.promise;
-    });
-
-    expect(screen.getByRole("button", { name: "Codex" })).toHaveAttribute("aria-pressed", "true");
-    expect(
-      screen.getByRole("switch", {
-        name: /Allow your message and any attached transcript text to leave/i,
-      }),
-    ).not.toBeChecked();
-    expect(
-      screen.getByText(/the text you send and any attached transcript text are sent to Codex/i),
-    ).toBeInTheDocument();
-  });
-
-  it("publishes consent only from the canonical PATCH response", async () => {
-    const write = deferred<EngineSettings>();
-    const initial = engineSettings({ reasoning_provider: "codex" });
-    const canonical = engineSettings({
-      reasoning_provider: "codex",
-      reasoning_egress_consent: true,
-    });
-    client.updateSettings.mockReturnValue(write.promise);
-    await renderPrivacySettings(initial);
-    const consent = screen.getByRole("switch", {
-      name: /Allow your message and any attached transcript text to leave/i,
-    });
-
-    fireEvent.click(consent);
-
-    expect(client.updateSettings).toHaveBeenCalledWith({ reasoning_egress_consent: true });
-    expect(consent).not.toBeChecked();
-    expect(consent).toBeDisabled();
-
-    await act(async () => {
-      write.resolve(canonical);
-      await write.promise;
-    });
-    expect(
-      screen.getByRole("switch", {
-        name: /Allow your message and any attached transcript text to leave/i,
-      }),
-    ).toBeChecked();
-  });
-
-  it("uses the provider PATCH response to reset and hide consent", async () => {
-    const write = deferred<EngineSettings>();
-    const initial = engineSettings({
-      reasoning_provider: "codex",
-      reasoning_egress_consent: true,
-    });
-    const canonical = engineSettings({
-      reasoning_provider: "none",
-      reasoning_egress_consent: false,
-    });
-    client.updateSettings.mockReturnValue(write.promise);
-    await renderPrivacySettings(initial);
-
-    fireEvent.click(screen.getByRole("button", { name: "None" }));
-    expect(screen.getByRole("button", { name: "Codex" })).toHaveAttribute("aria-pressed", "true");
-    expect(
-      screen.getByRole("switch", {
-        name: /Allow your message and any attached transcript text to leave/i,
-      }),
-    ).toBeChecked();
-
-    await act(async () => {
-      write.resolve(canonical);
-      await write.promise;
-    });
-    expect(screen.getByRole("button", { name: "None" })).toHaveAttribute("aria-pressed", "true");
-    expect(
-      screen.queryByRole("switch", {
-        name: /Allow your message and any attached transcript text to leave/i,
-      }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("keeps confirmed provider and consent controls when persistence fails", async () => {
-    const initial = engineSettings({
-      reasoning_provider: "codex",
-      reasoning_egress_consent: true,
-    });
-    client.updateSettings.mockRejectedValue(new SpoolApiError(500, "settings_persist_failed"));
-    await renderPrivacySettings(initial);
-
-    fireEvent.click(screen.getByRole("button", { name: "None" }));
-
-    await waitFor(() =>
-      expect(screen.getByRole("alert")).toHaveTextContent(/confirmed settings were kept/i),
-    );
-    expect(screen.getByRole("button", { name: "Codex" })).toHaveAttribute("aria-pressed", "true");
-    expect(
-      screen.getByRole("switch", {
-        name: /Allow your message and any attached transcript text to leave/i,
-      }),
-    ).toBeChecked();
-    expect(screen.getByRole("button", { name: "None" })).toBeEnabled();
+    expect(client.updateSettings).not.toHaveBeenCalled();
   });
 });
 
@@ -447,7 +360,7 @@ describe("canonical privacy status label", () => {
     },
     {
       settings: engineSettings({ reasoning_provider: "codex", reasoning_egress_consent: true }),
-      label: "Remote reasoning enabled",
+      label: "Fully local",
     },
     {
       settings: engineSettings(),
@@ -494,41 +407,37 @@ describe("canonical privacy status label", () => {
 });
 
 describe("truthful privacy copy", () => {
-  it("states that provider None disables reasoning while limiting Codex to message and transcript text", async () => {
+  it("states that Phase 0 has no remote reasoning transport or egress", async () => {
     settingsQuery = { data: engineSettings(), loading: false, reload: vi.fn() };
     renderWithProvider(<SettingsScreen />);
 
     await waitFor(() =>
       expect(
         screen.getByText(
-          "Choose the remote reasoning provider in Privacy. None disables moment-finding reasoning.",
+          "Remote moment-finding is unavailable in Phase 0.",
           { exact: true },
         ),
       ).toBeInTheDocument(),
     );
     expect(
       screen.getByText(
-        "Codex remote reasoning sends your message and any attached transcript text only after explicit consent; media files and local app state are not sent.",
+        "Spool has no supported zero-tool, zero-machine-context remote transport yet.",
         { exact: true },
       ),
     ).toBeInTheDocument();
-    expect(
-      screen.queryByText(/None keeps transcript reasoning on this machine/i),
-    ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Privacy" }));
     expect(
       screen.getByText(
-        "None disables moment-finding reasoning. Codex is remote and requires explicit consent.",
+        "Remote reasoning stays disabled until Spool has a supported transport that sends no local tools or machine context.",
         { exact: true },
       ),
     ).toBeInTheDocument();
-    expect(
-      screen.queryByText(/None keeps transcript reasoning on this machine/i),
-    ).not.toBeInTheDocument();
+    expect(screen.getByText("unavailable · no egress", { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText(/Codex/i)).not.toBeInTheDocument();
   });
 
-  it("discloses network downloads and consented Codex message and transcript egress during onboarding", async () => {
+  it("discloses network downloads and unavailable remote reasoning during onboarding", async () => {
     settingsQuery = {
       data: engineSettings({ reasoning_provider: "codex", reasoning_egress_consent: true }),
       loading: false,
@@ -539,21 +448,21 @@ describe("truthful privacy copy", () => {
     expect(screen.getByText(/URL downloads use the network/i)).toBeInTheDocument();
     expect(
       screen.getByText(
-        /Codex receives only the message you send and any attached transcript text when remote reasoning is selected and consented/i,
+        /Remote reasoning is unavailable in Phase 0 and sends nothing/i,
       ),
     ).toBeInTheDocument();
-    expect(screen.getByText(/media and local app state are not sent/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Codex/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/Everything runs on your machine/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/entirely on your machine/i)).not.toBeInTheDocument();
   });
 
   it("keeps the product metadata local-first without claiming every operation stays local", () => {
     expect(metadata.description).toBe(
-      "Local-first clip studio for platform-ready vertical clips, with optional consented Codex reasoning.",
+      "Local-first clip studio for platform-ready vertical clips with on-device transcription and rendering.",
     );
   });
 
-  it("gives Offline precedence over configured Codex consent in Settings and onboarding", async () => {
+  it("keeps remote reasoning unavailable even when an old record contains Codex consent", async () => {
     const offlineCodex = engineSettings({
       offline: true,
       reasoning_provider: "codex",
@@ -562,13 +471,10 @@ describe("truthful privacy copy", () => {
     const settingsView = await renderPrivacySettings(offlineCodex);
 
     expect(
-      screen.getByText("blocked by Offline · no current egress", { exact: true }),
+      screen.getByText("unavailable · no egress", { exact: true }),
     ).toBeInTheDocument();
-    expect(
-      screen.queryByText(/your message \+ attached transcript text → Codex \(consented\)/i),
-    ).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Models" }));
-    expect(screen.getByText("blocked by Offline", { exact: true })).toBeInTheDocument();
+    expect(screen.getByText("Unavailable", { exact: true })).toBeInTheDocument();
     settingsView.unmount();
 
     settingsQuery = { data: offlineCodex, loading: false, reload: vi.fn() };
@@ -577,14 +483,11 @@ describe("truthful privacy copy", () => {
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 
     expect(
-      screen.getByText("Codex configured with consent · no current message or transcript egress", {
+      screen.getByText("Remote reasoning unavailable in Phase 0 · no egress", {
         exact: true,
       }),
     ).toBeInTheDocument();
-    expect(screen.getByText("blocked by Offline", { exact: true })).toBeInTheDocument();
-    expect(
-      screen.queryByText(/your message \+ attached transcript text leave with consent/i),
-    ).not.toBeInTheDocument();
+    expect(screen.getByText("unavailable", { exact: true })).toBeInTheDocument();
     expect(screen.queryByText("enabled", { exact: true })).not.toBeInTheDocument();
   });
 });
@@ -593,12 +496,8 @@ describe("privacy action error copy", () => {
   const cases = {
     offline_network_disabled: "Turn off Offline mode before using this network action.",
     network_work_active: "Wait for active network work to finish before turning on Offline mode.",
-    reasoning_provider_required: "Select Codex as the reasoning provider before using this action.",
-    egress_consent_required:
-      "Allow your message and any attached transcript text to be sent to Codex before using remote reasoning.",
-    remote_agent_tools_disabled:
-      "Remote Agent tools are disabled. Codex receives only your message and attached transcript text; it cannot inspect local app state.",
-    egress_consent_requires_codex: "Select Codex before granting remote-reasoning consent.",
+    remote_reasoning_unavailable:
+      "Remote reasoning is unavailable in Phase 0 until a supported zero-tool transport ships.",
     settings_persist_failed:
       "The engine could not save settings. Your confirmed settings were kept.",
   } as const;
