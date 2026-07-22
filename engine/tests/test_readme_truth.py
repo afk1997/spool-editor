@@ -3,6 +3,7 @@ from pathlib import Path
 
 
 README = Path(__file__).resolve().parents[1] / "README.md"
+ROOT_README = Path(__file__).resolve().parents[2] / "README.md"
 
 
 def test_readme_names_the_exact_public_discovery_allowlist():
@@ -64,3 +65,31 @@ def test_readme_describes_phase_zero_mcp_as_inspection_only():
     ) in text
     assert "drive Trove end-to-end" not in text
     assert "Tool surface mirrors the CLI 1:1" not in text
+
+
+def test_root_readme_describes_only_the_supported_phase_zero_clip_workflow():
+    text = " ".join(ROOT_README.read_text(encoding="utf-8").split())
+
+    assert (
+        "download/import → transcribe → select a transcript range manually → cut → "
+        "edit/reframe/caption → render/export"
+    ) in text
+    assert (
+        "Remote reasoning, automated discovery, and watch reconciliation are "
+        "unavailable in Phase 0."
+    ) in text
+    assert "URL/file → download → transcribe → find moments" not in text
+
+
+def test_engine_readme_keeps_manual_clip_work_available_without_claiming_automation():
+    text = " ".join(README.read_text(encoding="utf-8").split())
+
+    assert (
+        "The supported Phase 0 clip path is manual: import media, transcribe it, "
+        "select a transcript range, cut, edit/reframe/caption, then render/export."
+    ) in text
+    assert (
+        "Remote reasoning, automated discovery, and watch reconciliation are "
+        "unavailable in Phase 0."
+    ) in text
+    assert "remote_agent_tools_disabled" not in text

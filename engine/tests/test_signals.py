@@ -11,6 +11,14 @@ from pathlib import Path
 from clip import signals
 
 
+def test_module_docstring_keeps_signals_local_without_advertising_codex_discovery():
+    text = " ".join((signals.__doc__ or "").split())
+
+    assert "deterministic local features" in text
+    assert "Automated discovery is unavailable in Phase 0" in text
+    assert "codex bridge stays the only egress" not in text
+
+
 def _filesystem_snapshot(root: Path) -> dict[str, tuple[bytes, int]]:
     """Capture durable file bytes + mtimes so a read path cannot hide a rewrite."""
     return {

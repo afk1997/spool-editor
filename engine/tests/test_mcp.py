@@ -533,3 +533,53 @@ def test_dismiss_tool_descriptions_mark_history_hidden_and_preserve_managed_file
             "Managed files remain on disk."
         ),
     }
+
+
+def test_phase_zero_tool_descriptions_do_not_advertise_reasoning_or_automation():
+    import mcp_server
+
+    module_truth = " ".join((mcp_server.__doc__ or "").split())
+    assert (
+        "Remote reasoning, automated discovery, and watch reconciliation are "
+        "unavailable in Phase 0."
+    ) in module_truth
+    assert (
+        "The supported manual path is import, transcribe, transcript-range selection, "
+        "cut, edit/reframe/caption, and render/export."
+    ) in module_truth
+
+    server = mcp_server._build_server()
+
+    async def _descriptions():
+        return {
+            tool.name: " ".join((tool.description or "").split())
+            for tool in await server.list_tools()
+            if tool.name in {
+                "find_moments",
+                "rank_candidates",
+                "produce_clips",
+                "list_watches",
+                "scan_watch",
+            }
+        }
+
+    descriptions = asyncio.run(_descriptions())
+    assert (
+        "Unavailable in Phase 0: remote reasoning and automated discovery fail closed."
+        in descriptions["find_moments"]
+    )
+    assert "caller-supplied candidates" in descriptions["rank_candidates"]
+    assert "prior ``find_moments``" not in descriptions["rank_candidates"]
+    assert (
+        "Unavailable in Phase 0: automated discovery and recipe production fail closed."
+        in descriptions["produce_clips"]
+    )
+    assert (
+        "Phase 0 does not run watch reconciliation or automatic production."
+        in descriptions["list_watches"]
+    )
+    assert (
+        "Unavailable in Phase 0: watch reconciliation is disabled."
+        in descriptions["scan_watch"]
+    )
+    assert "default: the codex bridge" not in descriptions["find_moments"].lower()

@@ -1147,7 +1147,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_model_remove)
 
     # ---- clips (the render queue) ----
-    s = _sub("moments", help="find clip-worthy moments in a source transcript (LLM)")
+    s = _sub("moments", help="moments unavailable in Phase 0 — remote automated discovery is disabled")
     s.add_argument("source_id")
     s.add_argument("--mode", default="funny",
                    help="funny / insightful / hot-take / story / how-to / q&a")
@@ -1221,7 +1221,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=lambda a: cmd_clip_action(a, "dismiss"))
 
     # ---- automation: produce / recipes / watches / brand kits (Phase 3) ----
-    s = _sub("produce", help="apply a recipe to a source end-to-end → the review queue")
+    s = _sub("produce", help="produce unavailable in Phase 0 — automated discovery/production is disabled")
     s.add_argument("source_id")
     # --recipe-id (saved recipe) and --body (inline recipe) are two ways to say the same
     # thing; passing both is a usage error rather than silently dropping one.
@@ -1246,7 +1246,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id")
     s.set_defaults(func=cmd_recipe_rm)
 
-    s = _sub("watches", help="list folder/channel/playlist watches")
+    s = _sub("watches", help="list saved watches (Phase 0 reconciliation is unavailable)")
     s.set_defaults(func=cmd_watches)
     s = _sub("watch", help="get one watch")
     s.add_argument("id")
@@ -1261,7 +1261,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = _sub("watch-rm", help="delete a watch")
     s.add_argument("id")
     s.set_defaults(func=cmd_watch_rm)
-    s = _sub("watch-scan", help="reconcile a watch now (ingest new → produce)")
+    s = _sub("watch-scan", help="watch-scan unavailable in Phase 0 — watch reconciliation is disabled")
     s.add_argument("id")
     s.set_defaults(func=cmd_watch_scan)
 

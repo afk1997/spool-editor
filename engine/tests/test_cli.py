@@ -131,6 +131,17 @@ def test_dismiss_help_marks_history_hidden_without_promising_file_deletion():
     assert "delete its file" not in help_text
 
 
+def test_phase_zero_help_marks_reasoning_and_automation_commands_unavailable():
+    help_text = " ".join(cli.build_parser().format_help().split())
+
+    assert "moments unavailable in Phase 0 — remote automated discovery is disabled" in help_text
+    assert "produce unavailable in Phase 0 — automated discovery/production is disabled" in help_text
+    assert "watch-scan unavailable in Phase 0 — watch reconciliation is disabled" in help_text
+    assert "find clip-worthy moments in a source transcript (LLM)" not in help_text
+    assert "apply a recipe to a source end-to-end → the review queue" not in help_text
+    assert "reconcile a watch now (ingest new → produce)" not in help_text
+
+
 def test_cmd_recipe_crud_verbs_and_paths(monkeypatch, capsys):
     calls = []
 

@@ -6,8 +6,11 @@
 >
 > **Phase 0 safety-fuse update (2026-07-22; supersedes older provider notes):** Current
 > runtime/provider default is **none**. Remote Codex reasoning is unavailable in Phase 0 and
-> fails closed until a supported zero-tool transport exists. Codex and live-agent references
-> below are pre-fuse historical evidence only.
+> fails closed until a supported zero-tool transport exists. Remote reasoning, automated
+> discovery, and watch reconciliation are unavailable in Phase 0. The supported local workflow
+> is import media → transcribe → select a transcript range manually → cut → edit/reframe/caption
+> → render/export. Codex and live-agent references below are pre-fuse historical evidence only.
+> Automated-discovery, produce, and watch-run references below are historical pre-fuse evidence too.
 >
 > **Last updated:** 2026-06-12 · **Phase 0 — ✅ · Phase 1 — ✅ · Phase 2 — ✅ COMPLETE** (all 4 spec
 > done-whens + all 8 work-items: S7 reframe · S8 caption · transcript editing · S9 brand kits · library
@@ -39,8 +42,8 @@
 > **`docs/IMPROVEMENTS-PLAN.md`**; recommended order A → C → B → D → F → E. **In:** (A) decouple VAD
 > realignment from the `TROVE_DIARIZATION` flag · (B) fuse audio diarization into the auto-pan
 > active-speaker pick · (C) lift diarization accuracy · (D) caption craft (speaker color / line-breaks
-> / emphasis) · (E) richer moment-finding signals + feedback re-rank (**no local LLM** — keep the codex
-> bridge) · (F) perf + a real-render editor preview. **Deferred to after Phase 3 unless something
+> / emphasis) · (E) richer moment-finding signals + feedback re-rank (**historical pre-fuse:** local
+> deterministic signals improved the retired Codex proposals) · (F) perf + a real-render editor preview. **Deferred to after Phase 3 unless something
 > underperforms:** per-stage failure surfacing + Retry · disk↔store reconciliation / no-redownload ·
 > widened e2e + quality gate. Engine+studio left running on :8899/:3000 for manual testing.
 > **Quality-pass progress:**
@@ -147,7 +150,7 @@
 >   `scene_density` (ffmpeg scene-cuts per second). `signals.annotate` attaches a per-candidate `features`
 >   dict (text always; audio+scene when media is present, best-effort), wired into
 >   `clip_runner.find_moments_target` so every candidate carries the signals through the moments API.
->   Codex bridge unchanged (still the only egress; these run locally). **Coordinated with Phase 3:**
+>   The pre-fuse Codex bridge was unchanged; the signals themselves ran locally. **Coordinated with Phase 3:**
 >   `moments.rank` stays the Phase-3 stub — this lands the *signals* the glass-box ranking + render/export
 >   feedback re-rank will score on, so no double-build. TDD: +9 `test_signals` (text deterministic; ffmpeg
 >   parsing mocked; annotate text-always / media-opt-in / window-slice). **Verified live:** a fresh
@@ -159,9 +162,9 @@
 > are the only deliberately-deferred pieces (documented above; E's ranking lands with Phase 3). Engine
 > **715** tests · studio typecheck/lint/12 vitest/build · Playwright e2e — all green. Next: manual testing
 > on :8899/:3000, then **Phase 3** (glass-box ranking — consumes E's signals · watch-folder · recipes).
-> **Backend** proven on real media (engine chain → `api_v1` → MCP/CLI → codex bridge + NL agent).
+> **Historical pre-fuse backend** was proven on real media (engine chain → `api_v1` → MCP/CLI → Codex bridge + NL agent).
 >
-> **▶ PHASE 3 — Discovery + automation — ✅ core done (the §5 done-when is MET).** Order (confirmed):
+> **▶ HISTORICAL PRE-FUSE PHASE 3 — Discovery + automation — core was verified before the fuse.** Order (confirmed):
 > glass-box ranking → recipes → watch-folder, all ✅. **Done-when MET + verified live:** point at a
 > folder → drop a video → it auto-imports → transcribes → finds + **glass-box ranks** → cuts/reframes/
 > captions per a recipe → a ranked clip lands in the review queue (NOT auto-published); ranking factors
@@ -297,8 +300,8 @@
 > unit/component tests (12 green: fmt/parse helpers, `mapCandidates`/`buildTranscript`, `CandidateCard`).
 > Deliberate spec-over-1:1 calls per Kaivan: dropped Tailwind/shadcn for verbatim `spool.css`; applied
 > the §6.6 a11y deviations. **Deferred to Phase 2 (per §6.7):** list virtualization + lazy-loading the
-> heavy editor. **Decided, not debt:** offline moment-finding (Codex bridge needs network — the locked
-> default; a local LLM provider can be wired later).
+> heavy editor. **Historical pre-fuse decision:** moment-finding needed network through the retired
+> Codex bridge; Phase 0 now disables it.
 >
 > **Post-Phase-1 hardening (also done, all verified — typecheck/lint/test/e2e green):**
 > (1) **Code review** — fixed 10 correctness/UX bugs: paused downloads now map + show Resume; the
@@ -331,14 +334,14 @@
 >
 > **Glass-box / honesty notes (Phase-1 boundaries, documented deviations from the demo's mock):**
 > candidate cards show real named `signals` + a real transcript excerpt (no fabricated 0-100 score —
-> the `rank` opportunity-score + the Discovery reweight panel are Phase 3); Settings shows the real
-> codex-bridge provider (not the demo's Ollama endpoint/API-key); Editor's deeper timeline editing
+> the `rank` opportunity-score + the Discovery reweight panel are Phase 3); historical Settings showed
+> the pre-fuse Codex provider (not the demo's Ollama endpoint/API-key); Editor's deeper timeline editing
 > (trim-render, A/B, word ripple-cut) is the Phase-2 surface; Publish/Analytics are the demo's
 > honest "coming in Phase 4" placeholders.
 >
 > ---
 > **Session 2026-06-05 — review-hardening, real waveform+timeline, agent full-parity. ✅ done, all pushed.**
-> Engine **807 tests** · studio typecheck/lint/20 vitest green · CLI↔MCP parity test green · agent live-proven on the real codex bridge.
+> Historical pre-fuse verification: Engine **807 tests** · studio typecheck/lint/20 vitest green · CLI↔MCP parity test green · agent exercised the retired Codex bridge.
 >
 > - **✅ Post-Phase-3 review-hardening pass** (8-reviewer + adversarial-verify of the Phase-3 arc → 28
 >   confirmed findings, fixed). Headline fixes: **honest produce/watch completion** (a produce job no
@@ -367,7 +370,7 @@
 >   only on explicit ask; never auto-publishes). Studio renders the real per-step tool trace + typed
 >   clarify. Live-proven: "what's in the queue?" now calls `list_jobs` and answers from real data. Two
 >   bugs caught only by live testing: `status="all"` normalized to no-filter; observation truncation sized
->   for list results; agent runs at codex **medium** reasoning. Commit `7cdc071`.
+>   for list results; the pre-fuse agent used Codex **medium** reasoning. Commit `7cdc071`.
 > - **✅ Closed MCP/CLI/client parity gaps** the audit surfaced (the one true client divergence + rounding):
 >   added `source_energy/scenes/filmstrip`, `edit_word`, `dismiss_transcribe`, `render_pipeline stop_after`
 >   to the Python `TroveClient` (existed only in the TS client) → **8 new MCP tools + 8 matching CLI
@@ -409,7 +412,7 @@ graph TD
       C5["e2e: URL → 9:16 clip (Playwright) — green ~49s · diar-on reframe verified"]:::done
     end
     P2["Phase 2 — Studios + editor (timeline, ROI editor, caption studio, brand kits, settings, perf, FTS5)"]:::done
-    P3["Phase 3 — Discovery + automation (glass-box ranking, watch-folder, recipes)"]:::todo
+    P3["Historical pre-fuse Phase 3 — Discovery + automation"]:::todo
     P4["Phase 4 — Publish + analyze"]:::todo
 
     P0 --> P1 --> P2 --> P3 --> P4
@@ -449,10 +452,9 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
   (per-ROI ffmpeg motion → vendored `roi_motion` → **diar⊕ROI fusion**, still/off-mic
   speakers resolved by audio turns) + `render` (pan via vendored `pan_expr`, split, center;
   9:16/16:9/1:1/4:5). 15 tests.
-- [x] **`moments`** — LLM moment-finding over `words.json` has a **pluggable provider
-  layer** (`clip/llm.py`) and a `CallableProvider` seam. Current runtime/provider default is
-  **none**. The pre-fuse build included a Codex CLI bridge and injected-agent provider; neither
-  remote path is available in Phase 0. Prompt construction reuses
+- [x] **Historical pre-fuse `moments` implementation** — the retired remote moment-finding path
+  constructed prompts over `words.json`. Current runtime/provider default is **none**; no remote
+  provider or automated discovery path is available in Phase 0. The historical prompt reused
   **clipify's Step-1 heuristics** (punchlines/reversals/awkward pauses/quotable one-liners/
   audio peaks), mode-tuned (funny/insightful/hot-take/story/how-to/q&a). Tolerant JSON parse
   (bare/fenced/prose), range clamp-to-duration, `transcript_window`, glass-box-ready
@@ -470,8 +472,8 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
   `POST /clips/<id>/{reframe,captions,renders}`, `GET /clip-jobs[?kind,status]` +
   get/cancel/dismiss, `GET /clips/<id>/renders/<rid>/file`. Plus `/capabilities` +
   SSE snapshot + OpenAPI + `TroveClient` methods. 13+10+13+23+13 tests.
-- [x] **MCP clip tools** + elicitation + `spool://` resources — extended trove's FastMCP
-  server (`mcp_server.py`) with `find_moments`/`cut_clip`/`reframe_clip`/`caption_clip`/
+- [x] **Historical pre-fuse MCP clip-tool catalog** + elicitation + `spool://` resources — extended
+  trove's FastMCP server (`mcp_server.py`) with `find_moments`/`cut_clip`/`reframe_clip`/`caption_clip`/
   `render_clip`/`render_pipeline`/`list`/`get`/`cancel`/`dismiss_clip_job` (delegate to the
   client → same API → same engine). `reframe_clip` **elicits** `{aspect,mode}` when omitted
   (graceful fallback). Resources `spool://clips` + `spool://clips/{job_id}`. CLI⇄MCP parity
@@ -490,18 +492,19 @@ studio screens wired to `api_v1` with the demo's design tokens ported in.
   `panels.tsx` (SettingCard · Row · FutureScreen). Screens (each screenshot-verified against the demo):
   **S0** Onboarding (full-screen, no shell; Dependency Doctor on live `/doctor`) · **Home** · **Import**
   (real downloads) · **Library** · **S4** Project/Transcript (words.json → speaker lines) · **S5**
-  Discovery (real candidates; glass-box = real named signals + transcript excerpt) · **S7** Reframe
+  historical pre-fuse Discovery (real candidates; glass-box = named signals + transcript excerpt) · **S7** Reframe
   (ROI editor → real reframe) · **S8** Caption Studio (presets → real caption+render) · **S6** Editor
   (timeline hub; real renders) · **S10** Queue · **S11** Clips · **Settings** (live doctor/MCP/privacy) ·
   **Brand** · **Publish/Analytics** (Phase-4 placeholders) · **⌘K palette** · **Agent panel**. Routes:
-  `/`, `/import`, `/library`, `/clips`, `/clips/[id]{,/reframe,/caption}`, `/sources/[id]{,/discovery}`,
+  `/`, `/import`, `/library`, `/clips`, `/clips/[id]{,/reframe,/caption}`, `/sources/[id]{,/discovery}`
+  (the retained Discovery route is unavailable in Phase 0),
   `/queue`, `/settings`, `/brand`, `/publish`, `/analytics`, `/onboarding` (16 total).
   **Tailwind dropped**, old invented components deleted; `spool.css` (verbatim demo CSS) is the single
   styling source. `pnpm typecheck` 9/9 · lint clean · build 16 routes.
-- [x] **Playwright e2e (C5)** — `apps/studio/e2e/url-to-clip.spec.ts` drives the real UI: Import →
-  paste URL → Download → (download+transcribe) → Discovery find_moments → "Make N clips" → asserts a
-  **9:16** render artifact (fetchable, non-empty) + the clip in the library. Green in ~49s on the live
-  engine. Run: `pnpm --filter @spool/studio e2e`.
+- [x] **Phase 0 Playwright e2e (C5)** — `apps/studio/e2e/url-to-clip.spec.ts` drives the supported
+  local UI path: Import → download/transcribe → manually select a transcript range → cut → edit,
+  reframe, caption, and render → assert the final artifact and clip library entry. It also asserts
+  that remote reasoning and automation fail closed. Run: `pnpm --filter @spool/studio e2e`.
 - [x] **Diarization-on reframe (diar⊕ROI)** — with `TROVE_DIARIZATION=on`, a real 2-speaker source
   ("TWO MEN TALKING") diarized to **2 speakers**; cut→reframe produced a **`source=fused`** speaker
   track (11 segments, left/right alternating) and a **1080×1920** render. The signature fusion path is
@@ -823,7 +826,7 @@ helper, Sonnet wired the editor.
 - **engine: 595 tests pass** (exit 0) on Python 3.12 via uv venv — headless trove suite + `clip.cutter` (7) + `clip.captioner` (6) + `clip.reframe` (15) + `clip.exporter` (9) + `clip.llm` (16) + `clip.moments` (15) + `clip_jobs` (13) + `clip_runner` (10) + `api_v1` clips (23) + `trove_client` clips (13) + MCP clip tools/elicitation (e2e). The whole agent + API + CLI clip surface is wired to one engine + one queue.
 - **studio:** `pnpm typecheck` 9/9, build compiles 8 routes, ESLint clean. All Phase-1 screens (S0–S5, S7, S8, S10, S11) + ⌘K + **Agent chat** wired to `api_v1` (no mock data).
 - **Historical pre-fuse end-to-end (manual, live engine):** ✅ downloaded + transcribed "Me at the zoo"; ✅ pipeline produced a verified **1080×1920 H.264+AAC 10s** render; ✅ **codex `find_moments`** returned real candidates (14s at low reasoning); ✅ **NL agent** ("find the funniest moment" → find_moments; "make a 9:16 clip … with karaoke captions for tiktok" → pipeline → render); ✅ studio↔engine over CORS (preflight + POST from localhost:3000). Codex = codex-cli 0.136.0, ChatGPT-subscription auth. Phase 0 now disables agent mutations until the Phase 4 approval and undo contract ships; this historical execution evidence does not override that fuse.
-- **bugs found+fixed by the live run:** stale-yt-dlp resolution (`_ytdlp_bin`), localhost CORS, hardened codex bridge (`--output-last-message`), low reasoning-effort default.
+- **Historical pre-fuse bugs found+fixed by that live run:** stale-yt-dlp resolution (`_ytdlp_bin`), localhost CORS, hardened then-active Codex bridge (`--output-last-message`), low reasoning-effort default.
 - **`docker compose up`** builds the multi-stage image and serves `/api/v1/health` from the host — the packaged engine works end to end.
 - **headless serving** (venv): `/api/v1/doctor` reports real tooling — ffmpeg 7.1.1, whisper.cpp 1.5.0, yt-dlp 2026.3.17, VideoToolbox encoders.
 
@@ -847,10 +850,10 @@ Spec: `docs/Spool_Engineering-Spec.md` (§5 phases, §6 front-end). Visual sourc
 ## Locked decisions
 
 - License **Apache-2.0**; diarization kept in **core install** (heavier base, no missing-dep step).
-- **Moment-finding LLM = pluggable provider; current runtime/provider default is `none`.**
-  Remote Codex reasoning is unavailable in Phase 0 and fails closed until a supported
-  zero-tool transport exists. The provider scaffolding remains in `clip/llm.py`, but historical
-  Codex settings do not enable the bridge. **New Spool config uses the `SPOOL_*` env namespace**
+- **Phase 0 reasoning provider = `none`.** Remote Codex reasoning is unavailable and fails closed
+  until a supported zero-tool transport exists. Automated discovery and watch reconciliation are
+  also unavailable; historical Codex settings cannot enable them. The supported workflow is manual
+  transcript selection → cut → edit/reframe/caption → render/export. **New Spool config uses the `SPOOL_*` env namespace**
   (not `TROVE_*`): `SPOOL_LLM_PROVIDER` (default `none`) and the engine-wide offline switch
   `SPOOL_OFFLINE=1`.
 - Engine = flat fold-in of trove (reuse, don't rebuild); htmx stripped in Phase 0, not at bootstrap.

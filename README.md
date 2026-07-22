@@ -4,13 +4,17 @@
 clips on your machine, with editor-grade manual control and a gated agent surface. No per-clip
 credits, no uploads.
 
-Spool pairs a deterministic offline engine
+Spool pairs a deterministic local engine with the supported Phase 0 workflow:
 
 ```
-URL/file → download → transcribe → find moments → cut → reframe → caption → export
+download/import → transcribe → select a transcript range manually → cut → edit/reframe/caption → render/export
 ```
 
-with two local clients over **one** JSON API:
+Remote reasoning, automated discovery, and watch reconciliation are unavailable in Phase 0.
+Those paths fail closed; there is no active Codex or other remote reasoning provider. Local
+transcript selection, cutting, editing, reframing, captioning, and rendering remain available.
+
+Spool exposes that workflow through two local clients over **one** JSON API:
 
 - a **Next.js studio** — manual, editor-grade control over the authenticated REST API, and
 - a **Python FastMCP stdio server** — read-only inspection for Claude Desktop/Code, Cursor,

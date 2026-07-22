@@ -20,6 +20,11 @@ paste a link, get the file. transcribe it. edit the transcript like a doc. all l
 - **CLI + MCP** *(both alpha — see notes below)* — use the CLI for manual operations. During Phase 0, MCP executes read-only inspection tools only; advertised mutations fail closed with `agent_mutation_disabled`.
 - **single Python process, single Docker container, no Node.** mobile-friendly. light only — riso paper is the brand.
 
+The supported Phase 0 clip path is manual: import media, transcribe it, select a transcript range,
+cut, edit/reframe/caption, then render/export. Remote reasoning, automated discovery, and watch
+reconciliation are unavailable in Phase 0. Saved recipes and watch definitions remain readable,
+but they do not run discovery, production, or reconciliation.
+
 | ![download in progress](docs/screenshots/download.png) | ![download complete](docs/screenshots/done.png) |
 |---|---|
 | **mid-download** | **saved** |
@@ -205,7 +210,15 @@ python cli.py search <tid> "query"    # find inside a transcript
 python cli.py replace <tid> "old" "new"
 python cli.py models list             # whisper models on disk
 python cli.py models pull <name>      # download a model
+python cli.py cut <source> <start> <end>
+python cli.py reframe <clip>           # local edit/render stages remain available
+python cli.py caption <clip>
+python cli.py render <clip>
 ```
+
+The `moments`, `produce`, and `watch-scan` command schemas remain visible for compatibility, but
+their remote-reasoning and automation paths are unavailable in Phase 0 and fail closed. Use the
+manual transcript-range workflow above.
 
 Configure with env vars:
 
@@ -220,7 +233,7 @@ Run `python cli.py --help` for the full command list.
 
 > **Status: unstable alpha.** Same caveats as the CLI. Tested only against the contract; not yet exercised in real agent workflows.
 
-In Phase 0, `trove-mcp` executes only the explicit read-only inspection allowlist over HTTP. Mutation schemas remain advertised for contract compatibility, but every mutation returns `agent_mutation_disabled` before any `TroveClient` call. Manual mutations remain available through the authenticated UI, REST API, and CLI. Transport: stdio.
+In Phase 0, `trove-mcp` executes only the explicit read-only inspection allowlist over HTTP. Mutation schemas remain advertised for contract compatibility, but every mutation returns `agent_mutation_disabled` before any `TroveClient` call. Manual mutations remain available through the authenticated UI, REST API, and CLI. Remote reasoning, automated discovery, and watch reconciliation remain unavailable through every client. Transport: stdio.
 
 Wire it into your MCP client config:
 

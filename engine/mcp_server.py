@@ -6,6 +6,11 @@ schemas remain advertised for compatibility, but the runtime allows
 only explicit read-only inspection tools. Manual UI, REST, and CLI
 mutations remain available.
 
+Remote reasoning, automated discovery, and watch reconciliation are
+unavailable in Phase 0. The supported manual path is import,
+transcribe, transcript-range selection, cut, edit/reframe/caption,
+and render/export.
+
 Transport: stdio (the default for desktop MCP clients).
 
 Configuration (env vars):
@@ -417,12 +422,11 @@ def _build_server():
 
     @mcp.tool()
     def find_moments(source_id: str, mode: str = "funny", count: int = 5) -> dict:
-        """Find clip-worthy moments in a source's transcript via the moment-finding LLM
-        (default: the codex bridge — the user's ChatGPT/Codex subscription, no key/GPU).
+        """Unavailable in Phase 0: remote reasoning and automated discovery fail closed.
 
-        ``mode`` ∈ funny / insightful / hot-take / story / how-to / q&a. Returns a
-        clip-job; poll ``get_clip_job`` for ``result.candidates`` —
-        ``[{start, end, title, rationale, signals}]``. Only transcript text egresses.
+        This schema remains advertised for compatibility, but it cannot create a moments job.
+        Use the authenticated UI, REST API, or CLI to select a transcript range and cut it
+        manually; local edit/reframe/caption/render stages remain available.
         """
         return _safe("find_moments", lambda: _client.find_moments(source_id, mode=mode, count=count))
 
@@ -431,11 +435,12 @@ def _build_server():
                         weights: dict | None = None) -> dict:
         """Re-rank candidates with the glass-box opportunity score (discover.rank).
 
-        Pass the ``candidates`` from a prior ``find_moments`` (each carrying its ``features``)
-        and optional factor ``weights`` — a dict over ``hook / self_contained / arc / energy /
+        Pass caller-supplied candidates (each carrying its ``features``) and optional factor
+        ``weights`` — a dict over ``hook / self_contained / arc / energy /
         length_fit`` (need not sum to 1). Returns ``{candidates, count, weights}`` re-scored and
         sorted best-first. The score is a transparent weighted sum of those named factors, so
-        every candidate's ``factors`` + ``score`` explain the ordering (no opaque 0–99)."""
+        every candidate's ``factors`` + ``score`` explain the ordering (no opaque 0–99).
+        Automated candidate discovery is unavailable in Phase 0."""
         return _safe("rank_candidates", lambda: _client.rank_candidates(source_id, candidates, weights=weights))
 
     @mcp.tool()
@@ -521,12 +526,11 @@ def _build_server():
 
     @mcp.tool()
     def produce_clips(source_id: str, recipe_id: str = "", recipe: dict | None = None) -> dict:
-        """Apply a recipe to a source end-to-end → the review queue: find moments → glass-box rank →
-        take the top N → run a full cut→reframe→caption→export pipeline per moment with the recipe's
-        aspect/reframe/caption/brand-kit/platform. Pass a saved ``recipe_id`` (from ``list_recipes``)
-        OR an inline ``recipe`` dict (content_mode/count/aspect/reframe_mode/caption_preset/platform/
-        fast/weights/brand_kit_id). Returns a produce clip-job; poll ``get_clip_job`` for the fan-out.
-        Clips are NOT published (Phase 4) — they land for review (the honest gate)."""
+        """Unavailable in Phase 0: automated discovery and recipe production fail closed.
+
+        The saved-recipe/inline-recipe schema remains advertised for compatibility, but it cannot
+        create a produce job. Use manual transcript selection followed by cut, edit/reframe/caption,
+        and render/export through the authenticated UI, REST API, or CLI."""
         # Strip the reserved (non-inline) keys so they can't collide with the positional
         # ``source_id`` / keyword ``recipe_id`` in the splat (TypeError: multiple values).
         recipe = {k: v for k, v in (recipe or {}).items() if k not in ("source_id", "recipe_id")}
@@ -534,8 +538,9 @@ def _build_server():
 
     @mcp.tool()
     def list_recipes() -> dict:
-        """List saved recipes (a recipe = the reusable pipeline decisions: content mode + count,
-        ranking weights, render settings). Use a recipe's ``id`` with ``produce_clips``."""
+        """List saved recipe definitions retained for compatibility and future automation.
+
+        Phase 0 does not execute automated discovery or recipe production."""
         return _safe("list_recipes", lambda: _client.list_recipes())
 
     @mcp.tool()
@@ -564,13 +569,14 @@ def _build_server():
 
     @mcp.tool()
     def list_watches() -> dict:
-        """List folder/channel/playlist watches (new videos auto-produce ranked clips per a recipe
-        into the review queue). Each shows its seen/pending/producing/produced reconcile state."""
+        """List saved folder/channel/playlist watch definitions and historical state.
+
+        Phase 0 does not run watch reconciliation or automatic production."""
         return _safe("list_watches", lambda: _client.list_watches())
 
     @mcp.tool()
     def get_watch(watch_id: str) -> dict:
-        """Get one watch by id."""
+        """Get one saved watch definition by id. Phase 0 does not reconcile it."""
         return _safe("get_watch", lambda: _client.get_watch(watch_id))
 
     @mcp.tool()
@@ -592,8 +598,9 @@ def _build_server():
 
     @mcp.tool()
     def scan_watch(watch_id: str) -> dict:
-        """Reconcile a watch now: detect new videos → ingest → produce per its recipe once
-        transcribed. Returns this tick's ingested / producing / produced source ids."""
+        """Unavailable in Phase 0: watch reconciliation is disabled.
+
+        This schema remains advertised for compatibility and cannot ingest or produce media."""
         return _safe("scan_watch", lambda: _client.scan_watch(watch_id))
 
     @mcp.tool()
@@ -727,13 +734,13 @@ def _build_server():
 
     @mcp.resource("spool://recipes")
     def recipes_resource() -> str:
-        """All saved recipes — the reusable pipelines that drive produce + watch automation."""
+        """Saved recipe definitions; Phase 0 automated discovery and production are unavailable."""
         import json as _json
         return _json.dumps(_safe("list_recipes", lambda: _client.list_recipes()), indent=2)
 
     @mcp.resource("spool://watches")
     def watches_resource() -> str:
-        """All folder/channel/playlist watches + their reconcile state."""
+        """Saved watches and historical state; Phase 0 watch reconciliation is unavailable."""
         import json as _json
         return _json.dumps(_safe("list_watches", lambda: _client.list_watches()), indent=2)
 

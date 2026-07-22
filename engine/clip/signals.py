@@ -1,10 +1,9 @@
-"""Glass-box NON-text signals for moment candidates (spec §6 glass-box rule; item E).
+"""Glass-box NON-text signals for candidate windows (spec §6 glass-box rule; item E).
 
-Each signal is a NAMED, explainable number derived from the transcript text or the media —
-**never an LLM** (the moment-finder's codex bridge stays the only egress; these run locally).
-They attach to a candidate's ``features`` dict so the **Phase-3** glass-box ranking can score on
-visible, reweightable inputs. This module lands the *signals*; the ranking/feedback re-rank is
-Phase 3 (``moments.rank`` — coordinate, don't double-build).
+Each signal is a NAMED, explainable number derived from transcript text or local media. These are
+deterministic local features and never invoke a reasoning provider. Automated discovery is
+unavailable in Phase 0; callers may still compute these features for manually selected windows or
+caller-supplied historical candidates.
 
   text_signals(text)                  — Q&A / sentiment-intensity / numbers / fillers / pace (cheap)
   audio_energy(media, start, end)     — loudness + dynamics over the window (peaks ≈ laughter/emphasis)
