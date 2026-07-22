@@ -7,6 +7,7 @@ what was explicitly written (so ``create_app`` can prefer a UI-set value over th
 without confusing "user set 2" with "default 2")."""
 from __future__ import annotations
 
+import json
 import os
 from types import SimpleNamespace
 
@@ -64,34 +65,52 @@ def test_corrupt_file_falls_back_to_defaults(tmp_path):
     assert s.overrides() == {}
 
 
-def test_provider_changes_reset_consent_unless_explicitly_regranted(tmp_path):
-    s = SettingsStore(str(tmp_path / "settings.json"))
+@pytest.mark.parametrize(
+    ("method", "changes", "message"),
+    [
+        ("update", {"reasoning_provider": "codex"}, "invalid reasoning_provider"),
+        ("staged_update", {"reasoning_provider": "codex"}, "invalid reasoning_provider"),
+        (
+            "update",
+            {"reasoning_egress_consent": True},
+            "invalid reasoning_egress_consent",
+        ),
+        (
+            "staged_update",
+            {"reasoning_egress_consent": True},
+            "invalid reasoning_egress_consent",
+        ),
+    ],
+)
+def test_store_rejects_remote_reasoning_atomically(tmp_path, method, changes, message):
+    path = tmp_path / "settings.json"
+    store = SettingsStore(path)
+    store.update({"fast_default": False})
+    before_values = store.get()
+    before_overrides = store.overrides()
+    before_bytes = path.read_bytes()
+    yielded = False
 
-    enabled = s.update({
-        "reasoning_provider": "codex",
-        "reasoning_egress_consent": True,
-    })
-    assert enabled["reasoning_provider"] == "codex"
-    assert enabled["reasoning_egress_consent"] is True
+    with pytest.raises(ValueError) as raised:
+        if method == "update":
+            store.update(changes)
+        else:
+            with store.staged_update(changes):
+                yielded = True
 
-    disabled = s.update({"reasoning_provider": "none", "reasoning_egress_consent": True})
-    assert disabled["reasoning_provider"] == "none"
-    assert disabled["reasoning_egress_consent"] is False
-
-    selected_again = s.update({"reasoning_provider": "codex"})
-    assert selected_again["reasoning_provider"] == "codex"
-    assert selected_again["reasoning_egress_consent"] is False
-
-    consented_later = s.update({"reasoning_egress_consent": True})
-    assert consented_later["reasoning_egress_consent"] is True
+    assert str(raised.value) == message
+    assert yielded is False
+    assert store.get() == before_values
+    assert store.overrides() == before_overrides
+    assert path.read_bytes() == before_bytes
+    assert SettingsStore(path).get() == before_values
 
 
 def test_failed_atomic_replace_leaves_memory_and_persisted_settings_unchanged(tmp_path, monkeypatch):
     path = str(tmp_path / "settings.json")
     s = SettingsStore(path)
     s.update({
-        "reasoning_provider": "codex",
-        "reasoning_egress_consent": True,
+        "fast_default": False,
         "offline": False,
     })
     before = s.get()
@@ -102,9 +121,8 @@ def test_failed_atomic_replace_leaves_memory_and_persisted_settings_unchanged(tm
     monkeypatch.setattr("settings.os.replace", fail_replace)
     with pytest.raises(OSError, match="disk full"):
         s.update({
-            "reasoning_provider": "none",
-            "reasoning_egress_consent": False,
             "offline": True,
+            "clip_workers": 3,
         })
 
     assert s.get() == before
@@ -123,29 +141,70 @@ def test_store_rejects_invalid_reasoning_values(tmp_path):
     assert s.get()["reasoning_egress_consent"] is False
 
 
-def test_load_sanitizes_impossible_reasoning_consent(tmp_path):
+@pytest.mark.parametrize("legacy_provider", ["codex", "CoDeX", "CODEX"])
+def test_load_durably_canonicalizes_legacy_reasoning_without_losing_settings(
+    tmp_path, legacy_provider,
+):
     path = tmp_path / "settings.json"
-    path.write_text('{"reasoning_provider":"none","reasoning_egress_consent":true}')
+    path.write_text(json.dumps({
+        "reasoning_provider": legacy_provider,
+        "reasoning_egress_consent": True,
+        "fast_default": False,
+        "clip_workers": 7,
+        "mcp_transport": "streamable-http",
+    }))
 
     loaded = SettingsStore(path)
 
     assert loaded.get()["reasoning_provider"] == "none"
     assert loaded.get()["reasoning_egress_consent"] is False
+    assert loaded.get()["fast_default"] is False
+    assert loaded.get()["clip_workers"] == 7
+    assert loaded.get()["mcp_transport"] == "streamable-http"
+    assert json.loads(path.read_text()) == {
+        "reasoning_provider": "none",
+        "reasoning_egress_consent": False,
+        "fast_default": False,
+        "clip_workers": 7,
+        "mcp_transport": "streamable-http",
+    }
+
+
+def test_unrelated_update_keeps_legacy_reasoning_canonical_on_disk(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({
+        "reasoning_provider": "cOdEx",
+        "reasoning_egress_consent": True,
+        "default_preset": "shorts",
+    }))
+    store = SettingsStore(path)
+
+    values = store.update({"fast_default": False})
+
+    assert values["reasoning_provider"] == "none"
+    assert values["reasoning_egress_consent"] is False
+    assert values["default_preset"] == "shorts"
+    assert values["fast_default"] is False
+    assert json.loads(path.read_text()) == {
+        "reasoning_provider": "none",
+        "reasoning_egress_consent": False,
+        "default_preset": "shorts",
+        "fast_default": False,
+    }
 
 
 def test_failed_runtime_apply_rolls_back_store_environment_and_policy(
     tmp_path, monkeypatch,
 ):
     import app as app_module
-    from clip import llm
 
-    class FailConsentOnce(dict):
+    class FailOfflineOnce(dict):
         def __init__(self, values):
             super().__init__(values)
             self._failed = False
 
         def __setitem__(self, key, value):
-            if key == "SPOOL_LLM_EGRESS_CONSENT" and not self._failed:
+            if key == "SPOOL_OFFLINE" and not self._failed:
                 self._failed = True
                 raise OSError("injected environment write failure")
             super().__setitem__(key, value)
@@ -164,7 +223,7 @@ def test_failed_runtime_apply_rolls_back_store_environment_and_policy(
         before_bytes = path.read_bytes()
         policy = application.extensions["trove.network_policy"]
 
-        live_env = FailConsentOnce({
+        live_env = FailOfflineOnce({
             "SPOOL_LLM_PROVIDER": "none",
             "UNRELATED": "preserved",
         })
@@ -174,8 +233,6 @@ def test_failed_runtime_apply_rolls_back_store_environment_and_policy(
         with pytest.raises(OSError, match="injected environment write failure"):
             application.extensions["trove.commit_settings"]({
                 "offline": True,
-                "reasoning_provider": "codex",
-                "reasoning_egress_consent": True,
             })
 
         assert policy.offline is False
@@ -184,19 +241,6 @@ def test_failed_runtime_apply_rolls_back_store_environment_and_policy(
         assert path.read_bytes() == before_bytes
         assert SettingsStore(path).get() == before_values
         assert live_env == before_env
-
-        monkeypatch.setattr(
-            llm.subprocess,
-            "Popen",
-            lambda *_args, **_kwargs: pytest.fail("rolled-back settings launched Codex"),
-        )
-        provider = llm.CodexProvider(
-            network_policy=policy,
-            privacy_state=store.get,
-            bin="codex",
-        )
-        with pytest.raises(llm.ReasoningDisabledError):
-            provider.complete("transcript")
     finally:
         application.extensions["trove.shutdown"](wait=True)
 
@@ -243,14 +287,13 @@ def test_failed_publish_after_runtime_apply_rolls_back_every_state(
         with pytest.raises(OSError, match="injected atomic publish failure"):
             application.extensions["trove.commit_settings"]({
                 "offline": True,
-                "reasoning_provider": "codex",
-                "reasoning_egress_consent": True,
+                "default_preset": "shorts",
             })
 
         assert observed_at_publish == {
             "offline": "1",
-            "provider": "codex",
-            "consent": "1",
+            "provider": "none",
+            "consent": None,
             "policy_offline": True,
         }
         assert policy.offline is False

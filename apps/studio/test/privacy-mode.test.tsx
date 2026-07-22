@@ -58,6 +58,10 @@ function engineSettings(overrides: Partial<EngineSettings> = {}): EngineSettings
   };
 }
 
+function legacyEngineSettings(overrides: Record<string, unknown>): EngineSettings {
+  return { ...engineSettings(), ...overrides } as unknown as EngineSettings;
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -119,7 +123,7 @@ describe("authoritative privacy settings", () => {
     expect(ctx.get().reasoningEgressConsent).toBe(false);
     expect(ctx.get().offline).toBe(true);
 
-    const loaded = engineSettings({
+    const loaded = legacyEngineSettings({
       reasoning_provider: "codex",
       reasoning_egress_consent: true,
     });
@@ -238,7 +242,7 @@ describe("authoritative privacy settings", () => {
   });
 
   it.each([
-    { reasoning_provider: "codex" as const },
+    { reasoning_provider: "codex" as unknown as ReasoningProvider },
     { reasoning_provider: "CoDeX" as unknown as ReasoningProvider },
     { reasoning_egress_consent: true },
   ])("rejects unsupported remote settings locally without issuing PATCH: $reasoning_provider$reasoning_egress_consent", async (patch) => {
@@ -335,7 +339,7 @@ describe("privacy settings UI", () => {
   });
 
   it("stays fail-closed when an old engine record still contains Codex and consent", async () => {
-    await renderPrivacySettings(engineSettings({
+    await renderPrivacySettings(legacyEngineSettings({
       reasoning_provider: "codex",
       reasoning_egress_consent: true,
     }));
@@ -359,7 +363,7 @@ describe("canonical privacy status label", () => {
       label: "Offline",
     },
     {
-      settings: engineSettings({ reasoning_provider: "codex", reasoning_egress_consent: true }),
+      settings: legacyEngineSettings({ reasoning_provider: "codex", reasoning_egress_consent: true }),
       label: "Fully local",
     },
     {
@@ -439,7 +443,7 @@ describe("truthful privacy copy", () => {
 
   it("discloses network downloads and unavailable remote reasoning during onboarding", async () => {
     settingsQuery = {
-      data: engineSettings({ reasoning_provider: "codex", reasoning_egress_consent: true }),
+      data: legacyEngineSettings({ reasoning_provider: "codex", reasoning_egress_consent: true }),
       loading: false,
       reload: vi.fn(),
     };
@@ -463,7 +467,7 @@ describe("truthful privacy copy", () => {
   });
 
   it("keeps remote reasoning unavailable even when an old record contains Codex consent", async () => {
-    const offlineCodex = engineSettings({
+    const offlineCodex = legacyEngineSettings({
       offline: true,
       reasoning_provider: "codex",
       reasoning_egress_consent: true,

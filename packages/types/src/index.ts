@@ -202,7 +202,7 @@ export interface PublishPost {
 
 // ───────────────────────── Server ─────────────────────────
 
-export type ReasoningProvider = "none" | "codex";
+export type ReasoningProvider = "none";
 
 export interface ServerCapabilities {
   version: string;

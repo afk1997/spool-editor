@@ -169,6 +169,9 @@ const settingsFixture = (overrides: Partial<EngineSettings> = {}): EngineSetting
   ...overrides,
 });
 
+const legacySettingsFixture = (overrides: Record<string, unknown>): EngineSettings =>
+  ({ ...settingsFixture(), ...overrides }) as unknown as EngineSettings;
+
 const baseCtx = (overrides: Record<string, unknown> = {}) => ({
   client: clientFixture(),
   sources: [],
@@ -873,7 +876,7 @@ describe("product truth: visible control inventory", () => {
       listModels: { models: [], active: "" },
     };
     importHarness.ctx = baseCtx({
-      settings: settingsFixture({
+      settings: legacySettingsFixture({
         reasoning_provider: "codex",
         reasoning_egress_consent: true,
       }),
@@ -906,7 +909,7 @@ describe("product truth: visible control inventory", () => {
     importHarness.ctx = baseCtx({
       reasoningProvider: "codex",
       reasoningEgressConsent: true,
-      settings: settingsFixture({
+      settings: legacySettingsFixture({
         reasoning_provider: "codex",
         reasoning_egress_consent: true,
       }),
