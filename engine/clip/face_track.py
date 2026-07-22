@@ -19,6 +19,8 @@ import os
 import re
 import subprocess
 
+from process_ownership import run_service_process
+
 _MODEL = os.path.join(os.path.dirname(__file__), "models", "face_detection_yunet_2023mar.onnx")
 
 # Framing constants.
@@ -316,9 +318,10 @@ def _mouth_patch(cv2, gray, fx: float, fy: float, fw: float, fh: float):
 def scene_cuts(clip_path: str, duration: float, threshold: float = 0.3):
     """Cut timestamps (seconds, strictly inside the clip) via ffmpeg scene detection."""
     try:
-        out = subprocess.run(
+        out = run_service_process(
             ["ffmpeg", "-nostdin", "-i", clip_path, "-filter:v",
              f"select='gt(scene,{threshold})',showinfo", "-f", "null", "-"],
+            popen=subprocess.Popen,
             capture_output=True, text=True, timeout=180,
         )
     except Exception:
@@ -366,9 +369,10 @@ def track(clip_path: str, duration: float, src_w: int, src_h: int, out_w: int, o
     tmp = tempfile.mkdtemp(prefix="spool-ft.")
     dets = []  # (t, faces, w, h) per sampled frame
     try:
-        subprocess.run(
+        run_service_process(
             ["ffmpeg", "-nostdin", "-v", "error", "-i", clip_path, "-vf", f"fps=1/{step}",
              "-frames:v", str(n), os.path.join(tmp, "f%05d.png")],
+            popen=subprocess.Popen,
             check=False, timeout=300,
         )
         frames = sorted(glob.glob(os.path.join(tmp, "f*.png")))

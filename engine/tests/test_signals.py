@@ -50,19 +50,19 @@ def _fake_run(stderr):
 
 
 def test_audio_energy_parses_volumedetect(monkeypatch):
-    monkeypatch.setattr(signals.subprocess, "run",
+    monkeypatch.setattr(signals, "run_service_process",
                         _fake_run("[Parsed_volumedetect] mean_volume: -22.5 dB\nmax_volume: -3.0 dB\n"))
     ae = signals.audio_energy("m.mp4", 1.0, 4.0)
     assert ae == {"mean_db": -22.5, "max_db": -3.0, "dynamic_db": 19.5}
 
 
 def test_audio_energy_none_when_unparseable(monkeypatch):
-    monkeypatch.setattr(signals.subprocess, "run", _fake_run("no volume info here"))
+    monkeypatch.setattr(signals, "run_service_process", _fake_run("no volume info here"))
     assert signals.audio_energy("m.mp4", 1.0, 4.0) is None
 
 
 def test_scene_density_counts_cuts_per_second(monkeypatch):
-    monkeypatch.setattr(signals.subprocess, "run",
+    monkeypatch.setattr(signals, "run_service_process",
                         _fake_run("pts_time:1.0\npts_time:2.0\npts_time:3.0\n"))   # 3 cuts over 6s
     assert signals.scene_density("m.mp4", 0.0, 6.0) == 0.5
 
@@ -125,7 +125,7 @@ def test_rms_db_series_parses_and_floors_silence(monkeypatch):
                   "lavfi.astats.Overall.RMS_level=-inf\n"      # a silent second → floored
                   "noise line ignored\n"
                   "lavfi.astats.Overall.RMS_level=-12.0\n")
-    monkeypatch.setattr(signals.subprocess, "run", lambda *a, **k: _R())
+    monkeypatch.setattr(signals, "run_service_process", lambda *a, **k: _R())
     assert signals._rms_db_series("m.mp4") == [-23.5, -120.0, -12.0]
 
 
@@ -174,7 +174,7 @@ def test_filmstrip_no_cache_returns_fresh_result_without_filesystem_delta(
         Path(args[-1]).write_bytes(b"fresh-jpeg")
         return types.SimpleNamespace(stderr="", stdout="", returncode=0)
 
-    monkeypatch.setattr(signals.subprocess, "run", fake_run)
+    monkeypatch.setattr(signals, "run_service_process", fake_run)
     before = _filesystem_snapshot(tmp_path)
 
     strip = signals.filmstrip(str(media), 1.0, 5.0, frames=2, use_cache=False)
@@ -188,7 +188,7 @@ def test_scene_cuts_offsets_window_relative_times_to_absolute(monkeypatch):
     class _R:
         stderr = ("[Parsed_showinfo] n:0 pts_time:1.500 type:I\n"
                   "[Parsed_showinfo] n:1 pts_time:4.250 type:P\n")
-    monkeypatch.setattr(signals.subprocess, "run", lambda *a, **k: _R())
+    monkeypatch.setattr(signals, "run_service_process", lambda *a, **k: _R())
     assert signals.scene_cuts("m.mp4", start=60.0, end=120.0) == [61.5, 64.25]
 
 

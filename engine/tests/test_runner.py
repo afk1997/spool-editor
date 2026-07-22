@@ -148,7 +148,7 @@ def test_run_info_success(monkeypatch, online_policy):
         stdout = fake_stdout
         stderr = ""
 
-    monkeypatch.setattr("runner.subprocess.run", lambda *a, **kw: FakeCompleted())
+    monkeypatch.setattr("runner.run_service_process", lambda *a, **kw: FakeCompleted())
 
     res = run_info("https://example.com/v", network_policy=online_policy)
     assert isinstance(res, InfoResult)
@@ -170,7 +170,7 @@ def test_run_info_handles_multiline_stdout(monkeypatch, online_policy):
         stdout = fake
         stderr = ""
 
-    monkeypatch.setattr("runner.subprocess.run", lambda *a, **kw: FakeCompleted())
+    monkeypatch.setattr("runner.run_service_process", lambda *a, **kw: FakeCompleted())
 
     res = run_info("https://example.com/v", network_policy=online_policy)
     assert res.title == "first"
@@ -182,7 +182,7 @@ def test_run_info_returns_error_on_nonzero(monkeypatch, online_policy):
         stdout = ""
         stderr = "ERROR: HTTP Error 403: Forbidden"
 
-    monkeypatch.setattr("runner.subprocess.run", lambda *a, **kw: FakeCompleted())
+    monkeypatch.setattr("runner.run_service_process", lambda *a, **kw: FakeCompleted())
 
     res = run_info("https://example.com/v", network_policy=online_policy)
     assert res.error_category == "auth_required"
@@ -195,7 +195,11 @@ def test_run_info_offline_invokes_neither_dns_nor_subprocess(monkeypatch):
     dns_calls = []
     process_calls = []
     monkeypatch.setattr(runner, "_is_safe_url_unleased", lambda url: dns_calls.append(url))
-    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **kw: process_calls.append((a, kw)))
+    monkeypatch.setattr(
+        runner,
+        "run_service_process",
+        lambda *a, **kw: process_calls.append((a, kw)),
+    )
 
     with pytest.raises(NetworkPolicyError) as denied:
         run_info("https://example.com/v", network_policy=policy)
@@ -218,7 +222,7 @@ def test_run_info_online_holds_one_lease_and_releases_on_error(monkeypatch):
         raise OSError("spawn failed")
 
     monkeypatch.setattr(runner, "_is_safe_url_unleased", validate)
-    monkeypatch.setattr(runner.subprocess, "run", fail)
+    monkeypatch.setattr(runner, "run_service_process", fail)
 
     with pytest.raises(OSError, match="spawn failed"):
         run_info("https://example.com/v", network_policy=policy)
@@ -328,7 +332,11 @@ def test_run_download_offline_invokes_neither_dns_nor_process(
     run_calls = []
     popen_calls = []
     monkeypatch.setattr(runner, "_is_safe_url_unleased", lambda url: dns_calls.append(url))
-    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **kw: run_calls.append((a, kw)))
+    monkeypatch.setattr(
+        runner,
+        "run_service_process",
+        lambda *a, **kw: run_calls.append((a, kw)),
+    )
     monkeypatch.setattr(runner.subprocess, "Popen", lambda *a, **kw: popen_calls.append((a, kw)))
     kwargs = {}
     if streaming:

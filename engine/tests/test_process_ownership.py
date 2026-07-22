@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import os
 from pathlib import Path
 import signal
@@ -16,6 +17,9 @@ from process_ownership import (
     ProcessRegistryClosed,
     ServiceProcessRegistry,
 )
+
+
+_ENGINE_ROOT = Path(__file__).resolve().parents[1]
 
 
 pytestmark = pytest.mark.skipif(
@@ -103,6 +107,230 @@ def test_completed_process_releases_its_registered_group():
 
     assert (stdout, stderr, process.returncode) == ("done\n", "", 0)
     assert registry.active_count == 0
+
+
+def test_run_process_matches_capture_and_check_contracts():
+    registry = ServiceProcessRegistry()
+
+    completed = registry.run_process(
+        [sys.executable, "-c", "print('owned')"],
+        popen=subprocess.Popen,
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=True,
+    )
+
+    assert completed.args[-1] == "print('owned')"
+    assert (completed.returncode, completed.stdout, completed.stderr) == (
+        0,
+        "owned\n",
+        "",
+    )
+    assert registry.active_count == 0
+
+    with pytest.raises(subprocess.CalledProcessError) as failed:
+        registry.run_process(
+            [sys.executable, "-c", "raise SystemExit(7)"],
+            popen=subprocess.Popen,
+            capture_output=True,
+            check=True,
+        )
+    assert failed.value.returncode == 7
+    assert registry.active_count == 0
+
+
+def test_run_process_timeout_force_kills_and_reaps_owned_group(tmp_path):
+    registry = ServiceProcessRegistry()
+    pid_path = tmp_path / "run-timeout-child.pid"
+    child_source = (
+        "import signal,time;"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        "time.sleep(60)"
+    )
+    parent_source = "\n".join(
+        (
+            "import pathlib,signal,subprocess,sys,time",
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+            f"child = subprocess.Popen([sys.executable, '-c', {child_source!r}])",
+            "time.sleep(0.1)",
+            "pathlib.Path(sys.argv[1]).write_text(str(child.pid))",
+            "time.sleep(60)",
+        )
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        registry.run_process(
+            [sys.executable, "-c", parent_source, str(pid_path)],
+            popen=subprocess.Popen,
+            capture_output=True,
+            timeout=0.3,
+        )
+
+    assert pid_path.exists()
+    child_pid = int(pid_path.read_text())
+    assert _wait_until(lambda: not _pid_exists(child_pid))
+    assert registry.active_count == 0
+
+
+def test_run_process_creation_is_linearized_against_close():
+    registry = ServiceProcessRegistry()
+    popen_entered = threading.Event()
+    release_popen = threading.Event()
+    process_holder = []
+    run_result: list[BaseException] = []
+    shutdown_result: list[BaseException] = []
+
+    def blocking_popen(argv, **kwargs):
+        process = subprocess.Popen(argv, **kwargs)
+        process_holder.append(process)
+        popen_entered.set()
+        assert release_popen.wait(2), "test did not release Popen"
+        return process
+
+    def run() -> None:
+        try:
+            registry.run_process(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                popen=blocking_popen,
+                timeout=30,
+            )
+        except BaseException as exc:
+            run_result.append(exc)
+
+    def shutdown() -> None:
+        try:
+            registry.shutdown(timeout=1.0, term_grace=0.05)
+        except BaseException as exc:
+            shutdown_result.append(exc)
+
+    run_thread = threading.Thread(target=run)
+    shutdown_thread = threading.Thread(target=shutdown)
+    run_thread.start()
+    assert popen_entered.wait(2), "owned run never entered Popen"
+    shutdown_thread.start()
+    try:
+        assert _wait_until(lambda: registry.closing)
+        release_popen.set()
+        run_thread.join(2)
+        shutdown_thread.join(2)
+
+        assert not run_thread.is_alive() and not shutdown_thread.is_alive()
+        assert len(run_result) == 1
+        assert isinstance(run_result[0], ProcessRegistryClosed)
+        assert shutdown_result == []
+        assert process_holder[0].poll() is not None
+        assert registry.active_count == 0
+    finally:
+        release_popen.set()
+        for process in process_holder:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=1)
+        run_thread.join(2)
+        shutdown_thread.join(2)
+
+
+def test_shutdown_broadcasts_term_before_force_kill():
+    registry = ServiceProcessRegistry()
+    events = []
+
+    class TermIgnoringProcess:
+        pid = 999_999_998
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            events.append("TERM")
+
+        def kill(self):
+            events.append("KILL")
+            self.returncode = -signal.SIGKILL
+
+    registry.spawn(
+        lambda: OwnedProcessTree(TermIgnoringProcess(), owns_group=False)
+    )
+
+    registry.shutdown(timeout=0.5, term_grace=0.02)
+
+    assert events == ["TERM", "KILL"]
+
+
+def test_many_processes_share_one_tiny_shutdown_deadline():
+    registry = ServiceProcessRegistry()
+    signals_sent = []
+
+    class SlowSignalProcess:
+        returncode = None
+
+        def __init__(self, pid):
+            self.pid = pid
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            signals_sent.append((self.pid, "TERM"))
+            time.sleep(0.02)
+
+        def kill(self):
+            signals_sent.append((self.pid, "KILL"))
+            time.sleep(0.02)
+
+    for index in range(20):
+        registry.spawn(
+            lambda index=index: OwnedProcessTree(
+                SlowSignalProcess(900_000_000 + index), owns_group=False
+            )
+        )
+
+    started = time.monotonic()
+    with pytest.raises(ProcessDrainError):
+        registry.shutdown(timeout=0.035, term_grace=0.01)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.12
+    assert len(signals_sent) < 10
+
+
+def test_shutdown_forces_term_ignoring_child_after_parent_was_reaped(tmp_path):
+    registry = ServiceProcessRegistry()
+    child_pid_path = tmp_path / "reaped-parent-child.pid"
+    child_source = (
+        "import signal,time;"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        "time.sleep(60)"
+    )
+    parent_source = "\n".join(
+        (
+            "import pathlib,subprocess,sys,time",
+            f"child = subprocess.Popen([sys.executable, '-c', {child_source!r}])",
+            "time.sleep(0.1)",
+            "pathlib.Path(sys.argv[1]).write_text(str(child.pid))",
+        )
+    )
+    process = registry.spawn_process(
+        [sys.executable, "-c", parent_source, str(child_pid_path)],
+        popen=subprocess.Popen,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    child_pid = None
+    try:
+        assert process.wait(timeout=2) == 0
+        child_pid = int(child_pid_path.read_text())
+        assert registry.active_count == 1
+
+        registry.shutdown(timeout=0.8, term_grace=0.1)
+
+        assert _wait_until(lambda: not _pid_exists(child_pid))
+        assert registry.active_count == 0
+    finally:
+        if child_pid is not None and _pid_exists(child_pid):
+            os.kill(child_pid, signal.SIGKILL)
+            _wait_until(lambda: not _pid_exists(child_pid))
 
 
 @pytest.mark.parametrize("ignore_term", [False, True])
@@ -270,3 +498,100 @@ def test_shutdown_registry_lock_acquisition_obeys_its_deadline():
 
     assert time.monotonic() - started < 0.25
     assert registry.closing is True
+
+
+def test_production_service_has_no_unowned_raw_subprocess_calls():
+    raw_calls = []
+
+    spawning_calls = {
+        "subprocess": {
+            "Popen",
+            "run",
+            "call",
+            "check_call",
+            "check_output",
+            "getoutput",
+            "getstatusoutput",
+        },
+        "asyncio": {"create_subprocess_exec", "create_subprocess_shell"},
+    }
+
+    class RawSubprocessVisitor(ast.NodeVisitor):
+        def __init__(self, relative_path: str, tree: ast.AST):
+            self.relative_path = relative_path
+            self.function_names: list[str] = []
+            self.module_aliases = {"subprocess": "subprocess", "asyncio": "asyncio", "os": "os"}
+            self.function_aliases = {}
+            for candidate in ast.walk(tree):
+                if isinstance(candidate, ast.Import):
+                    for alias in candidate.names:
+                        if alias.name in {"subprocess", "asyncio", "os"}:
+                            self.module_aliases[alias.asname or alias.name] = alias.name
+                elif (
+                    isinstance(candidate, ast.ImportFrom)
+                    and candidate.module in {"subprocess", "asyncio", "os"}
+                ):
+                    for alias in candidate.names:
+                        self.function_aliases[alias.asname or alias.name] = (
+                            candidate.module,
+                            alias.name,
+                        )
+
+        def visit_FunctionDef(self, node):
+            self.function_names.append(node.name)
+            self.generic_visit(node)
+            self.function_names.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Call(self, node):
+            function = node.func
+            module_name = None
+            function_name = None
+            if isinstance(function, ast.Attribute) and isinstance(function.value, ast.Name):
+                module_name = self.module_aliases.get(function.value.id)
+                function_name = function.attr
+            elif isinstance(function, ast.Name) and function.id in self.function_aliases:
+                module_name, function_name = self.function_aliases[function.id]
+
+            is_spawn = (
+                module_name in spawning_calls
+                and function_name in spawning_calls[module_name]
+            ) or (
+                module_name == "os"
+                and (
+                    function_name in {"system", "popen"}
+                    or str(function_name).startswith("spawn")
+                )
+            )
+            if is_spawn:
+                raw_calls.append(
+                    (
+                        self.relative_path,
+                        self.function_names[-1] if self.function_names else "<module>",
+                        f"{module_name}.{function_name}",
+                    )
+                )
+            self.generic_visit(node)
+
+    for source_path in sorted(_ENGINE_ROOT.rglob("*.py")):
+        relative = source_path.relative_to(_ENGINE_ROOT)
+        if relative.parts[0] in {"tests", "scripts"}:
+            continue
+        tree = ast.parse(
+            source_path.read_text(encoding="utf-8"), filename=str(relative)
+        )
+        RawSubprocessVisitor(str(relative), tree).visit(tree)
+
+    # The CLI-backed Codex provider is unreachable through Phase-0 routes while
+    # the security slice removes it. Keep this exception exact so any other raw
+    # launch fails immediately; deleting the dormant provider must delete it too.
+    assert raw_calls == [
+        ("clip/llm.py", "_spawn_reasoning_process", "subprocess.Popen"),
+        ("clip/llm.py", "_spawn_reasoning_process", "subprocess.Popen"),
+    ]
+    routes_source = (_ENGINE_ROOT / "routes" / "api_v1.py").read_text(
+        encoding="utf-8"
+    )
+    assert '_REASONING_PROVIDERS = ("none",)' in routes_source
+    assert "return _remote_reasoning_unavailable()" in routes_source

@@ -556,3 +556,46 @@ def test_playlist_timeout_terminates_real_process_tree_before_lease_release(
             except ProcessLookupError:
                 pass
         _wait_for_listing_pids_gone(pids)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group regression")
+def test_completed_listing_releases_owner_after_forcing_lingering_descendant(
+    monkeypatch, tmp_path,
+):
+    from process_ownership import ServiceProcessRegistry
+
+    helper = tmp_path / "completed_listing_tree.py"
+    child_pid_path = tmp_path / "completed-listing-child.pid"
+    helper.write_text(
+        f"#!{sys.executable}\n"
+        "import os, subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)\n"
+        "with open(os.environ['WATCH_CHILD_PID_FILE'], 'w') as handle:\n"
+        "    handle.write(str(child.pid))\n"
+        "    handle.flush()\n"
+        "    os.fsync(handle.fileno())\n"
+        "print('https://youtu.be/owned', flush=True)\n"
+    )
+    helper.chmod(0o755)
+    monkeypatch.setenv("WATCH_CHILD_PID_FILE", str(child_pid_path))
+    registry = ServiceProcessRegistry()
+    monkeypatch.setattr(
+        watcher,
+        "spawn_service_process",
+        lambda argv, **kwargs: registry.spawn_process(argv, **kwargs),
+    )
+    child_pid = None
+    try:
+        completed = watcher._run_listing_process([str(helper)], timeout=2)
+        child_pid = int(child_pid_path.read_text())
+
+        assert completed.returncode == 0
+        assert completed.stdout == "https://youtu.be/owned\n"
+        assert _wait_for_listing_pids_gone([child_pid])
+        assert registry.active_count == 0
+    finally:
+        if child_pid is not None and _listing_pid_alive(child_pid):
+            os.kill(child_pid, signal.SIGKILL)
+        if child_pid is not None:
+            _wait_for_listing_pids_gone([child_pid])

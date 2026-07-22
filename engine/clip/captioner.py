@@ -16,6 +16,8 @@ import subprocess
 import sys
 import tempfile
 
+from process_ownership import run_service_process
+
 from . import _ffmpeg
 from . import exporter
 
@@ -173,7 +175,13 @@ def generate(
             ass_ov["balance"] = True
         if ass_ov:
             argv.append(json.dumps(ass_ov))
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        proc = run_service_process(
+            argv,
+            popen=subprocess.Popen,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
         if proc.returncode != 0:
             raise RuntimeError(
                 f"ass generation failed (rc={proc.returncode}): {proc.stderr.strip()[-300:]}"

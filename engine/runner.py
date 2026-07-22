@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass, field
 
 from network_policy import NetworkPolicy
+from process_ownership import run_service_process, spawn_service_process
 from safety import _is_safe_url_unleased
 
 
@@ -174,7 +175,13 @@ def run_info(
 def _run_info_leased(url: str, *, timeout: int) -> InfoResult:
     argv = build_info_argv(url)
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        proc = run_service_process(
+            argv,
+            popen=subprocess.Popen,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
     except subprocess.TimeoutExpired:
         return InfoResult(error_category="timeout", error_raw="info fetch timed out")
     if proc.returncode != 0:
@@ -300,14 +307,7 @@ class _OwnedDownloadProcess:
 
 def _spawn_download_process(argv, **kwargs) -> _OwnedDownloadProcess:
     """Spawn a download in an isolated POSIX session, with a fake-safe fallback."""
-    owns_group = os.name == "posix"
-    try:
-        process = subprocess.Popen(argv, start_new_session=owns_group, **kwargs)
-    except TypeError:
-        # Some platform shims and lightweight test fakes do not accept the POSIX kwarg.
-        process = subprocess.Popen(argv, **kwargs)
-        owns_group = False
-    return _OwnedDownloadProcess(process, owns_group=owns_group)
+    return spawn_service_process(argv, popen=subprocess.Popen, **kwargs)
 
 
 def _cleanup_glob(out_template: str) -> None:

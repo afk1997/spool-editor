@@ -21,6 +21,8 @@ import subprocess
 import sys
 import tempfile
 
+from process_ownership import run_service_process
+
 from . import _ffmpeg
 from . import exporter
 
@@ -37,9 +39,10 @@ MOTION_TIMEOUT = 600
 
 def probe_dimensions(path: str) -> tuple[int, int]:
     """Return (width, height) of the first video stream via ffprobe."""
-    out = subprocess.run(
+    out = run_service_process(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", path],
+        popen=subprocess.Popen,
         capture_output=True, text=True, timeout=30,
     )
     if out.returncode != 0:
@@ -160,7 +163,13 @@ def _roi_motion_segments(left_txt: str, right_txt: str, min_dwell: float,
     argv = [sys.executable, _ROI_MOTION_SCRIPT, left_txt, right_txt, str(min_dwell)]
     if smoothing is not None:
         argv.append(str(int(smoothing)))
-    out = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    out = run_service_process(
+        argv,
+        popen=subprocess.Popen,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
     if out.returncode != 0:
         raise RuntimeError(f"roi_motion failed (rc={out.returncode}): {out.stderr.strip()[-300:]}")
     return json.loads(out.stdout)
@@ -394,8 +403,9 @@ def _run_pan_expr(segments: list[dict], left_x: int, right_x: int) -> str:
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(segments, f)
-        out = subprocess.run(
+        out = run_service_process(
             [sys.executable, _PAN_EXPR_SCRIPT, seg_path, str(left_x), str(right_x)],
+            popen=subprocess.Popen,
             capture_output=True, text=True, timeout=30,
         )
         if out.returncode != 0:

@@ -15,6 +15,7 @@ import time
 
 from job_capacity import QueueFullError
 from network_policy import NetworkPolicy, NetworkPolicyError
+from process_ownership import spawn_service_process
 
 _VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi")
 
@@ -57,18 +58,8 @@ _listing_cache: dict[tuple[str, int], dict] = {}
 def _spawn_listing_process(argv: list[str]):
     """Start a listing parent in its own POSIX session; tolerate lightweight fakes."""
     kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True}
-    owns_group = os.name == "posix"
-    if not owns_group:
-        process = subprocess.Popen(argv, **kwargs)
-    else:
-        try:
-            process = subprocess.Popen(argv, start_new_session=True, **kwargs)
-        except TypeError:
-            # Small test fakes and unusual process shims may not accept the POSIX kwarg.
-            process = subprocess.Popen(argv, **kwargs)
-            owns_group = False
-    pgid = process.pid if owns_group and hasattr(process, "pid") else None
-    return process, pgid
+    process = spawn_service_process(argv, popen=subprocess.Popen, **kwargs)
+    return process, process.pgid
 
 
 def _listing_group_gone(pgid: int) -> bool:
@@ -126,15 +117,18 @@ def _quiesce_listing_tree(process, pgid: int | None, *, force: bool) -> None:
     if force:
         _signal_listing_tree(process, pgid)
         _reap_listing_parent(process)
-    if pgid is None:
-        return
-    if _wait_listing_group_gone(pgid, timeout=0.05):
-        return
-    # A normally-exited parent can still leave ffmpeg/external-downloader children.
-    _signal_listing_tree(process, pgid)
-    if _wait_listing_group_gone(pgid, timeout=5.0):
-        return
-    raise RuntimeError("watch listing process group did not exit after SIGKILL")
+    if pgid is not None and not _wait_listing_group_gone(pgid, timeout=0.05):
+        # A normally-exited parent can still leave ffmpeg/external-downloader children.
+        _signal_listing_tree(process, pgid)
+        if not _wait_listing_group_gone(pgid, timeout=5.0):
+            raise RuntimeError("watch listing process group did not exit after SIGKILL")
+
+    # The process-wide wrapper unregisters only after it independently confirms
+    # direct-parent reap and group disappearance. Custom pgid cleanup above must
+    # therefore hand that proof back instead of leaving a permanent active entry.
+    wait_for_group_exit = getattr(process, "wait_for_group_exit", None)
+    if callable(wait_for_group_exit):
+        wait_for_group_exit(timeout=0.0, forced_timeout=0.1)
 
 
 def _run_listing_process(argv: list[str], *, timeout: float):

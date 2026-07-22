@@ -35,6 +35,7 @@ import transcript_io
 from jobs import JobStatus
 from job_capacity import QueueFullError
 from network_policy import NetworkPolicyError
+from process_ownership import run_service_process
 from safety import (
     token_or_sig_required, token_required,
     SCOPE_MEDIA, SCOPE_TRANSCRIPT_EXPORT,
@@ -734,8 +735,13 @@ def doctor():
         if shutil.which("ffmpeg") is None:
             return None
         try:
-            out = subprocess.run(["ffmpeg", "-version"],
-                                 capture_output=True, text=True, timeout=5)
+            out = run_service_process(
+                ["ffmpeg", "-version"],
+                popen=subprocess.Popen,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
         except (OSError, subprocess.SubprocessError):
             return None
         head = (out.stdout or "").splitlines()[:1]
@@ -749,8 +755,13 @@ def doctor():
         if shutil.which("ffmpeg") is None:
             return []
         try:
-            out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
-                                 capture_output=True, text=True, timeout=5)
+            out = run_service_process(
+                ["ffmpeg", "-hide_banner", "-encoders"],
+                popen=subprocess.Popen,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
         except (OSError, subprocess.SubprocessError):
             return []
         # The hardware/software encoders Spool's exporter picks among.

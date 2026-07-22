@@ -669,7 +669,11 @@ def test_queued_download_rechecks_offline_before_deferred_info_or_download(
     assert response.status_code == 201
     target_id = response.get_json()["id"]
     monkeypatch.setattr(safety.socket, "getaddrinfo", lambda *args: dns_calls.append(args))
-    monkeypatch.setattr(app_module.run_info.__globals__["subprocess"], "run", lambda *a, **kw: subprocess_calls.append((a, kw)))
+    monkeypatch.setitem(
+        app_module.run_info.__globals__,
+        "run_service_process",
+        lambda *a, **kw: subprocess_calls.append((a, kw)),
+    )
     monkeypatch.setattr(app_module.run_info.__globals__["subprocess"], "Popen", lambda *a, **kw: subprocess_calls.append((a, kw)))
     application.extensions["trove.network_policy"].enable_offline()
     release_blocker.set()

@@ -243,6 +243,68 @@ class ServiceProcessRegistry:
 
         return self.spawn(factory)
 
+    def run_process(
+        self,
+        argv,
+        *,
+        popen=subprocess.Popen,
+        input=None,
+        capture_output: bool = False,
+        timeout: float | None = None,
+        check: bool = False,
+        **kwargs,
+    ) -> subprocess.CompletedProcess:
+        """Owned equivalent of ``subprocess.run`` for service-reachable commands."""
+        if input is not None:
+            if kwargs.get("stdin") is not None:
+                raise ValueError("stdin and input arguments may not both be used")
+            kwargs["stdin"] = subprocess.PIPE
+        if capture_output:
+            if kwargs.get("stdout") is not None or kwargs.get("stderr") is not None:
+                raise ValueError(
+                    "stdout and stderr arguments may not be used with capture_output"
+                )
+            kwargs["stdout"] = subprocess.PIPE
+            kwargs["stderr"] = subprocess.PIPE
+
+        process = self.spawn_process(argv, popen=popen, **kwargs)
+        try:
+            stdout, stderr = process.communicate(input=input, timeout=timeout)
+        except subprocess.TimeoutExpired as timeout_error:
+            process.kill()
+            try:
+                stdout, stderr = process.communicate(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                stdout = timeout_error.output
+                stderr = timeout_error.stderr
+            try:
+                process.wait_for_group_exit(timeout=0.05, forced_timeout=2.0)
+            except (OSError, ProcessDrainError, subprocess.SubprocessError):
+                # Retained registry ownership lets signal shutdown retry the drain.
+                pass
+            timeout_error.stdout = stdout
+            timeout_error.stderr = stderr
+            raise
+        except BaseException:
+            try:
+                process.kill()
+                process.wait(timeout=2.0)
+                process.wait_for_group_exit(timeout=0.05, forced_timeout=2.0)
+            except (OSError, ProcessDrainError, subprocess.SubprocessError):
+                pass
+            raise
+
+        process.wait_for_group_exit(timeout=0.05, forced_timeout=2.0)
+        returncode = process.returncode
+        if check and returncode:
+            raise subprocess.CalledProcessError(
+                returncode,
+                argv,
+                output=stdout,
+                stderr=stderr,
+            )
+        return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
     def release_if_exited(
         self,
         process: OwnedProcessTree,
@@ -278,6 +340,8 @@ class ServiceProcessRegistry:
         soft_deadline: bool = False,
     ) -> tuple[OwnedProcessTree, ...]:
         while True:
+            if time.monotonic() >= deadline:
+                return known
             try:
                 active = self._snapshot(deadline=deadline)
             except ProcessDrainError:
@@ -312,6 +376,8 @@ class ServiceProcessRegistry:
 
         # Broadcast each phase before waiting so one slow tree cannot starve peers.
         for process in active:
+            if time.monotonic() >= deadline:
+                break
             try:
                 process.terminate(deadline=deadline)
             except (OSError, ProcessDrainError) as exc:
@@ -324,6 +390,8 @@ class ServiceProcessRegistry:
             soft_deadline=True,
         )
         for process in remaining:
+            if time.monotonic() >= deadline:
+                break
             try:
                 process.kill(deadline=deadline)
             except (OSError, ProcessDrainError) as exc:
@@ -340,3 +408,13 @@ class ServiceProcessRegistry:
 
 
 service_processes = ServiceProcessRegistry()
+
+
+def spawn_service_process(argv, *, popen=subprocess.Popen, **kwargs) -> OwnedProcessTree:
+    """Spawn through the process-wide engine registry."""
+    return service_processes.spawn_process(argv, popen=popen, **kwargs)
+
+
+def run_service_process(argv, *, popen=subprocess.Popen, **kwargs):
+    """Run through the process-wide engine registry."""
+    return service_processes.run_process(argv, popen=popen, **kwargs)

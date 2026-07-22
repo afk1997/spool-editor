@@ -29,6 +29,46 @@ class _FakePopen:
         self.returncode = -9
 
 
+def test_shared_ffmpeg_confirms_owned_group_exit_on_success(monkeypatch, tmp_path):
+    events = []
+
+    class _OwnedFake(_FakePopen):
+        def wait_for_group_exit(self, **kwargs):
+            events.append(("group-exit", kwargs))
+
+    monkeypatch.setattr(
+        _ffmpeg,
+        "spawn_service_process",
+        lambda argv, **kwargs: _OwnedFake(argv, **kwargs),
+    )
+
+    _ffmpeg.run(["ffmpeg", "-version"])
+
+    assert events == [
+        ("group-exit", {"timeout": 0.05, "forced_timeout": 2.0})
+    ]
+
+
+def test_shared_ffmpeg_drain_failure_still_unregisters_process(monkeypatch):
+    registrations = []
+
+    class _UndrainedFake(_FakePopen):
+        def wait_for_group_exit(self, **_kwargs):
+            raise RuntimeError("tree still live")
+
+    monkeypatch.setattr(
+        _ffmpeg,
+        "spawn_service_process",
+        lambda argv, **kwargs: _UndrainedFake(argv, **kwargs),
+    )
+
+    with pytest.raises(RuntimeError, match="tree still live"):
+        _ffmpeg.run(["ffmpeg", "-version"], register_proc=registrations.append)
+
+    assert registrations[0] is not None
+    assert registrations[-1] is None
+
+
 def test_cut_invokes_ffmpeg_accurate_reencode(monkeypatch, tmp_path):
     captured = {}
 

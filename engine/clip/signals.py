@@ -20,6 +20,8 @@ import re
 import subprocess
 import tempfile
 
+from process_ownership import run_service_process
+
 # Tiny, transparent intensity lexicon — strong/charged words that mark a clip-worthy beat. NOT a
 # real sentiment model; a visible heuristic (the glass-box point is you can see exactly what fired).
 _INTENSITY = {
@@ -61,9 +63,10 @@ def audio_energy(media_path: str, start: float, end: float) -> dict | None:
     failure (best-effort — a missing signal must never break moment-finding)."""
     dur = max(0.05, float(end) - float(start))
     try:
-        out = subprocess.run(
+        out = run_service_process(
             ["ffmpeg", "-nostdin", "-v", "info", "-ss", f"{float(start):.3f}", "-t", f"{dur:.3f}",
              "-i", media_path, "-vn", "-af", "volumedetect", "-f", "null", "-"],
+            popen=subprocess.Popen,
             capture_output=True, text=True, timeout=60,
         ).stderr
     except Exception:
@@ -82,9 +85,10 @@ def scene_density(media_path: str, start: float, end: float, threshold: float = 
     pace. ``None`` on failure."""
     dur = max(0.05, float(end) - float(start))
     try:
-        out = subprocess.run(
+        out = run_service_process(
             ["ffmpeg", "-nostdin", "-v", "info", "-ss", f"{float(start):.3f}", "-t", f"{dur:.3f}",
              "-i", media_path, "-vf", f"select='gt(scene,{threshold})',showinfo", "-an", "-f", "null", "-"],
+            popen=subprocess.Popen,
             capture_output=True, text=True, timeout=120,
         ).stderr
     except Exception:
@@ -99,9 +103,10 @@ def scene_cuts(media_path: str, start: float, end: float, threshold: float = 0.3
     so we add ``start`` back. ``None`` on failure (best-effort — never breaks the editor)."""
     dur = max(0.05, float(end) - float(start))
     try:
-        out = subprocess.run(
+        out = run_service_process(
             ["ffmpeg", "-nostdin", "-v", "info", "-ss", f"{float(start):.3f}", "-t", f"{dur:.3f}",
              "-i", media_path, "-vf", f"select='gt(scene,{threshold})',showinfo", "-an", "-f", "null", "-"],
+            popen=subprocess.Popen,
             capture_output=True, text=True, timeout=120,
         ).stderr
     except Exception:
@@ -123,11 +128,12 @@ def _rms_db_series(media_path: str, start: float | None = None, end: float | Non
     if start is not None and end is not None:
         pre = ["-ss", f"{float(start):.3f}", "-t", f"{max(0.05, float(end) - float(start)):.3f}"]
     try:
-        out = subprocess.run(
+        out = run_service_process(
             ["ffmpeg", "-nostdin", "-v", "quiet", *pre, "-i", media_path, "-map", "0:a:0", "-ac", "1",
              "-af", "aresample=8000,asetnsamples=8000:p=0,astats=reset=1:metadata=1,"
                     "ametadata=mode=print:key=lavfi.astats.Overall.RMS_level:file=-",
              "-f", "null", "-"],
+            popen=subprocess.Popen,
             capture_output=True, text=True, timeout=300,
         ).stdout
     except Exception:
@@ -208,10 +214,11 @@ def filmstrip(media_path: str, start: float, end: float, *, frames: int = 12,
     with tempfile.TemporaryDirectory() as td:
         out = os.path.join(td, "strip.jpg")
         try:
-            subprocess.run(
+            run_service_process(
                 ["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{float(start):.3f}", "-t", f"{dur:.3f}",
                  "-i", media_path, "-vf", f"fps={n}/{dur:.3f},scale=-1:{int(height)},tile={n}x1",
                  "-frames:v", "1", "-q:v", "6", out],
+                popen=subprocess.Popen,
                 capture_output=True, text=True, timeout=120,
             )
             with open(out, "rb") as f:

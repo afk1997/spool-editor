@@ -15,6 +15,8 @@ import tempfile
 import time
 from dataclasses import dataclass
 
+from process_ownership import spawn_service_process
+
 
 # Default ffmpeg timeout. The old 10-minute limit failed multi-hour
 # lectures even though transcoding is faster than realtime — a 90-min
@@ -84,8 +86,9 @@ def extract_audio(
     proc = None
     rc = None
     try:
-        proc = subprocess.Popen(
+        proc = spawn_service_process(
             argv,
+            popen=subprocess.Popen,
             stdout=subprocess.DEVNULL,
             stderr=stderr_fd,
         )
@@ -131,6 +134,14 @@ def extract_audio(
                 except subprocess.TimeoutExpired: pass
                 raise RuntimeError(f"ffmpeg timed out after {eff_timeout}s")
     finally:
+        drain_error = None
+        if proc is not None:
+            wait_for_group_exit = getattr(proc, "wait_for_group_exit", None)
+            if callable(wait_for_group_exit):
+                try:
+                    wait_for_group_exit(timeout=0.05, forced_timeout=2.0)
+                except BaseException as exc:
+                    drain_error = exc
         if register_proc is not None:
             try:
                 register_proc(None)
@@ -152,6 +163,8 @@ def extract_audio(
             os.unlink(stderr_path)
         except OSError:
             pass
+        if drain_error is not None:
+            raise drain_error
 
     if rc != 0:
         raise RuntimeError(f"ffmpeg failed (rc={rc}): {stderr_text.strip()[-300:]}")

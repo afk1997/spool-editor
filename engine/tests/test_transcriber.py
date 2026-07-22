@@ -65,6 +65,52 @@ def test_extract_audio_invokes_ffmpeg(monkeypatch, tmp_path):
     assert str(dst) in argv
 
 
+def test_extract_audio_confirms_owned_group_exit_before_return(monkeypatch, tmp_path):
+    events = []
+
+    class _OwnedFake(_FakePopen):
+        def wait_for_group_exit(self, **kwargs):
+            events.append(("group-exit", kwargs))
+
+    monkeypatch.setattr(
+        transcriber,
+        "spawn_service_process",
+        lambda argv, **kwargs: _OwnedFake(argv, **kwargs),
+    )
+
+    transcriber.extract_audio(
+        str(tmp_path / "in.mp4"), str(tmp_path / "out.wav")
+    )
+
+    assert events == [
+        ("group-exit", {"timeout": 0.05, "forced_timeout": 2.0})
+    ]
+
+
+def test_extract_audio_drain_failure_still_unregisters_process(monkeypatch, tmp_path):
+    registrations = []
+
+    class _UndrainedFake(_FakePopen):
+        def wait_for_group_exit(self, **_kwargs):
+            raise RuntimeError("tree still live")
+
+    monkeypatch.setattr(
+        transcriber,
+        "spawn_service_process",
+        lambda argv, **kwargs: _UndrainedFake(argv, **kwargs),
+    )
+
+    with pytest.raises(RuntimeError, match="tree still live"):
+        transcriber.extract_audio(
+            str(tmp_path / "in.mp4"),
+            str(tmp_path / "out.wav"),
+            register_proc=registrations.append,
+        )
+
+    assert registrations[0] is not None
+    assert registrations[-1] is None
+
+
 def test_extract_audio_raises_on_ffmpeg_failure(monkeypatch, tmp_path):
     def fake_popen(argv, **kw):
         p = _FakePopen(argv, **kw)
