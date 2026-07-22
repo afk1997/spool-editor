@@ -1,4 +1,4 @@
-"""Tests for clip.agent.plan — the NL→action planner. LLM provider mocked (no codex)."""
+"""Tests for clip.agent.plan with a deterministic non-egress provider."""
 from __future__ import annotations
 
 import json
@@ -71,15 +71,21 @@ def test_transcript_lines_reach_the_model():
     assert "find_moments" in cap["system"] and "make_clip" in cap["system"]
 
 
-def test_offline_default_provider_raises():
-    with pytest.raises(llm.OfflineError):
+def test_phase_zero_remote_plan_is_stably_unavailable():
+    with pytest.raises(llm.RemoteReasoningUnavailableError) as denied:
         agent.plan(
             "x",
-            provider="codex",
+            provider=" CoDeX ",
             env={
                 "SPOOL_OFFLINE": "1",
-                "SPOOL_LLM_PROVIDER": "codex",
+                "SPOOL_LLM_PROVIDER": "CoDeX",
                 "SPOOL_LLM_EGRESS_CONSENT": "1",
             },
             network_policy=NetworkPolicy(offline=True),
         )
+
+    assert denied.value.error_category == "remote_reasoning_unavailable"
+    assert str(denied.value) == (
+        "Remote reasoning is unavailable in Phase 0 until a supported zero-tool "
+        "transport ships."
+    )

@@ -1,10 +1,9 @@
 """Moment finding + ranking over a transcript (spec §5 P1 / §4 ``discover.*``).
 
 Reads trove's ``words.json`` and proposes self-contained clip candidates with a
-rationale, using a moment-finding LLM. The LLM is a **pluggable provider** (see
-:mod:`clip.llm`); the default is the *codex bridge* (the user's ChatGPT/Codex
-subscription via the Codex CLI — no API key, no local GPU). Only transcript *text*
-leaves the machine; offline-mode disables the egress provider.
+rationale, using a moment-finding LLM. Remote reasoning is unavailable in Phase 0;
+the only executable path is an explicitly injected deterministic provider whose
+``egress`` metadata is the literal ``False``.
 
 The prompt reuses the Step-1 moment-finding heuristics from **clipify** by Louise de
 Sadeleer (MIT) — punchlines/reactions, reversals, awkward pauses, quotable one-liners,
@@ -90,16 +89,26 @@ def find_moments(
 
     ``mode`` tunes the prompt/signals (funny / insightful / hot-take / story / how-to /
     q&a). ``transcript_window`` scopes the search to ``(start, end)`` seconds. ``provider``
-    selects the LLM (a name, an :class:`~clip.llm.LLMProvider` instance for the injected
-    agent LLM, or ``None`` for the configured default = the codex bridge).
+    selects the LLM. Phase 0 accepts only an explicitly injected non-egress
+    :class:`~clip.llm.LLMProvider`; the named/default ``none`` provider is unavailable.
 
     Returns candidates ``[{start, end, title, rationale, mode, signals, source_id?}]``
     in the model's best-first order. Pure read of ``words.json``; no media is touched.
 
     Raises ``ValueError`` if the window contains no transcript words or the reply has no
-    parseable JSON, and propagates :class:`~clip.llm.OfflineError` /
-    :class:`~clip.llm.ProviderUnavailableError` from the provider.
+    parseable JSON, and propagates
+    :class:`~clip.llm.RemoteReasoningUnavailableError` or
+    :class:`~clip.llm.ProviderUnavailableError` from the provider boundary.
     """
+    resolved_provider = llm.get_provider(
+        provider,
+        env=env,
+        network_policy=network_policy,
+        privacy_state=privacy_state,
+    )
+    if isinstance(resolved_provider, llm.NoneProvider):
+        raise llm.RemoteReasoningUnavailableError()
+
     data = transcript_io.load(words_json_path)
     lines = _transcript_lines(data, transcript_window)
     if not lines:
@@ -112,7 +121,7 @@ def find_moments(
     reply = llm.complete(
         prompt,
         system=system,
-        provider=provider,
+        provider=resolved_provider,
         env=env,
         network_policy=network_policy,
         privacy_state=privacy_state,

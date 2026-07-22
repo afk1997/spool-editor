@@ -1,7 +1,7 @@
 """Tests for clip.moments — LLM moment-finding over words.json.
 
-The LLM provider is always mocked (a CallableProvider wrapping a stub) — no Codex CLI
-is invoked. We assert: the transcript + clipify heuristics reach the model, the JSON
+The LLM provider is always a deterministic non-egress CallableProvider. We assert:
+the transcript + clipify heuristics reach the provider, the JSON
 reply is parsed (bare / fenced / with preamble), candidates are shaped + validated, and
 the windowing / count / source_id / offline contracts hold.
 """
@@ -161,21 +161,22 @@ def test_find_moments_empty_window_raises(words_json):
         moments.find_moments(words_json, transcript_window=(500.0, 600.0), provider=_provider(_TWO))
 
 
-def test_find_moments_offline_with_default_codex_raises(words_json):
-    # No provider instance → resolves the egress codex bridge → offline guard fires
-    # before any CLI is touched.
-    policy = NetworkPolicy(offline=True)
-    with pytest.raises(llm.OfflineError):
+def test_find_moments_codex_fails_before_transcript_or_provider_use(tmp_path):
+    missing_transcript = tmp_path / "must-not-be-read.words.json"
+    with pytest.raises(llm.RemoteReasoningUnavailableError) as denied:
         moments.find_moments(
-            words_json,
-            provider="codex",
+            str(missing_transcript),
+            provider=" CoDeX ",
             env={
                 "SPOOL_OFFLINE": "1",
-                "SPOOL_LLM_PROVIDER": "codex",
+                "SPOOL_LLM_PROVIDER": "CoDeX",
                 "SPOOL_LLM_EGRESS_CONSENT": "1",
             },
-            network_policy=policy,
+            network_policy=NetworkPolicy(offline=True),
         )
+
+    assert denied.value.error_category == "remote_reasoning_unavailable"
+    assert not missing_transcript.exists()
 
 
 def test_find_moments_threads_explicit_policy_and_live_privacy_state(
@@ -196,6 +197,7 @@ def test_find_moments_threads_explicit_policy_and_live_privacy_state(
     monkeypatch.setattr(moments.llm, "complete", fake_complete)
     moments.find_moments(
         words_json,
+        provider=_provider(_TWO),
         network_policy=policy,
         privacy_state=state,
     )

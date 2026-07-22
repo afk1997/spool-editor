@@ -1,20 +1,17 @@
 """Natural-language clip assistant — the studio Agent panel's brain (spec §2 agent mode).
 
 Maps a user chat message (+ optional transcript text) through the pluggable LLM layer.
-Remote providers such as Codex are strictly text-only: they receive no local tool catalog
-and can never dispatch or observe a local tool. Explicitly non-egress injected providers
-retain the Phase 0 read-only inspection loop over the same API surface the UI uses.
+Remote reasoning is unavailable in Phase 0. Explicitly non-egress injected providers
+retain the read-only inspection loop over the same API surface the UI uses.
 
 The legacy :func:`plan` helper only parses a single structured action. :func:`run_agent`
-owns the text-only remote path and the separately gated local inspection loop. Both are
-provider-injectable, so they are unit-testable with the LLM mocked — no Codex required.
+owns the gated local inspection loop. Both are provider-injectable, so they are
+unit-testable with deterministic local providers.
 """
 from __future__ import annotations
 
 import json
-import os  # noqa: E401 — kept here so the import block is contiguous
 import re
-import subprocess
 import time
 
 from network_policy import NetworkPolicy
@@ -176,46 +173,6 @@ _LOOP_SYSTEM = (
     "TOOLS:\n" + agent_tools.catalog_prompt()
 )
 
-_REMOTE_SYSTEM = (
-    "You are Spool's text-only clip assistant. Answer using only the user's message and "
-    "any transcript context included in the prompt. You have no access to local files, "
-    "sources, queues, watches, models, storage, application state, or local tools. Never "
-    "claim that you inspected local state. If the requested fact is not present in the "
-    "provided text, explain that you cannot inspect it. Reply in plain text and do not "
-    "emit a tool call or a JSON tool request."
-)
-
-REMOTE_AGENT_TOOLS_DISABLED_ERROR = {
-    "error": "remote_agent_tools_disabled",
-    "message": (
-        "Remote Agent tools are disabled. Codex receives only your message and "
-        "attached transcript text; it cannot inspect local app state."
-    ),
-}
-
-
-def _default_agent_provider(
-    env: dict | None,
-    network_policy: NetworkPolicy | None,
-    privacy_state: llm.PrivacyState | None,
-):
-    """Give the text-only Codex assistant more conversational reasoning effort than
-    moment extraction (``SPOOL_AGENT_REASONING``, default ``medium``). For any
-    non-Codex configured provider, return None so the normal resolver handles it."""
-    e = env if env is not None else os.environ
-    name = (e.get("SPOOL_LLM_PROVIDER") or llm.DEFAULT_PROVIDER).lower()
-    if name == "codex":
-        if network_policy is None:
-            raise ValueError("network_policy is required for the Codex agent provider")
-        return llm.CodexProvider(
-            network_policy=network_policy,
-            privacy_state=privacy_state,
-            env=e,
-            reasoning=(e.get("SPOOL_AGENT_REASONING") or "medium"),
-        )
-    return None
-
-
 def _truncate(obj, limit: int = _OBS_CHARS) -> str:
     try:
         s = json.dumps(obj, default=str)
@@ -243,60 +200,6 @@ def _provider_is_explicitly_non_egress(provider) -> bool:
         return False
 
 
-def _json_requests_tool(value) -> bool:
-    if isinstance(value, dict):
-        if "tool" in value:
-            return True
-        return any(_json_requests_tool(item) for item in value.values())
-    if isinstance(value, list):
-        return any(_json_requests_tool(item) for item in value)
-    return False
-
-
-def _remote_result(raw: str) -> dict:
-    parsed = _parse_obj(raw)
-    if _json_requests_tool(parsed):
-        return dict(REMOTE_AGENT_TOOLS_DISABLED_ERROR)
-
-    if isinstance(parsed, dict) and isinstance(parsed.get("final"), dict):
-        reply = str(parsed["final"].get("reply") or "").strip()
-        return _finish(reply or "Done.", [], [])
-    if isinstance(parsed, dict) and parsed.get("action") == "reply":
-        return _finish(str(parsed.get("reply") or "Done.").strip(), [], [])
-    if isinstance(parsed, dict) and (
-        "clarify" in parsed or parsed.get("action") == "clarify"
-    ):
-        clarification = (
-            parsed.get("clarify")
-            if isinstance(parsed.get("clarify"), dict)
-            else parsed
-        )
-        options = clarification.get("options") or []
-        question = str(
-            clarification.get("question")
-            or clarification.get("reply")
-            or "Could you clarify?"
-        )
-        return {
-            "action": "clarify",
-            "reply": str(clarification.get("reply") or question),
-            "question": question,
-            "options": (
-                [str(option) for option in options if str(option).strip()]
-                if isinstance(options, list)
-                else []
-            ),
-            "kind": (
-                clarification.get("kind")
-                if clarification.get("kind") in ("enum", "confirm", "multiselect")
-                else "enum"
-            ),
-            "tools": [],
-            "jobs": [],
-        }
-    return _finish((raw or "").strip()[:800] or "Done.", [], [])
-
-
 def _complete_with_retry(
     prompt: str,
     *,
@@ -307,8 +210,7 @@ def _complete_with_retry(
     privacy_state,
     attempts: int = 2,
 ) -> str:
-    """llm.complete with one retry for transient bridge failures (codex crash, timeout,
-    broken pipe). OfflineError is policy, not weather — re-raised immediately."""
+    """Retry transient failures from an explicitly injected local provider once."""
     last: Exception | None = None
     for attempt in range(attempts):
         try:
@@ -320,10 +222,13 @@ def _complete_with_retry(
                 network_policy=network_policy,
                 privacy_state=privacy_state,
             )
-        except (llm.OfflineError, llm.ReasoningDisabledError):
+        except (
+            llm.OfflineError,
+            llm.ReasoningDisabledError,
+            llm.RemoteReasoningUnavailableError,
+        ):
             raise
-        except (llm.ProviderUnavailableError, RuntimeError, OSError,
-                subprocess.TimeoutExpired) as e:
+        except (llm.ProviderUnavailableError, RuntimeError, OSError) as e:
             last = e
             if attempt + 1 < attempts:
                 time.sleep(0.5 * (attempt + 1))
@@ -344,41 +249,29 @@ def run_agent(
     max_steps: int = _MAX_STEPS,
     confirmed_tool: "str | None" = None,
 ) -> dict:
-    """Run one text-only completion for an egress provider or a bounded read-only
-    ReAct loop for an explicitly non-egress provider. ``client`` is used only by the
-    latter. ``elapsed`` is an optional ``() -> float`` ms clock for trace timing.
+    """Run a bounded read-only ReAct loop for an explicitly injected non-egress
+    provider. ``elapsed`` is an optional ``() -> float`` ms clock for trace timing.
     ``confirmed_tool`` remains accepted compatibility baggage, but Phase 0 treats it
     as inert: no confirmation can bypass the read-only mutation fuse. Returns
     ``{reply, action, jobs[], tools[], question?, options?, kind?, pending?}``. Propagates
-    OfflineError always, and ProviderUnavailableError / RuntimeError when no tools have run yet
+    RemoteReasoningUnavailableError always, and ProviderUnavailableError / RuntimeError
+    when no tools have run yet
     (a setup problem); mid-loop transient failures after at least one tool ran are retried once
     then degraded to a partial-result _finish instead of an unhandled exception."""
     clock = elapsed or (lambda: time.monotonic() * 1000.0)
-    if provider is None:                              # default the in-app agent to higher reasoning
-        provider = _default_agent_provider(env, network_policy, privacy_state)
     provider = llm.get_provider(
         provider,
         env=env,
         network_policy=network_policy,
         privacy_state=privacy_state,
     )
+    if isinstance(provider, llm.NoneProvider):
+        raise llm.RemoteReasoningUnavailableError()
 
     transcript = [f"User: {message.strip()}"]
     if transcript_lines:
         body = "\n".join(f"[{s:.2f}–{e:.2f}] {t}" for s, e, t in transcript_lines)
         transcript.append("Transcript context (each line [start–end seconds] text):\n\n" + body)
-
-    if not _provider_is_explicitly_non_egress(provider):
-        prompt = "\n\n".join(transcript)
-        raw = _complete_with_retry(
-            prompt,
-            system=_REMOTE_SYSTEM,
-            provider=provider,
-            env=env,
-            network_policy=network_policy,
-            privacy_state=privacy_state,
-        )
-        return _remote_result(raw)
 
     tools_trace: list[dict] = []
     jobs: list[dict] = []
@@ -394,7 +287,11 @@ def run_agent(
                 network_policy=network_policy,
                 privacy_state=privacy_state,
             )
-        except (llm.OfflineError, llm.ReasoningDisabledError):
+        except (
+            llm.OfflineError,
+            llm.ReasoningDisabledError,
+            llm.RemoteReasoningUnavailableError,
+        ):
             raise
         except Exception:
             if not tools_trace:
@@ -434,9 +331,9 @@ def run_agent(
 
         args = step.get("args") if isinstance(step.get("args"), dict) else {}
         t0 = clock()
+        if not _provider_is_explicitly_non_egress(provider):
+            raise llm.RemoteReasoningUnavailableError()
         try:
-            if not _provider_is_explicitly_non_egress(provider):
-                return dict(REMOTE_AGENT_TOOLS_DISABLED_ERROR)
             result = tool.run(client, args)
             ok = True
         except Exception as e:                               # surface tool errors to the model, keep going
@@ -464,7 +361,11 @@ def run_agent(
             network_policy=network_policy,
             privacy_state=privacy_state,
         )
-    except (llm.OfflineError, llm.ReasoningDisabledError):
+    except (
+        llm.OfflineError,
+        llm.ReasoningDisabledError,
+        llm.RemoteReasoningUnavailableError,
+    ):
         raise
     except Exception:
         return _finish("Step budget reached and the provider dropped out — here's what I gathered.", tools_trace, jobs)
