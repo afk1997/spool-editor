@@ -75,9 +75,16 @@ describe("Studio local proxy configuration", () => {
     expect(harness).toContain("next start --hostname 127.0.0.1");
     expect(harness).toContain("TROVE_DOWNLOAD_DIR=");
     expect(harness).toContain("SPOOL_OFFLINE=0");
-    expect(harness).toContain("SPOOL_LLM_PROVIDER=none");
-    expect(harness).toContain("SPOOL_LLM_EGRESS_CONSENT=0");
+    expect(harness).toContain("SPOOL_LLM_PROVIDER=CoDeX");
+    expect(harness).toContain("SPOOL_LLM_EGRESS_CONSENT=YES");
     expect(harness).toContain("SPOOL_WATCH_INTERVAL=0");
+    expect(harness).toContain(
+      'wait_for_http "$ENGINE_PID" "http://127.0.0.1:8899/api/v1/doctor" "$TOKEN"',
+    );
+    expect(harness).toMatch(
+      /DOCTOR_JSON=.*Authorization: Bearer \$TOKEN/su,
+    );
+    expect(harness).not.toContain("codex login status");
     expect(harness).toContain("require_command ffprobe");
     expect(harness).toContain("curl --noproxy '*'");
     expect(harness).toContain('NO_PROXY="$LOOPBACK_NO_PROXY"');

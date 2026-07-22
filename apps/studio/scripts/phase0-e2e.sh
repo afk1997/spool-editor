@@ -209,7 +209,6 @@ require_command lsof
 require_command openssl
 require_command pgrep
 require_command pnpm
-require_command codex
 test -x engine/.venv/bin/python || fail "engine/.venv/bin/python is missing"
 test -x engine/.venv/bin/yt-dlp || fail "engine/.venv/bin/yt-dlp is missing"
 test -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
@@ -219,7 +218,6 @@ test -f engine/models/ACTIVE || fail "engine/models/ACTIVE is missing"
 ACTIVE_MODEL="$(tr -d '\r\n' <engine/models/ACTIVE)"
 test -n "$ACTIVE_MODEL" || fail "engine/models/ACTIVE is empty"
 test -f "engine/models/$ACTIVE_MODEL" || fail "active Whisper model $ACTIVE_MODEL is missing"
-codex login status >/dev/null 2>&1 || fail "Codex CLI is not logged in"
 assert_port_free 8899
 assert_port_free 3000
 
@@ -238,18 +236,19 @@ pnpm --filter @spool/studio build
     NO_PROXY="$LOOPBACK_NO_PROXY" \
     no_proxy="$LOOPBACK_NO_PROXY" \
     SPOOL_OFFLINE=0 \
-    SPOOL_LLM_PROVIDER=none \
-    SPOOL_LLM_EGRESS_CONSENT=0 \
+    SPOOL_LLM_PROVIDER=CoDeX \
+    SPOOL_LLM_EGRESS_CONSENT=YES \
     SPOOL_WATCH_INTERVAL=0 \
     .venv/bin/python app.py
 ) >"$ENGINE_LOG" 2>&1 &
 ENGINE_PID=$!
 
-wait_for_http "$ENGINE_PID" "http://127.0.0.1:8899/api/v1/doctor"
+wait_for_http "$ENGINE_PID" "http://127.0.0.1:8899/api/v1/doctor" "$TOKEN"
 wait_for_http "$ENGINE_PID" "http://127.0.0.1:8899/api/v1/jobs" "$TOKEN"
 assert_loopback_listener 8899
 
 DOCTOR_JSON="$(loopback_curl -fsS --connect-timeout 1 --max-time 5 \
+  -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:8899/api/v1/doctor)"
 CAPABILITIES_JSON="$(loopback_curl -fsS --connect-timeout 1 --max-time 5 \
   http://127.0.0.1:8899/api/v1/capabilities)"

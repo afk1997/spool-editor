@@ -12,8 +12,8 @@ import {
 const execFileAsync = promisify(execFile);
 
 /* Token-on Phase 0 acceptance. Run only through scripts/phase0-e2e.sh, which supplies isolated
- * engine state and a production Studio build. UI actions create every job; authenticated direct
- * reads only await exact IDs and prove that bypassing the Studio without a token is rejected. */
+ * engine state and a production Studio build. UI actions create every local job; authenticated
+ * direct calls prove remote reasoning is unavailable, while reads await exact UI-created IDs. */
 
 function isLoopbackHostname(hostname: string): boolean {
   const normalized = hostname.toLowerCase();
@@ -85,12 +85,15 @@ interface ClipJob extends TerminalJob {
   source_id: string | null;
   clip_id: string | null;
   result: {
-    candidates?: unknown[];
     clip_id?: string;
     render_id?: string;
-    aspect?: string;
   };
 }
+
+const REMOTE_REASONING_UNAVAILABLE = {
+  error: "remote_reasoning_unavailable",
+  message: "Remote reasoning is unavailable in Phase 0 until a supported zero-tool transport ships.",
+} as const;
 
 const sleep = (milliseconds: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
@@ -171,23 +174,19 @@ function isProxyResponse(
   return response.request().method() === method && proxyPath(response) === pathname;
 }
 
-function isSettingsPatch(
-  response: PlaywrightResponse,
-  key: string,
-  value: unknown,
-): boolean {
-  if (!isProxyResponse(response, "PATCH", `${PROXY_PREFIX}/settings`)) return false;
-  try {
-    const body = response.request().postDataJSON() as Record<string, unknown>;
-    return body[key] === value;
-  } catch {
-    return false;
-  }
-}
-
 async function admitted<T>(response: PlaywrightResponse): Promise<T> {
   expect(response.ok(), `${response.request().method()} ${response.url()} returned ${response.status()}`).toBe(true);
   return response.json() as Promise<T>;
+}
+
+async function expectRemoteReasoningUnavailable(path: string, body: object): Promise<void> {
+  const response = await directResponse(path, true, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  expect(response.status, `remote reasoning path ${path}`).toBe(409);
+  expect(await response.json()).toEqual(REMOTE_REASONING_UNAVAILABLE);
 }
 
 async function rangedMedia(page: Page, path: string, disposition: "attachment" | "inline") {
@@ -229,7 +228,7 @@ async function rangedMedia(page: Page, path: string, disposition: "attachment" |
   return result;
 }
 
-test("token-on URL import reaches a downloadable render only through the Studio proxy", async ({ page }) => {
+test("token-on URL import reaches a manual transcript cut and downloadable local render through the Studio proxy", async ({ page }) => {
   const browserEnginePaths: string[] = [];
   const boundaryViolations: string[] = [];
   page.on("request", (browserRequest) => {
@@ -242,15 +241,32 @@ test("token-on URL import reaches a downloadable render only through the Studio 
     if (browserRequest.headers().authorization) boundaryViolations.push(`browser exposed Authorization: ${url.pathname}`);
   });
 
-  const capabilities = await engine<{ auth_required: boolean }>("/capabilities");
+  const capabilities = await engine<{
+    auth_required: boolean;
+    features: {
+      automated_discovery: boolean;
+      remote_reasoning: boolean;
+      watch_reconcile: boolean;
+    };
+  }>("/capabilities");
   expect(capabilities.auth_required).toBe(true);
+  expect(capabilities.features.remote_reasoning).toBe(false);
+  expect(capabilities.features.automated_discovery).toBe(false);
+  expect(capabilities.features.watch_reconcile).toBe(false);
+  const settings = await engine<{
+    reasoning_egress_consent: boolean;
+    reasoning_provider: string;
+  }>("/settings");
+  expect(settings.reasoning_provider).toBe("none");
+  expect(settings.reasoning_egress_consent).toBe(false);
 
   const firstSse = page.waitForRequest(
     (browserRequest) => new URL(browserRequest.url()).pathname === `${PROXY_PREFIX}/events`,
     { timeout: 30_000 },
   );
 
-  // Establish explicit privacy state through the UI. Isolated state must start Online + None.
+  // Hostile legacy environment values are canonicalized before the UI loads: Phase 0 is None,
+  // consent false, and there is no enabled control that can opt into remote reasoning.
   await page.goto("/settings");
   const sseRequest = await firstSse;
   expect(sseRequest.headers().accept).toBe("text/event-stream");
@@ -259,31 +275,16 @@ test("token-on URL import reaches a downloadable render only through the Studio 
 
   const offline = page.getByRole("switch", { name: "Offline mode" });
   await expect(offline).toHaveAttribute("aria-checked", "false");
-  const codex = page.getByRole("button", { name: "Codex", exact: true });
-  await expect(codex).toHaveAttribute("aria-pressed", "false");
-
-  const providerPatch = page.waitForResponse(
-    (response) => isSettingsPatch(response, "reasoning_provider", "codex"),
-  );
-  await codex.click();
-  expect((await providerPatch).ok()).toBe(true);
-  await expect(codex).toHaveAttribute("aria-pressed", "true");
-
-  const consent = page.getByRole("switch", {
-    name: "Allow your message and any attached transcript text to leave this machine for Codex",
-  });
-  await expect(consent).toHaveAttribute("aria-checked", "false");
-  const consentPatch = page.waitForResponse(
-    (response) => isSettingsPatch(response, "reasoning_egress_consent", true),
-  );
-  await consent.click();
-  expect((await consentPatch).ok()).toBe(true);
-  await expect(consent).toHaveAttribute("aria-checked", "true");
-  await expect(page.getByRole("button", { name: "Privacy: Remote reasoning enabled" })).toBeVisible();
+  await expect(page.getByText("Phase 0 exposes no remote provider.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Unavailable in Phase 0", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Codex", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("switch", { name: /leave this machine for Codex/iu })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Privacy: Fully local" })).toBeVisible();
+  await expectRemoteReasoningUnavailable("/agent", { message: "find a funny moment" });
 
   // Submit the import through Studio and retain the exact UI-created source id.
   await page.goto("/import");
-  await expect(page.getByRole("button", { name: "Privacy: Remote reasoning enabled" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Privacy: Fully local" })).toBeVisible();
   await page.getByPlaceholder(/youtube\.com/i).fill(VIDEO_URL);
   const importResponse = page.waitForResponse(
     (response) => isProxyResponse(response, "POST", `${PROXY_PREFIX}/jobs`),
@@ -303,54 +304,70 @@ test("token-on URL import reaches a downloadable render only through the Studio 
   expect(completedDownload.filename).toBeTruthy();
   await waitForTranscript(sourceId, 120_000);
 
-  // Run one explicit discovery mode, preserve its exact job, then select one candidate.
-  await page.goto(`/sources/${encodeURIComponent(sourceId)}/discovery`);
-  await page.locator(".seg").first().getByRole("button", { name: /^Funny/u }).click();
-  const momentResponse = page.waitForResponse(
+  // Source-scoped remote discovery and production fail with the exact Phase 0 contract.
+  await expectRemoteReasoningUnavailable(
+    `/sources/${encodeURIComponent(sourceId)}/moments`,
+    { mode: "funny", count: 1 },
+  );
+  await expectRemoteReasoningUnavailable(
+    `/sources/${encodeURIComponent(sourceId)}/produce`,
+    {},
+  );
+
+  // A paused watch cannot bypass the same fuse. Its persisted API state and both
+  // job-id sets stay unchanged after the rejection.
+  const watchCreate = await directResponse("/watches", true, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: "Phase 0 disabled scan probe",
+      kind: "folder",
+      target: "/tmp",
+      enabled: false,
+    }),
+  });
+  expect(watchCreate.status).toBe(201);
+  const watch = await watchCreate.json() as { id: string };
+  const watchPath = `/watches/${encodeURIComponent(watch.id)}`;
+  const watchBefore = await engine<Record<string, unknown>>(watchPath);
+  const downloadsBefore = await engine<{ jobs: Array<{ id: string }> }>("/jobs?limit=500");
+  const clipJobsBefore = await engine<{ clip_jobs: Array<{ id: string }> }>("/clip-jobs?limit=500");
+  await expectRemoteReasoningUnavailable(`${watchPath}/scan`, {});
+  expect(await engine<Record<string, unknown>>(watchPath)).toEqual(watchBefore);
+  expect((await engine<{ jobs: Array<{ id: string }> }>("/jobs?limit=500")).jobs.map((job) => job.id))
+    .toEqual(downloadsBefore.jobs.map((job) => job.id));
+  expect((await engine<{ clip_jobs: Array<{ id: string }> }>("/clip-jobs?limit=500")).clip_jobs.map((job) => job.id))
+    .toEqual(clipJobsBefore.clip_jobs.map((job) => job.id));
+
+  // Select a word range in the real transcript and preserve the exact UI-created cut job.
+  await page.goto(`/sources/${encodeURIComponent(sourceId)}?tab=Transcript`);
+  await expect(page.getByRole("tab", { name: "Transcript" })).toHaveAttribute("aria-selected", "true");
+  const transcriptWords = page.locator('button[aria-label$="— select word; press F2 to edit"]');
+  await expect(transcriptWords.first()).toBeVisible({ timeout: 30_000 });
+  const wordCount = await transcriptWords.count();
+  expect(wordCount).toBeGreaterThan(1);
+  await transcriptWords.first().click();
+  await transcriptWords.nth(wordCount - 1).click();
+
+  const cutResponse = page.waitForResponse(
     (response) => isProxyResponse(
       response,
       "POST",
-      `${PROXY_PREFIX}/sources/${encodeURIComponent(sourceId)}/moments`,
+      `${PROXY_PREFIX}/sources/${encodeURIComponent(sourceId)}/cut`,
     ),
   );
-  await page.getByRole("button", { name: /^Find(?: more)? funny moments$/iu }).first().click();
-  const momentAdmission = await admitted<ClipJob>(await momentResponse);
-  const momentJob = await waitForTerminal(
-    "moment scan",
-    () => engine<ClipJob>(`/clip-jobs/${encodeURIComponent(momentAdmission.id)}`),
+  await page.getByRole("button", { name: "Cut clip from selection" }).click();
+  const cutAdmission = await admitted<ClipJob>(await cutResponse);
+  expect(cutAdmission.kind).toBe("cut");
+  const cutJob = await waitForTerminal(
+    "manual transcript cut",
+    () => engine<ClipJob>(`/clip-jobs/${encodeURIComponent(cutAdmission.id)}`),
     120_000,
   );
-  expect(momentJob.result.candidates?.length ?? 0).toBeGreaterThan(0);
+  const clipId = cutJob.clip_id ?? cutJob.result.clip_id;
+  if (!clipId) throw new Error(`manual cut ${cutJob.id} completed without a clip id`);
 
-  const selected = page.getByRole("button", { name: "Selected", exact: true });
-  await expect(selected.first()).toBeVisible({ timeout: 30_000 });
-  for (let guard = 0; guard < 10 && await selected.count() > 1; guard += 1) {
-    await selected.last().click();
-  }
-  expect(await selected.count()).toBe(1);
-
-  // Start exactly one cut+reframe pipeline through the UI and await that exact admission.
-  const pipelineResponse = page.waitForResponse(
-    (response) => isProxyResponse(
-      response,
-      "POST",
-      `${PROXY_PREFIX}/sources/${encodeURIComponent(sourceId)}/render`,
-    ),
-  );
-  await page.getByRole("button", { name: /^Make 1 clip/u }).click();
-  const pipelineAdmission = await admitted<ClipJob>(await pipelineResponse);
-  await expect(page).toHaveURL(/\/sources\/.*[?&]tab=Clips/u);
-  const pipeline = await waitForTerminal(
-    "cut and reframe pipeline",
-    () => engine<ClipJob>(`/clip-jobs/${encodeURIComponent(pipelineAdmission.id)}`),
-    180_000,
-  );
-  expect(pipeline.result.aspect).toBe("9:16");
-  expect(pipeline.result.render_id).toBeUndefined();
-  const clipId = pipeline.clip_id ?? pipeline.result.clip_id;
-  if (!clipId) throw new Error(`pipeline ${pipeline.id} completed without a clip id`);
-
-  // Editor Render performs reframe + caption before admitting the final render; capture that final id.
+  // Editor Render performs local reframe + caption before admitting the final render.
   await page.goto(`/clips/${encodeURIComponent(clipId)}`);
   const editorVideo = page.locator("video");
   await expect(editorVideo).toBeVisible({ timeout: 30_000 });
@@ -465,8 +482,9 @@ test("token-on URL import reaches a downloadable render only through the Studio 
     `${PROXY_PREFIX}/events`,
     `${PROXY_PREFIX}/settings`,
     `${PROXY_PREFIX}/jobs`,
-    `${PROXY_PREFIX}/sources/${encodeURIComponent(sourceId)}/moments`,
-    `${PROXY_PREFIX}/sources/${encodeURIComponent(sourceId)}/render`,
+    `${PROXY_PREFIX}/sources/${encodeURIComponent(sourceId)}/cut`,
+    `${PROXY_PREFIX}/clips/${encodeURIComponent(clipId)}/reframe`,
+    `${PROXY_PREFIX}/clips/${encodeURIComponent(clipId)}/captions`,
     `${PROXY_PREFIX}/clips/${encodeURIComponent(clipId)}/renders`,
     sourceMediaPath,
     artifactPath,
