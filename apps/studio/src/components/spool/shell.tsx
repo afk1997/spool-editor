@@ -107,7 +107,9 @@ function TopBar() {
       : "Privacy status unavailable"
     : ctx.offline
       ? "Offline"
-      : "Fully local";
+      : ctx.reasoningProvider === "codex" && ctx.reasoningEgressConsent
+        ? "Codex suggestions enabled"
+        : "Fully local";
   return (
     <div className="topbar">
       <div className="row" style={{ gap: 9, paddingRight: 8 }}>

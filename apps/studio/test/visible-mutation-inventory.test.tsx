@@ -206,7 +206,7 @@ beforeEach(() => {
 });
 
 describe("visible mutation inventory: Library", () => {
-  it("keeps local transcription available while remote Find clips is inert", async () => {
+  it("keeps local transcription available while Codex suggestions are off", async () => {
     const findMoments = vi.fn();
     const startTranscribe = vi.fn().mockResolvedValue({ id: "transcribe-1" });
     harness.ctx = baseCtx({
@@ -219,7 +219,7 @@ describe("visible mutation inventory: Library", () => {
     const find = screen.getByRole("button", { name: "Find clips" });
     expect(find).toBeDisabled();
     expect(
-      screen.getByText("Remote moment discovery is unavailable in Phase 0."),
+      screen.getByText("Enable Codex suggestions in Settings."),
     ).toBeInTheDocument();
     fireEvent.click(find);
     expect(findMoments).not.toHaveBeenCalled();
@@ -411,23 +411,23 @@ describe("visible mutation inventory: Source work", () => {
     expect(nav).not.toHaveBeenCalled();
   });
 
-  it("keeps every discovery scan action inert and points to manual transcript cutting", () => {
-    const findMoments = vi.fn();
-    harness.ctx = baseCtx({ client: clientFixture({ findMoments }) });
+  it("starts every discovery mode when Codex suggestions are enabled", async () => {
+    const findMoments = vi.fn().mockResolvedValue({ id: "moment-job" });
+    harness.ctx = baseCtx({
+      client: clientFixture({ findMoments }),
+      settings: settingsFixture({ reasoning_provider: "codex", reasoning_egress_consent: true }),
+      reasoningProvider: "codex",
+      reasoningEgressConsent: true,
+    });
     render(<DiscoveryBody candidates={[]} sourceId="source-1" finding={false} />);
 
     const scanButtons = screen.getAllByRole("button", { name: "Scan all modes" });
     expect(scanButtons).toHaveLength(2);
-    scanButtons.forEach((button) => {
-      expect(button).toBeDisabled();
-      fireEvent.click(button);
-    });
-    expect(findMoments).not.toHaveBeenCalled();
-    expect(
-      screen.getByText(
-        "Remote moment discovery is unavailable in Phase 0. Select words in the Transcript tab to cut a clip manually.",
-      ),
-    ).toBeInTheDocument();
+    expect(scanButtons[0]).toBeEnabled();
+    fireEvent.click(scanButtons[0]!);
+    await waitFor(() => expect(findMoments).toHaveBeenCalledTimes(6));
+    expect(findMoments).toHaveBeenCalledWith("source-1", { mode: "funny" });
+    expect(findMoments).toHaveBeenCalledWith("source-1", { mode: "q&a" });
   });
 
   it("does not reload or claim a transcript edit before a structured rejection", async () => {

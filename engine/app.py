@@ -103,11 +103,23 @@ def create_app() -> Flask:
     effective_clip_workers = int(_settings_ov.get("clip_workers", os.environ.get("TROVE_CLIP_WORKERS", "2")))
     app.extensions["trove.settings"] = settings_store
 
-    # Privacy settings are persisted truth. Phase 0 ignores every provider/consent env
-    # value (including legacy mixed-case values) and publishes only none/false below.
-    # Offline remains a supported, stronger local-network policy and may be seeded.
+    # Privacy settings are persisted truth. Boot env may seed the same explicit Codex
+    # opt-in exposed by Settings; provider + consent land together so there is no
+    # transient consent reset. Offline remains the stronger network policy.
     true_env = {"1", "true", "yes", "on"}
     seed: dict = {}
+    env_provider = (os.environ.get("SPOOL_LLM_PROVIDER") or "").strip().lower()
+    if env_provider in ("none", "codex"):
+        seed["reasoning_provider"] = env_provider
+    effective_provider = seed.get(
+        "reasoning_provider", settings_store.get()["reasoning_provider"]
+    )
+    if (
+        effective_provider == "codex"
+        and (os.environ.get("SPOOL_LLM_EGRESS_CONSENT") or "").strip().lower()
+        in true_env
+    ):
+        seed["reasoning_egress_consent"] = True
     if (os.environ.get("SPOOL_OFFLINE") or "").strip().lower() in true_env:
         seed["offline"] = True
     if seed:
@@ -121,24 +133,19 @@ def create_app() -> Flask:
             os.environ["SPOOL_OFFLINE"] = "1"
         else:
             os.environ.pop("SPOOL_OFFLINE", None)
-        # This is intentionally invariant even for a hostile direct extension call:
-        # no runtime path may republish legacy Codex/consent values.
-        os.environ["SPOOL_LLM_PROVIDER"] = "none"
-        os.environ.pop("SPOOL_LLM_EGRESS_CONSENT", None)
+        provider = values.get("reasoning_provider")
+        os.environ["SPOOL_LLM_PROVIDER"] = (
+            provider if provider in ("none", "codex") else "none"
+        )
+        if provider == "codex" and values.get("reasoning_egress_consent") is True:
+            os.environ["SPOOL_LLM_EGRESS_CONSENT"] = "1"
+        else:
+            os.environ.pop("SPOOL_LLM_EGRESS_CONSENT", None)
 
     _apply_settings(settings_store.get())
     app.extensions["trove.apply_settings"] = _apply_settings
 
     def _commit_settings(changes: dict) -> dict:
-        # SettingsStore repeats these checks, but reject here before even beginning
-        # an Offline transition so a hostile internal call cannot mutate policy.
-        if changes.get("reasoning_provider", "none") != "none":
-            raise ValueError("invalid reasoning_provider")
-        if (
-            "reasoning_egress_consent" in changes
-            and changes["reasoning_egress_consent"] is not False
-        ):
-            raise ValueError("invalid reasoning_egress_consent")
         requested_offline = changes["offline"] if "offline" in changes else None
         with network_policy.transition(requested_offline):
             privacy_keys = (

@@ -136,16 +136,23 @@ export function AdjustModal({ c, onClose, onSave }: { c: Candidate; onClose: () 
 }
 
 const MODES = ["All", "Funny", "Insightful", "Hot-take", "Story", "How-to", "Q&A"];
+const ENGINE_MODES = MODES.slice(1).map((m) => m.toLowerCase());
 
-export function DiscoveryBody({ candidates, finding }: { candidates: Candidate[]; sourceId: string; finding: boolean }) {
+export function DiscoveryBody({ candidates, sourceId, finding }: { candidates: Candidate[]; sourceId: string; finding: boolean }) {
   const ctx = useSpool();
   const [mode, setMode] = useState("All");
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
   const [ranges, setRanges] = useState<Record<string, { start: number; end: number }>>({});
   const [adjust, setAdjust] = useState<Candidate | null>(null);
   const [showRank, setShowRank] = useState(false);
+  const scanInFlight = useRef(false);
   const makeInFlight = useRef(false);
+  const [scanning, setScanning] = useState(false);
   const [making, setMaking] = useState(false);
+  const discoveryReady = ctx.settingsReady
+    && ctx.reasoningProvider === "codex"
+    && ctx.reasoningEgressConsent
+    && !ctx.offline;
   // Slider weights for the glass-box reweight, seeded from the engine's DEFAULT_WEIGHTS (integer
   // ratios that normalize to the engine's .30/.25/.20/.15/.10) so toggling "Rank by score" matches
   // the engine's score/order at the initial state. They drive scoreFromFactors — the same
@@ -165,6 +172,36 @@ export function DiscoveryBody({ candidates, finding }: { candidates: Candidate[]
   const scoreOf = (c: Candidate) => scoreFromFactors(c.factors, weights);
   const display = showRank ? [...view].sort((a, b) => scoreOf(b) - scoreOf(a)) : view;
   const timeNext = (c: Candidate) => { const i = view.findIndex((x) => x.id === c.id); return i >= 0 ? view[i + 1] : undefined; };
+
+  const findMore = async () => {
+    if (!discoveryReady || scanInFlight.current || finding) return;
+    scanInFlight.current = true;
+    setScanning(true);
+    const modes = mode === "All" ? ENGINE_MODES : [mode.toLowerCase()];
+    try {
+      const results = await Promise.allSettled(
+        modes.map((m) => ctx.client.findMoments(sourceId, { mode: m })),
+      );
+      const succeeded = results.filter((result) => result.status === "fulfilled").length;
+      const failures = results.flatMap((result) => result.status === "rejected"
+        ? [formatActionError(result.reason, "Could not start moment scan.")]
+        : []);
+      ctx.pushToast(failures.length ? {
+        icon: "alert",
+        tone: succeeded > 0 ? "warn" : "err",
+        title: succeeded > 0 ? "Some scans could not start" : "Moment scan failed",
+        body: `${succeeded} succeeded · ${failures.length} failed. ${failures.join(" ")}`,
+      } : {
+        icon: "sparkles",
+        tone: "info",
+        title: mode === "All" ? "Moment scans started" : `Finding more ${mode.toLowerCase()} moments`,
+        body: `${succeeded} succeeded · 0 failed. Suggestions appear as each scan finishes.`,
+      });
+    } finally {
+      scanInFlight.current = false;
+      setScanning(false);
+    }
+  };
 
   const makeSelected = async () => {
     if (makeInFlight.current || !sel.length) return;
@@ -197,11 +234,11 @@ export function DiscoveryBody({ candidates, finding }: { candidates: Candidate[]
         </div>
         <div className="spacer" />
         <Btn variant={showRank ? "primary" : "ghost"} icon="chart" onClick={() => setShowRank((s) => !s)} disabled={!view.some((c) => c.factors)} title={view.some((c) => c.factors) ? "Rank by the glass-box opportunity score" : "Scores appear once a scan finishes"}>Rank by score</Btn>
-        <Btn variant="ghost" icon="refresh" disabled title="Remote moment discovery is unavailable in Phase 0">{mode === "All" ? "Scan all modes" : `Find more ${mode.toLowerCase()}`}</Btn>
+        <Btn variant="ghost" icon="refresh" onClick={findMore} disabled={!discoveryReady || scanning || finding} title={discoveryReady ? "Ask Codex to suggest transcript moments" : "Enable Codex moment suggestions in Settings → Privacy"}>{scanning ? "Starting scans…" : mode === "All" ? "Scan all modes" : `Find more ${mode.toLowerCase()}`}</Btn>
       </div>
-      <div role="status" className="card mono" style={{ padding: 11, marginBottom: 16, color: "var(--warn)", fontSize: 11.5 }}>
-        Remote moment discovery is unavailable in Phase 0. Select words in the Transcript tab to cut a clip manually.
-      </div>
+      {!discoveryReady && <div role="status" className="card mono" style={{ padding: 11, marginBottom: 16, color: "var(--warn)", fontSize: 11.5 }}>
+        Enable Codex moment suggestions in Settings → Privacy. Only transcript text is sent; media stays local.
+      </div>}
 
       {/* Glass-box reweight: drag a factor's importance → the scores + order update instantly (the
           same transparent Σ(factor·weight) the engine's moments.rank / POST …/rank computes). */}
@@ -233,7 +270,7 @@ export function DiscoveryBody({ candidates, finding }: { candidates: Candidate[]
         <>
           {finding && (
             <div className="row" style={{ gap: 10, marginBottom: 14, color: "var(--accent)", fontSize: 13 }}>
-              <Icon name="sparkles" size={15} style={{ animation: "pulse 1.5s infinite" }} /> A previously started moment scan is still settling — your current moments stay below…
+              <Icon name="sparkles" size={15} style={{ animation: "pulse 1.5s infinite" }} /> Scanning for more — your current moments stay below…
             </div>
           )}
           <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingBottom: sel.length > 0 ? 80 : 0 }}>
@@ -245,7 +282,7 @@ export function DiscoveryBody({ candidates, finding }: { candidates: Candidate[]
       {view.length === 0 && finding && (
         <div>
           <div className="row" style={{ gap: 10, marginBottom: 16, color: "var(--accent)", fontSize: 13 }}>
-            <Icon name="sparkles" size={16} style={{ animation: "pulse 1.5s infinite" }} /> A previously started moment scan is still settling…
+            <Icon name="sparkles" size={16} style={{ animation: "pulse 1.5s infinite" }} /> Scanning transcript{mode === "All" ? "" : ` for ${mode.toLowerCase()} moments`}…
           </div>
           {[0, 1, 2].map((i) => (
             <div key={i} className="card" style={{ display: "flex", gap: 14, padding: 13, marginBottom: 12 }}>
@@ -258,8 +295,10 @@ export function DiscoveryBody({ candidates, finding }: { candidates: Candidate[]
 
       {view.length === 0 && !finding && (
         <Empty icon="scan" title={mode === "All" ? "No moments yet" : `No ${mode.toLowerCase()} moments yet`}
-          action={<Btn variant="primary" icon="sparkles" disabled title="Remote moment discovery is unavailable in Phase 0">{mode === "All" ? "Scan all modes" : `Find ${mode.toLowerCase()} moments`}</Btn>}>
-          No remote-generated moments are available. Use the Transcript tab for a manual cut.
+          action={<Btn variant="primary" icon="sparkles" onClick={findMore} disabled={!discoveryReady || scanning} title={discoveryReady ? "Ask Codex to suggest transcript moments" : "Enable Codex moment suggestions in Settings → Privacy"}>{scanning ? "Starting scans…" : mode === "All" ? "Scan all modes" : `Find ${mode.toLowerCase()} moments`}</Btn>}>
+          {discoveryReady
+            ? "Scan the transcript for clip-worthy moments, select the good ones, then Spool will cut, reframe, caption, and export them."
+            : "Enable Codex moment suggestions in Settings → Privacy, or use the Transcript tab for a manual cut."}
         </Empty>
       )}
 

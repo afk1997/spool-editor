@@ -84,18 +84,19 @@ export interface AgentMessage {
 }
 
 export const INITIAL_AGENT: AgentMessage[] = [
-  { role: "agent", text: "Remote reasoning is unavailable in Phase 0. Local import, transcription, editing, and rendering remain available." },
+  { role: "agent", text: "The general agent is disabled. Use Discovery for optional Codex moment suggestions." },
 ];
 
 const REMOTE_REASONING_UNAVAILABLE =
   "Remote reasoning is unavailable in Phase 0 until a supported zero-tool transport ships.";
 
-/** Treat old persisted/server records as unsupported input, never as an effective capability. */
-function effectivePhase0Settings(value: EngineSettings): EngineSettings {
+/** Keep malformed or stale settings fail-closed without hiding a valid explicit opt-in. */
+function effectiveSettings(value: EngineSettings): EngineSettings {
+  const provider = value.reasoning_provider === "codex" ? "codex" : "none";
   return {
     ...value,
-    reasoning_provider: "none",
-    reasoning_egress_consent: false,
+    reasoning_provider: provider,
+    reasoning_egress_consent: provider === "codex" && value.reasoning_egress_consent === true,
   };
 }
 
@@ -401,7 +402,7 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
       || settingsDataGeneration <= ignoreSettingsQueriesThrough.current
       || settingsRef.current === settingsQ.data
     ) return;
-    const effective = effectivePhase0Settings(settingsQ.data);
+    const effective = effectiveSettings(settingsQ.data);
     settingsRef.current = effective;
     setSettings(effective);
   }, [settingsDataGeneration, settingsQ.data]);
@@ -409,8 +410,8 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   const settingsReady = settings !== null;
   const settingsLoading = !settingsReady && settingsQ.loading;
   const settingsError = !settingsReady ? settingsQ.error ?? null : null;
-  const reasoningProvider = settings ? "none" : null;
-  const reasoningEgressConsent = false;
+  const reasoningProvider = settings?.reasoning_provider ?? null;
+  const reasoningEgressConsent = settings?.reasoning_egress_consent ?? false;
   const offline = settings?.offline ?? true;
   const [settingsPendingCount, setSettingsPendingCount] = useState(0);
   const settingsPending = settingsPendingCount > 0;
@@ -455,7 +456,7 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
 
     void request.then(
       (next) => {
-        const effective = effectivePhase0Settings(next);
+        const effective = effectiveSettings(next);
         ignoreSettingsQueriesThrough.current = Math.max(
           ignoreSettingsQueriesThrough.current,
           settingsRequestGenerationReaderRef.current(),
@@ -469,16 +470,6 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   }, [client]);
 
   const updateSettings = useCallback((patch: Partial<EngineSettings>): Promise<EngineSettings> => {
-    if (
-      (patch.reasoning_provider !== undefined && patch.reasoning_provider !== "none")
-      || patch.reasoning_egress_consent === true
-    ) {
-      return Promise.reject(new SpoolApiError(
-        409,
-        "remote_reasoning_unavailable",
-        REMOTE_REASONING_UNAVAILABLE,
-      ));
-    }
     if (!settingsRef.current) {
       return Promise.reject(new SpoolApiError(
         409,
@@ -569,9 +560,8 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
   }, [client]);
 
   /** Two paths, by what's passed:
-   *  - Discovery candidates (have source_id + start/end) → CUT + auto-reframe to 9:16 and STOP
-   *    (no burn), then land in the source's Clips tab to review. Nothing renders yet — you check
-   *    each clip first (the user-requested flow).
+   *  - Discovery candidates (have source_id + start/end) → cut + reframe + caption burn + export,
+   *    then land in the Render Queue for review/download.
    *  - An existing clip (the Editor's Render, id only) → caption (chosen style) + export, and go
    *    to the Render Queue to watch it. Reframe first if the Editor changed the format. */
   const makeClipsFrom = useCallback(async (
@@ -586,7 +576,9 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
     if (fresh.length) {
       const results = await Promise.allSettled(
         fresh.map((c) =>
-          client.renderPipeline(c.source_id!, { start: c.start!, end: c.end!, aspect, mode, stop_after: "reframe" }),
+          client.renderPipeline(c.source_id!, {
+            start: c.start!, end: c.end!, aspect, mode, style, preset,
+          }),
         ),
       );
       const failed = results.filter((result) => result.status === "rejected");
@@ -600,7 +592,7 @@ export function SpoolProvider({ children }: { children: React.ReactNode }) {
           : "Every clip was accepted by the render queue.",
       });
       if (succeeded > 0 && window.location.href === startedAtLocation)
-        nav("project", { id: fresh[0]!.source_id!, tab: "Clips" });
+        nav("queue");
       return;
     }
     if (!existing.length) { pushToast({ icon: "alert", tone: "warn", title: "Nothing to render", body: "No clip or moment range to act on." }); return; }

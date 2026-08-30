@@ -865,7 +865,7 @@ describe("product truth: visible control inventory", () => {
     expect(screen.queryByText(/manual mode and agent mode never diverge/i)).not.toBeInTheDocument();
   });
 
-  it("states that remote reasoning is unavailable and has no Phase 0 egress", () => {
+  it("discloses the enabled Codex transcript-egress boundary", () => {
     importHarness.queryData = {
       doctor: { tools: {}, machine: {}, encoders: [] },
       getSettings: {
@@ -886,23 +886,21 @@ describe("product truth: visible control inventory", () => {
     render(<SettingsScreen />);
     fireEvent.click(screen.getByRole("button", { name: "Privacy" }));
 
-    expect(screen.getByText("Remote reasoning")).toBeInTheDocument();
-    expect(screen.getByText("Unavailable in Phase 0")).toBeInTheDocument();
+    expect(screen.getByText("Codex moment suggestions")).toBeInTheDocument();
     expect(
       screen.getByText(
-        /Remote reasoning stays disabled until Spool has a supported transport that sends no local tools or machine context/i,
+        /sending transcript text to your signed-in Codex CLI/i,
       ),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("switch", {
-        name: "Allow your message and any attached transcript text to leave this machine for Codex",
+      screen.getByRole("switch", {
+        name: "Codex moment suggestions",
       }),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Codex" })).not.toBeInTheDocument();
-    expect(screen.getByText("unavailable · no egress")).toBeInTheDocument();
+    ).toBeChecked();
+    expect(screen.getByText("transcript text → Codex CLI")).toBeInTheDocument();
   });
 
-  it("inventories onboarding remote reasoning as unavailable with no egress", () => {
+  it("inventories onboarding Codex suggestions and transcript-only egress", () => {
     importHarness.queryData = {
       doctor: { tools: {}, machine: {}, encoders: [] },
     };
@@ -916,16 +914,15 @@ describe("product truth: visible control inventory", () => {
     });
     render(<OnboardingScreen />);
 
-    expect(screen.getByText("Remote reasoning is unavailable in Phase 0.")).toBeInTheDocument();
+    expect(screen.getByText("Codex moment suggestions are enabled.")).toBeInTheDocument();
     expect(
-      screen.getByText(/Remote reasoning is unavailable in Phase 0 and sends nothing/i),
+      screen.getByText(/Optional Codex moment suggestions send transcript text only/i),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/Codex/i)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Let’s set up" }));
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     expect(
-      screen.getByText("Remote reasoning unavailable in Phase 0 · no egress"),
+      screen.getByText("Codex suggestions enabled · transcript text egress"),
     ).toBeInTheDocument();
   });
 
@@ -1013,7 +1010,7 @@ describe("product truth: visible control inventory", () => {
     expect(INITIAL_AGENT).toEqual([
       {
         role: "agent",
-        text: "Remote reasoning is unavailable in Phase 0. Local import, transcription, editing, and rendering remain available.",
+        text: "The general agent is disabled. Use Discovery for optional Codex moment suggestions.",
       },
     ]);
     const askAgent = vi.fn();

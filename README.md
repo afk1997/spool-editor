@@ -2,17 +2,17 @@
 
 **Local-first, open-source clip studio** — turn any long video into platform-ready vertical
 clips on your machine, with editor-grade manual control and a gated agent surface. No per-clip
-credits, no uploads.
+credits, and no media uploads.
 
-Spool pairs a deterministic local engine with the supported Phase 0 workflow:
+Spool pairs a deterministic local media engine with one optional AI step:
 
 ```
-download/import → transcribe → select a transcript range manually → cut → edit/reframe/caption → render/export
+download/import → transcribe → Codex suggests moments → you select → cut/reframe/caption/export
 ```
 
-Remote reasoning, automated discovery, and watch reconciliation are unavailable in Phase 0.
-Those paths fail closed; there is no active Codex or other remote reasoning provider. Local
-transcript selection, cutting, editing, reframing, captioning, and rendering remain available.
+Codex moment suggestions are off by default. If enabled in Settings, Spool sends transcript text
+through your signed-in Codex CLI; video and audio stay local. The general agent, agent mutations,
+publishing, and watch reconciliation remain disabled. Manual transcript cutting always works.
 
 Spool exposes that workflow through two local clients over **one** JSON API:
 
@@ -42,8 +42,8 @@ so the vertical crop pans to the speaker offline, in seconds. (`engine/clip/refr
 
 ## Develop
 
-Prerequisites: **Node 20+**, **pnpm**, **Python 3.11+**, and **ffmpeg**. (yt-dlp is pinned to
-master and installed by the engine setup.)
+Prerequisites: **Node 20+**, **pnpm**, **Python 3.11+**, and **ffmpeg**. Codex moment suggestions
+also require a signed-in **Codex CLI**. (yt-dlp is pinned to master and installed by the engine setup.)
 
 ```bash
 # JS workspace (studio + packages)

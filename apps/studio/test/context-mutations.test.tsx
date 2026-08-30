@@ -95,6 +95,14 @@ describe("makeClipsFrom surfaces mutation-chain failures (no silent fire-and-for
     expect(ctx.get().toasts).toEqual([]);
     expect(router.push).not.toHaveBeenCalled();
     expect(client.renderPipeline).toHaveBeenCalledTimes(2);
+    expect(client.renderPipeline).toHaveBeenNthCalledWith(1, "s", {
+      start: 0,
+      end: 1,
+      aspect: "9:16",
+      mode: "pan",
+      style: "opus",
+      preset: "tiktok",
+    });
 
     await act(async () => {
       release();
@@ -104,7 +112,7 @@ describe("makeClipsFrom surfaces mutation-chain failures (no silent fire-and-for
     expect(warn).toBeTruthy();
     expect(warn?.tone).toBe("warn");
     expect(warn?.body).toMatch(/action_failed/);
-    expect(router.push).toHaveBeenCalledWith("/sources/s?tab=Clips");
+    expect(router.push).toHaveBeenCalledWith("/queue");
   });
 
   it("fresh path: reports success only after every start settles", async () => {
@@ -117,7 +125,7 @@ describe("makeClipsFrom surfaces mutation-chain failures (no silent fire-and-for
 
     expect(ctx.get().toasts.some((t) => /1 clip started · 0 failed/.test(t.title))).toBe(true);
     expect(ctx.get().toasts.find((t) => /1 clip started/.test(t.title))?.tone).toBe("ok");
-    expect(router.push).toHaveBeenCalledWith("/sources/s?tab=Clips");
+    expect(router.push).toHaveBeenCalledWith("/queue");
   });
 
   it("fresh path: never redirects after the initiating route is left", async () => {

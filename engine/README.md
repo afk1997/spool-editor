@@ -20,10 +20,9 @@ paste a link, get the file. transcribe it. edit the transcript like a doc. all l
 - **CLI + MCP** *(both alpha — see notes below)* — use the CLI for manual operations. During Phase 0, MCP executes read-only inspection tools only; advertised mutations fail closed with `agent_mutation_disabled`.
 - **single Python process, single Docker container, no Node.** mobile-friendly. light only — riso paper is the brand.
 
-The supported Phase 0 clip path is manual: import media, transcribe it, select a transcript range,
-cut, edit/reframe/caption, then render/export. Remote reasoning, automated discovery, and watch
-reconciliation are unavailable in Phase 0. Saved recipes and watch definitions remain readable,
-but they do not run discovery, production, or reconciliation.
+The clip path supports manual transcript ranges or optional Codex CLI moment suggestions. After
+you select suggestions, Spool cuts, reframes, burns captions, and exports locally. Codex is off by
+default and receives transcript text only when explicitly enabled; watch reconciliation stays off.
 
 | ![download in progress](docs/screenshots/download.png) | ![download complete](docs/screenshots/done.png) |
 |---|---|
@@ -119,7 +118,7 @@ models live at `<trove>/models/ggml-*.bin`. swap or remove via the same setup pa
 docker run -v ./models:/app/models -v ./downloads:/app/downloads -p 8899:8899 trove
 ```
 
-**network policy:** the only enabled outbound paths in Phase 0 are (1) yt-dlp fetching user-requested media and (2) user-started model downloads from Hugging Face. Remote reasoning is unavailable and fails closed until a supported zero-tool transport exists. Offline mode blocks all non-loopback egress; transcription and rendering remain local.
+**network policy:** outbound paths are (1) yt-dlp fetching user-requested media, (2) user-started model downloads from Hugging Face, and (3) optional Codex CLI moment suggestions after explicit transcript-egress consent. Offline mode blocks all non-loopback egress; media processing remains local.
 
 ## transcript editor
 
@@ -216,9 +215,8 @@ python cli.py caption <clip>
 python cli.py render <clip>
 ```
 
-The `moments`, `produce`, and `watch-scan` command schemas remain visible for compatibility, but
-their remote-reasoning and automation paths are unavailable in Phase 0 and fail closed. Use the
-manual transcript-range workflow above.
+`moments` and `produce` work when Codex suggestions and transcript-egress consent are enabled.
+`watch-scan` remains disabled. The manual transcript-range workflow always remains available.
 
 Configure with env vars:
 
@@ -233,7 +231,7 @@ Run `python cli.py --help` for the full command list.
 
 > **Status: unstable alpha.** Same caveats as the CLI. Tested only against the contract; not yet exercised in real agent workflows.
 
-In Phase 0, `trove-mcp` executes only the explicit read-only inspection allowlist over HTTP. Mutation schemas remain advertised for contract compatibility, but every mutation returns `agent_mutation_disabled` before any `TroveClient` call. Manual mutations remain available through the authenticated UI, REST API, and CLI. Remote reasoning, automated discovery, and watch reconciliation remain unavailable through every client. Transport: stdio.
+`trove-mcp` executes only the explicit read-only inspection allowlist over HTTP. Mutation schemas remain advertised for contract compatibility, but every mutation returns `agent_mutation_disabled` before any `TroveClient` call. Manual mutations and opted-in discovery remain available through the authenticated UI, REST API, and CLI; watch reconciliation remains unavailable. Transport: stdio.
 
 Wire it into your MCP client config:
 

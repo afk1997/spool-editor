@@ -1,9 +1,7 @@
 """Moment finding + ranking over a transcript (spec §5 P1 / §4 ``discover.*``).
 
 Reads trove's ``words.json`` and proposes self-contained clip candidates with a
-rationale, using a moment-finding LLM. Remote reasoning is unavailable in Phase 0;
-the only executable path is an explicitly injected deterministic provider whose
-``egress`` metadata is the literal ``False``.
+rationale, using the explicitly enabled Codex CLI bridge or an injected local provider.
 
 The prompt reuses the Step-1 moment-finding heuristics from **clipify** by Louise de
 Sadeleer (MIT) — punchlines/reactions, reversals, awkward pauses, quotable one-liners,
@@ -89,15 +87,14 @@ def find_moments(
 
     ``mode`` tunes the prompt/signals (funny / insightful / hot-take / story / how-to /
     q&a). ``transcript_window`` scopes the search to ``(start, end)`` seconds. ``provider``
-    selects the LLM. Phase 0 accepts only an explicitly injected non-egress
-    :class:`~clip.llm.LLMProvider`; the named/default ``none`` provider is unavailable.
+    selects the LLM. The default ``none`` provider is unavailable until the user opts in.
 
     Returns candidates ``[{start, end, title, rationale, mode, signals, source_id?}]``
     in the model's best-first order. Pure read of ``words.json``; no media is touched.
 
     Raises ``ValueError`` if the window contains no transcript words or the reply has no
     parseable JSON, and propagates
-    :class:`~clip.llm.RemoteReasoningUnavailableError` or
+    :class:`~clip.llm.EgressConsentError` or
     :class:`~clip.llm.ProviderUnavailableError` from the provider boundary.
     """
     resolved_provider = llm.get_provider(
@@ -107,7 +104,7 @@ def find_moments(
         privacy_state=privacy_state,
     )
     if isinstance(resolved_provider, llm.NoneProvider):
-        raise llm.RemoteReasoningUnavailableError()
+        raise llm.ReasoningDisabledError()
 
     data = transcript_io.load(words_json_path)
     lines = _transcript_lines(data, transcript_window)

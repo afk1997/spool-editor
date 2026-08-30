@@ -65,45 +65,20 @@ def test_corrupt_file_falls_back_to_defaults(tmp_path):
     assert s.overrides() == {}
 
 
-@pytest.mark.parametrize(
-    ("method", "changes", "message"),
-    [
-        ("update", {"reasoning_provider": "codex"}, "invalid reasoning_provider"),
-        ("staged_update", {"reasoning_provider": "codex"}, "invalid reasoning_provider"),
-        (
-            "update",
-            {"reasoning_egress_consent": True},
-            "invalid reasoning_egress_consent",
-        ),
-        (
-            "staged_update",
-            {"reasoning_egress_consent": True},
-            "invalid reasoning_egress_consent",
-        ),
-    ],
-)
-def test_store_rejects_remote_reasoning_atomically(tmp_path, method, changes, message):
+def test_store_persists_explicit_codex_opt_in_and_clears_consent_when_disabled(tmp_path):
     path = tmp_path / "settings.json"
     store = SettingsStore(path)
-    store.update({"fast_default": False})
-    before_values = store.get()
-    before_overrides = store.overrides()
-    before_bytes = path.read_bytes()
-    yielded = False
+    enabled = store.update({
+        "reasoning_provider": "codex",
+        "reasoning_egress_consent": True,
+    })
+    assert enabled["reasoning_provider"] == "codex"
+    assert enabled["reasoning_egress_consent"] is True
+    assert SettingsStore(path).get()["reasoning_provider"] == "codex"
 
-    with pytest.raises(ValueError) as raised:
-        if method == "update":
-            store.update(changes)
-        else:
-            with store.staged_update(changes):
-                yielded = True
-
-    assert str(raised.value) == message
-    assert yielded is False
-    assert store.get() == before_values
-    assert store.overrides() == before_overrides
-    assert path.read_bytes() == before_bytes
-    assert SettingsStore(path).get() == before_values
+    disabled = store.update({"reasoning_provider": "none"})
+    assert disabled["reasoning_provider"] == "none"
+    assert disabled["reasoning_egress_consent"] is False
 
 
 def test_failed_atomic_replace_leaves_memory_and_persisted_settings_unchanged(tmp_path, monkeypatch):
@@ -141,13 +116,10 @@ def test_store_rejects_invalid_reasoning_values(tmp_path):
     assert s.get()["reasoning_egress_consent"] is False
 
 
-@pytest.mark.parametrize("legacy_provider", ["codex", "CoDeX", "CODEX"])
-def test_load_durably_canonicalizes_legacy_reasoning_without_losing_settings(
-    tmp_path, legacy_provider,
-):
+def test_load_keeps_valid_codex_opt_in_without_losing_settings(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text(json.dumps({
-        "reasoning_provider": legacy_provider,
+        "reasoning_provider": "codex",
         "reasoning_egress_consent": True,
         "fast_default": False,
         "clip_workers": 7,
@@ -156,14 +128,14 @@ def test_load_durably_canonicalizes_legacy_reasoning_without_losing_settings(
 
     loaded = SettingsStore(path)
 
-    assert loaded.get()["reasoning_provider"] == "none"
-    assert loaded.get()["reasoning_egress_consent"] is False
+    assert loaded.get()["reasoning_provider"] == "codex"
+    assert loaded.get()["reasoning_egress_consent"] is True
     assert loaded.get()["fast_default"] is False
     assert loaded.get()["clip_workers"] == 7
     assert loaded.get()["mcp_transport"] == "streamable-http"
     assert json.loads(path.read_text()) == {
-        "reasoning_provider": "none",
-        "reasoning_egress_consent": False,
+        "reasoning_provider": "codex",
+        "reasoning_egress_consent": True,
         "fast_default": False,
         "clip_workers": 7,
         "mcp_transport": "streamable-http",

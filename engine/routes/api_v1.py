@@ -490,7 +490,7 @@ def _validate_brand_kit(data, *, require_name: bool):
 # transport is Literal['stdio','sse','streamable-http']). stdio = the desktop-client default;
 # sse / streamable-http = headless / self-host.
 _MCP_TRANSPORTS = ("stdio", "sse", "streamable-http")
-_REASONING_PROVIDERS = ("none",)
+_REASONING_PROVIDERS = ("none", "codex")
 _REMOTE_REASONING_UNAVAILABLE = {
     "error": "remote_reasoning_unavailable",
     "message": (
@@ -512,12 +512,6 @@ def _validate_settings(data):
     bad = (jsonify({"error": "bad_settings"}), 400)
     if not isinstance(data, dict):
         return None, bad
-    requested_provider = data.get("reasoning_provider")
-    if (
-        isinstance(requested_provider, str)
-        and requested_provider.strip().lower() == "codex"
-    ) or data.get("reasoning_egress_consent") is True:
-        return None, _remote_reasoning_unavailable()
     clean: dict = {}
     for key, lo, hi in (("clip_workers", 1, 16), ("max_workers", 1, 16)):
         if data.get(key) is not None:
@@ -537,6 +531,12 @@ def _validate_settings(data):
             if not isinstance(data[bkey], bool):
                 return None, bad
             clean[bkey] = data[bkey]
+    if clean.get("reasoning_egress_consent") is True:
+        effective_provider = clean.get(
+            "reasoning_provider", _settings().get()["reasoning_provider"]
+        )
+        if effective_provider != "codex":
+            return None, (jsonify({"error": "egress_consent_requires_codex"}), 400)
     return clean, None
 
 
@@ -653,10 +653,20 @@ def capabilities():
             "transcript_chunk":  True,
             "transcript_search": True,
             "clips":             True,
-            # Phase 0 has no supported zero-tool remote transport. Manual local
-            # transcript selection, clip editing, and rendering remain available.
-            "remote_reasoning":   False,
-            "automated_discovery": False,
+            # Optional transcript-only Codex moment suggestions. The general agent and
+            # watch reconciliation remain disabled.
+            "remote_reasoning": bool(
+                _settings().get().get("reasoning_provider") == "codex"
+                and _settings().get().get("reasoning_egress_consent") is True
+                and not _settings().get().get("offline")
+                and not _network_policy().offline
+            ),
+            "automated_discovery": bool(
+                _settings().get().get("reasoning_provider") == "codex"
+                and _settings().get().get("reasoning_egress_consent") is True
+                and not _settings().get().get("offline")
+                and not _network_policy().offline
+            ),
             "watch_reconcile":   False,
         },
         "formats": {
@@ -1696,17 +1706,21 @@ def _source_or_error(source_id):
 
 
 def _reasoning_preflight():
-    """Fail closed before admitting work that requires remote reasoning."""
+    """Admit only an explicit, online Codex transcript-egress opt-in."""
     values = _settings().get()
     if values.get("offline") is True or _network_policy().offline:
         return jsonify({"error": "offline_network_disabled"}), 409
-    return _remote_reasoning_unavailable()
+    if values.get("reasoning_provider") != "codex":
+        return _remote_reasoning_unavailable()
+    if values.get("reasoning_egress_consent") is not True:
+        return jsonify({"error": "egress_consent_required"}), 409
+    return None
 
 
 @api_v1_bp.post("/sources/<source_id>/moments")
 @token_required
 def find_clip_moments(source_id):
-    """Return the Phase 0 reasoning-unavailable contract for a ready transcript."""
+    """Find clip-worthy moments over the source transcript."""
     _, words_path, err = _source_or_error(source_id)
     if err:
         return err
@@ -1720,7 +1734,16 @@ def find_clip_moments(source_id):
             params["window"] = [float(win[0]), float(win[1])]
         except (TypeError, ValueError):
             return jsonify({"error": "bad_window"}), 400
-    return _reasoning_preflight()
+    denied = _reasoning_preflight()
+    if denied:
+        return denied
+    jid = _cm().submit(
+        kind="moments",
+        source_id=source_id,
+        params=params,
+        target=_cr().find_moments_target(source_id=source_id, params=params),
+    )
+    return jsonify(_clip_job_view(_cm().get(jid))), 201
 
 
 def _opt_window(req):
@@ -1858,7 +1881,7 @@ def _sanitize_rank_weights(raw):
 @api_v1_bp.post("/sources/<source_id>/produce")
 @token_required
 def produce_clips(source_id):
-    """Validate source/recipe identity, then reject unavailable Phase 0 automation."""
+    """Apply a recipe end-to-end and place the rendered clips in the review queue."""
     _, words_path, err = _source_or_error(source_id)
     if err:
         return err
@@ -1880,7 +1903,16 @@ def produce_clips(source_id):
         verr = _validate_recipe(recipe, require_name=False)
         if verr:
             return verr
-    return _reasoning_preflight()
+    denied = _reasoning_preflight()
+    if denied:
+        return denied
+    jid = _cm().submit(
+        kind="produce",
+        source_id=source_id,
+        params={"recipe_id": rid},
+        target=_cr().produce_target(source_id=source_id, recipe=recipe),
+    )
+    return jsonify(_clip_job_view(_cm().get(jid))), 201
 
 
 @api_v1_bp.post("/sources/<source_id>/cut")
@@ -2636,10 +2668,7 @@ def _phase0_reasoning_unavailable_operation(label: str) -> dict:
 
 
 _SETTINGS_PATCH_OPERATION = {
-    "summary": (
-        "Update local engine config; reasoning stays fixed to provider none "
-        "with egress consent false"
-    ),
+    "summary": "Update local engine config and optional Codex transcript reasoning",
     "requestBody": {
         "required": True,
         "content": {
@@ -2649,11 +2678,10 @@ _SETTINGS_PATCH_OPERATION = {
                     "properties": {
                         "reasoning_provider": {
                             "type": "string",
-                            "enum": ["none"],
+                            "enum": ["none", "codex"],
                         },
                         "reasoning_egress_consent": {
                             "type": "boolean",
-                            "enum": [False],
                         },
                     },
                     "additionalProperties": True,
@@ -2741,14 +2769,14 @@ _OPENAPI_DOC = {
                  "description": "Defaults: 4000 chars (txt/srt/vtt) or 50 segments (json). Capped at 64000 / 500."},
             ]}},
         "/sources/{source_id}/moments": {
-            "post": _phase0_reasoning_unavailable_operation("moment discovery is disabled"),
+            "post": {"summary": "Find transcript moments with the opted-in Codex CLI bridge"},
         },
         "/sources/{source_id}/energy":  {"get": {"summary": "Normalized 0..1 loudness envelope across the source (the audio-energy waveform)"}},
         "/sources/{source_id}/scenes":  {"get": {"summary": "Scene-cut timestamps within ?start=&end= (the editor timeline's Scenes lane)"}},
         "/sources/{source_id}/filmstrip": {"get": {"summary": "Horizontal thumbnail filmstrip across ?start=&end= as a data URI (the editor timeline's Video lane)"}},
         "/sources/{source_id}/rank":    {"post": {"summary": "Re-rank candidates with the glass-box opportunity score (named, reweightable factors)"}},
         "/sources/{source_id}/produce": {
-            "post": _phase0_reasoning_unavailable_operation("automated production is disabled"),
+            "post": {"summary": "Find, rank, caption, and render clips into the review queue"},
         },
         "/sources/{source_id}/cut":     {"post": {"summary": "Cut a clip [start,end] from the source"}},
         "/sources/{source_id}/render":  {"post": {"summary": "One-shot pipeline: cut→reframe→caption→export"}},

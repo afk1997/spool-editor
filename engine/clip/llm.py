@@ -1,58 +1,61 @@
-"""Phase 0 reasoning boundary.
+"""Small provider boundary for optional transcript moment-finding.
 
-Spool currently supports deterministic, explicitly injected local providers for
-tests and local integrations only.  Remote reasoning has no supported zero-tool
-transport in Phase 0, so every remote route fails before authentication, network
-leases, provider code, or process creation can run.
+Spool stays local by default. A user may explicitly enable the Codex CLI bridge,
+which sends transcript text (never media) to Codex for moment suggestions. The CLI
+runs ephemerally from an empty temporary working directory; Spool's broader agent and
+mutation surfaces remain disabled.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 import os
+import shutil
+import subprocess
+import tempfile
 from typing import Callable, Mapping, Protocol, runtime_checkable
 
 
 DEFAULT_PROVIDER = "none"
-REMOTE_REASONING_UNAVAILABLE_MESSAGE = (
-    "Remote reasoning is unavailable in Phase 0 until a supported zero-tool "
-    "transport ships."
-)
+CODEX_BIN = os.environ.get("SPOOL_CODEX_BIN", "codex")
+CODEX_MODEL = os.environ.get("SPOOL_CODEX_MODEL") or None
+CODEX_TIMEOUT = int(os.environ.get("SPOOL_CODEX_TIMEOUT", "180"))
 _TRUE = {"1", "true", "yes", "on"}
 
 
 class OfflineError(RuntimeError):
-    """Compatibility error for the stronger engine-wide Offline fuse."""
-
     error_category = "offline_network_disabled"
 
 
-class EgressConsentError(OfflineError):
-    """Compatibility error retained for callers migrating from remote reasoning."""
+class ProviderUnavailableError(RuntimeError):
+    """Raised when a configured provider cannot run."""
 
+
+class EgressConsentError(ProviderUnavailableError):
     error_category = "egress_consent_required"
 
-
-class ProviderUnavailableError(RuntimeError):
-    """Raised when an LLM provider cannot be used."""
+    def __init__(self) -> None:
+        super().__init__(
+            "Enable Codex moment suggestions in Settings to allow transcript-text egress."
+        )
 
 
 class ReasoningDisabledError(ProviderUnavailableError):
-    """Compatibility error for callers that still distinguish provider selection."""
-
     error_category = "reasoning_provider_required"
+
+    def __init__(self) -> None:
+        super().__init__("No reasoning provider is enabled.")
 
 
 class RemoteReasoningUnavailableError(ProviderUnavailableError):
-    """Stable Phase 0 denial for every remote reasoning attempt."""
+    """Compatibility error used by the intentionally disabled general agent surface."""
 
     error_category = "remote_reasoning_unavailable"
 
     def __init__(self) -> None:
-        super().__init__(REMOTE_REASONING_UNAVAILABLE_MESSAGE)
+        super().__init__("The general remote agent is unavailable.")
 
 
 def is_offline(env: Mapping[str, object] | None = None) -> bool:
-    """Return whether the engine-wide ``SPOOL_OFFLINE`` setting is enabled."""
-
     current = os.environ if env is None else env
     return str(current.get("SPOOL_OFFLINE") or "").strip().lower() in _TRUE
 
@@ -69,38 +72,77 @@ class LLMProvider(Protocol):
 
 
 class CodexProvider:
-    """Fail-closed compatibility stub for the removed Codex CLI bridge."""
+    """Run one non-interactive Codex completion in an empty scratch directory."""
 
     name = "codex"
     egress = True
 
-    def __init__(self, *args, **kwargs) -> None:
-        del args, kwargs
-        raise RemoteReasoningUnavailableError()
+    def __init__(
+        self,
+        *,
+        bin: str | None = None,
+        model: str | None = None,
+        timeout: int | None = None,
+    ) -> None:
+        self.bin = bin or CODEX_BIN
+        self.model = model if model is not None else CODEX_MODEL
+        self.timeout = timeout if timeout is not None else CODEX_TIMEOUT
 
     def complete(self, prompt: str, *, system: str | None = None) -> str:
-        del prompt, system
-        raise RemoteReasoningUnavailableError()
+        if shutil.which(self.bin) is None:
+            raise ProviderUnavailableError(
+                f"Codex CLI {self.bin!r} was not found. Install @openai/codex and run "
+                "`codex login`, or disable Codex moment suggestions in Settings."
+            )
+        full_prompt = prompt if not system else f"{system}\n\n{prompt}"
+        with tempfile.TemporaryDirectory(prefix="spool-codex-") as scratch:
+            argv = [
+                self.bin,
+                "exec",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "--ephemeral",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--color",
+                "never",
+                "-C",
+                scratch,
+            ]
+            if self.model:
+                argv += ["-m", self.model]
+            argv.append("-")
+            try:
+                result = subprocess.run(
+                    argv,
+                    input=full_prompt,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                    cwd=scratch,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+                raise ProviderUnavailableError(f"Codex CLI could not complete: {exc}") from exc
+        if result.returncode != 0:
+            detail = (result.stderr or "").strip()[-500:]
+            raise ProviderUnavailableError(
+                f"Codex CLI failed with exit code {result.returncode}: {detail}"
+            )
+        return result.stdout
 
 
 class NoneProvider:
-    """The only named Phase 0 provider: reasoning is intentionally unavailable."""
-
     name = "none"
     egress = False
 
     def complete(self, prompt: str, *, system: str | None = None) -> str:
         del prompt, system
-        raise RemoteReasoningUnavailableError()
+        raise ReasoningDisabledError()
 
 
 class CallableProvider:
-    """Wrap an explicitly injected deterministic provider.
-
-    Only providers whose ``egress`` metadata is the literal ``False`` may execute.
-    This keeps local tests and read-only integrations deterministic without creating
-    a hidden path for remote completion.
-    """
+    """Wrap a deterministic local completion used by tests and local integrations."""
 
     def __init__(
         self,
@@ -114,33 +156,21 @@ class CallableProvider:
         self.egress = egress
 
     def complete(self, prompt: str, *, system: str | None = None) -> str:
-        if self.egress is True:
-            raise RemoteReasoningUnavailableError()
-        if self.egress is not False:
-            raise ProviderUnavailableError(
-                "LLM provider egress metadata must be the literal bool True or False"
-            )
         return self._fn(prompt, system=system)
 
 
-def _provider_name(value: object) -> str:
-    return str(value or DEFAULT_PROVIDER).strip().lower()
-
-
-def _require_non_egress(provider: LLMProvider) -> LLMProvider:
+def _provider_egress(provider: LLMProvider) -> bool:
     try:
-        egress = provider.egress
+        value = provider.egress
     except Exception as exc:
         raise ProviderUnavailableError(
             "LLM provider egress metadata must be the literal bool True or False"
         ) from exc
-    if egress is True:
-        raise RemoteReasoningUnavailableError()
-    if egress is not False:
+    if value is not True and value is not False:
         raise ProviderUnavailableError(
             "LLM provider egress metadata must be the literal bool True or False"
         )
-    return provider
+    return value
 
 
 def get_provider(
@@ -150,23 +180,34 @@ def get_provider(
     network_policy: object | None = None,
     privacy_state: PrivacyState | None = None,
 ) -> LLMProvider:
-    """Resolve a Phase 0 provider without touching policy or privacy authorities."""
-
     del network_policy, privacy_state
     if provider is not None and not isinstance(provider, str):
-        return _require_non_egress(provider)
-
+        _provider_egress(provider)
+        return provider
     current = os.environ if env is None else env
     configured = provider if provider is not None else current.get("SPOOL_LLM_PROVIDER")
-    name = _provider_name(configured)
+    name = str(configured or DEFAULT_PROVIDER).strip().lower()
     if name == "none":
         return NoneProvider()
     if name == "codex":
-        raise RemoteReasoningUnavailableError()
+        return CodexProvider()
     raise ProviderUnavailableError(
-        f"unknown LLM provider {name!r}. Phase 0 supports only the disabled 'none' "
-        "provider or an explicitly injected non-egress provider."
+        f"unknown LLM provider {name!r}. Built-in providers: 'none', 'codex'."
     )
+
+
+def _privacy_values(
+    env: Mapping[str, object], privacy_state: PrivacyState | None
+) -> tuple[str, bool, bool]:
+    if privacy_state is not None:
+        values = privacy_state()
+        provider = str(values.get("reasoning_provider") or "none").strip().lower()
+        consent = values.get("reasoning_egress_consent") is True
+        offline = values.get("offline") is True
+        return provider, consent, offline
+    provider = str(env.get("SPOOL_LLM_PROVIDER") or DEFAULT_PROVIDER).strip().lower()
+    consent = str(env.get("SPOOL_LLM_EGRESS_CONSENT") or "").strip().lower() in _TRUE
+    return provider, consent, is_offline(env)
 
 
 def complete(
@@ -178,13 +219,29 @@ def complete(
     network_policy: object | None = None,
     privacy_state: PrivacyState | None = None,
 ) -> str:
-    """Run only an explicitly injected provider proven to be non-egress."""
+    """Complete once, enforcing provider selection, consent, and Offline mode."""
 
-    resolved = get_provider(
-        provider,
-        env=env,
-        network_policy=network_policy,
-        privacy_state=privacy_state,
+    current = os.environ if env is None else env
+    resolved = get_provider(provider, env=current)
+    egress = _provider_egress(resolved)
+    if not egress:
+        return resolved.complete(prompt, system=system)
+
+    selected, consent, settings_offline = _privacy_values(current, privacy_state)
+    policy_offline = bool(
+        getattr(network_policy, "offline", False) if network_policy is not None else False
     )
-    _require_non_egress(resolved)
-    return resolved.complete(prompt, system=system)
+    if settings_offline or is_offline(current) or policy_offline:
+        raise OfflineError("Offline mode blocks remote reasoning.")
+    if selected != resolved.name:
+        raise ReasoningDisabledError()
+    if not consent:
+        raise EgressConsentError()
+
+    lease = (
+        network_policy.egress("codex_reasoning")
+        if network_policy is not None
+        else nullcontext()
+    )
+    with lease:
+        return resolved.complete(prompt, system=system)

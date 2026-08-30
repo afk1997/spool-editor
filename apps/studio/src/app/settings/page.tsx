@@ -191,8 +191,8 @@ export default function SettingsScreen() {
                 <Row l="Engine" r={mono(`whisper.cpp ${ver("whisper_cpp")} · on-device`)} />
               </SettingCard>
               <SettingCard title="Moment-finding LLM">
-                <Row l="Provider" r={mono("None")} sub="Remote moment-finding is unavailable in Phase 0." />
-                <Row l="Remote reasoning" r={mono("Unavailable", "var(--warn)")} sub="Spool has no supported zero-tool, zero-machine-context remote transport yet." />
+                <Row l="Provider" r={mono(s?.reasoning_provider === "codex" ? "Codex CLI" : "None")} sub="Optional transcript analysis using your signed-in Codex CLI." />
+                <Row l="Egress" r={mono(s?.reasoning_egress_consent ? "transcript text only" : "off", s?.reasoning_egress_consent ? "var(--ok)" : "var(--text-dim)")} sub="Video and audio stay on this machine." />
               </SettingCard>
             </div>
           )}
@@ -236,19 +236,17 @@ export default function SettingsScreen() {
                   r={<Switch label="Offline mode" on={!!s?.offline} disabled={settingDisabled("offline")} onClick={() => save({ offline: !s?.offline })} />}
                   sub="Blocks all non-loopback network access, including URL downloads, remote models, and watches. Local media work remains available." />
                 <Row
-                  l="Reasoning provider"
-                  r={mono("None")}
-                  sub="Phase 0 exposes no remote provider." />
-                <Row
-                  l="Remote reasoning"
-                  r={mono("Unavailable in Phase 0", "var(--warn)")}
-                  sub="Remote reasoning stays disabled until Spool has a supported transport that sends no local tools or machine context." />
+                  l="Codex moment suggestions"
+                  r={<Switch label="Codex moment suggestions" on={s?.reasoning_provider === "codex" && s?.reasoning_egress_consent === true} disabled={settingDisabled("reasoning_provider", "reasoning_egress_consent")} onClick={() => save(s?.reasoning_provider === "codex" && s?.reasoning_egress_consent === true
+                    ? { reasoning_provider: "none", reasoning_egress_consent: false }
+                    : { reasoning_provider: "codex", reasoning_egress_consent: true })} />}
+                  sub="Opt in to sending transcript text to your signed-in Codex CLI for moment suggestions. Media never leaves your machine." />
               </SettingCard>
               <SettingCard title="What leaves your machine">
                 <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.9 }}>
                   <div>URL import → the site you paste · <span style={{ color: "var(--warn)" }}>network download (you start it)</span></div>
                   <div>whisper · <span style={{ color: "var(--ok)" }}>on-device</span></div>
-                  <div>remote reasoning · <span style={{ color: "var(--warn)" }}>unavailable · no egress</span></div>
+                  <div>moment suggestions · <span style={{ color: s?.reasoning_egress_consent ? "var(--warn)" : "var(--ok)" }}>{s?.reasoning_egress_consent ? "transcript text → Codex CLI" : "off · no egress"}</span></div>
                 </div>
               </SettingCard>
             </div>

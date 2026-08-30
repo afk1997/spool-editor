@@ -1,87 +1,105 @@
-"""Focused tests for the Phase 0 reasoning boundary."""
+"""Focused tests for the optional Codex moment-finding bridge."""
 from __future__ import annotations
 
-import ast
-import inspect
+from types import SimpleNamespace
 
 import pytest
 
 from clip import llm
+from network_policy import NetworkPolicy
 
 
-EXPECTED_MESSAGE = (
-    "Remote reasoning is unavailable in Phase 0 until a supported zero-tool "
-    "transport ships."
-)
+def _enabled_state():
+    return {
+        "offline": False,
+        "reasoning_provider": "codex",
+        "reasoning_egress_consent": True,
+    }
 
 
-def _assert_stable_unavailable(call) -> None:
-    with pytest.raises(llm.RemoteReasoningUnavailableError) as denied:
-        call()
-    assert denied.value.error_category == "remote_reasoning_unavailable"
-    assert str(denied.value) == EXPECTED_MESSAGE
-
-
-class _ExplodingPolicy:
-    @property
-    def offline(self):
-        raise AssertionError("policy was inspected")
-
-    def egress(self, _reason):
-        raise AssertionError("egress lease was requested")
-
-
-def test_none_is_the_only_named_provider_and_completion_is_unavailable():
+def test_none_remains_the_default_and_does_not_reason():
     provider = llm.get_provider(env={})
     assert isinstance(provider, llm.NoneProvider)
-    assert provider.name == "none"
-    assert provider.egress is False
-    _assert_stable_unavailable(lambda: provider.complete("private transcript"))
+    with pytest.raises(llm.ReasoningDisabledError):
+        llm.complete("private transcript", provider=provider, env={})
 
 
-@pytest.mark.parametrize("name", ["codex", "CoDeX", " CoDeX "])
-def test_codex_factory_is_stably_unavailable_before_policy_access(name):
-    _assert_stable_unavailable(
-        lambda: llm.get_provider(name, network_policy=_ExplodingPolicy())
-    )
+def test_codex_requires_explicit_transcript_egress_consent(monkeypatch):
+    calls = []
+    monkeypatch.setattr(llm.subprocess, "run", lambda *a, **k: calls.append((a, k)))
 
-
-def test_hostile_environment_codex_is_normalized_and_denied():
-    _assert_stable_unavailable(
-        lambda: llm.get_provider(
-            env={
-                "SPOOL_LLM_PROVIDER": " CoDeX ",
-                "SPOOL_LLM_EGRESS_CONSENT": "true",
-                "SPOOL_OFFLINE": "0",
+    with pytest.raises(llm.EgressConsentError) as denied:
+        llm.complete(
+            "private transcript",
+            provider="codex",
+            env={"SPOOL_LLM_PROVIDER": "codex"},
+            privacy_state=lambda: {
+                "offline": False,
+                "reasoning_provider": "codex",
+                "reasoning_egress_consent": False,
             },
-            network_policy=_ExplodingPolicy(),
         )
-    )
+
+    assert denied.value.error_category == "egress_consent_required"
+    assert calls == []
 
 
-def test_unknown_named_provider_stays_distinguishable():
-    with pytest.raises(llm.ProviderUnavailableError, match="unknown LLM provider"):
-        llm.get_provider("ollama-9000", env={})
+def test_offline_blocks_codex_before_process_launch(monkeypatch):
+    calls = []
+    monkeypatch.setattr(llm.subprocess, "run", lambda *a, **k: calls.append((a, k)))
 
-
-def test_codex_constructor_and_compatibility_complete_are_fail_closed():
-    _assert_stable_unavailable(
-        lambda: llm.CodexProvider(
-            network_policy=_ExplodingPolicy(),
-            privacy_state=lambda: (_ for _ in ()).throw(
-                AssertionError("privacy state was inspected")
-            ),
-            bin=object(),
+    with pytest.raises(llm.OfflineError) as denied:
+        llm.complete(
+            "private transcript",
+            provider="codex",
+            env={"SPOOL_OFFLINE": "1", "SPOOL_LLM_PROVIDER": "codex"},
+            privacy_state=_enabled_state,
+            network_policy=NetworkPolicy(offline=True),
         )
+
+    assert denied.value.error_category == "offline_network_disabled"
+    assert calls == []
+
+
+def test_codex_runs_in_an_ephemeral_scratch_directory_and_reads_prompt_from_stdin(
+    monkeypatch,
+):
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout='[{"start":1,"end":12}]\n', stderr="")
+
+    monkeypatch.setattr(llm.shutil, "which", lambda _bin: "/usr/local/bin/codex")
+    monkeypatch.setattr(llm.subprocess, "run", fake_run)
+    policy = NetworkPolicy()
+
+    result = llm.complete(
+        "TRANSCRIPT TEXT",
+        system="RETURN JSON",
+        provider="codex",
+        env={"SPOOL_LLM_PROVIDER": "codex"},
+        privacy_state=_enabled_state,
+        network_policy=policy,
     )
 
-    compatibility_instance = object.__new__(llm.CodexProvider)
-    _assert_stable_unavailable(
-        lambda: compatibility_instance.complete("private transcript")
-    )
+    assert result == '[{"start":1,"end":12}]\n'
+    assert captured["input"] == "RETURN JSON\n\nTRANSCRIPT TEXT"
+    assert captured["text"] is True
+    assert captured["capture_output"] is True
+    assert "--sandbox" in captured["argv"]
+    assert "read-only" in captured["argv"]
+    assert "--ephemeral" in captured["argv"]
+    assert "--ignore-user-config" in captured["argv"]
+    assert "--ignore-rules" in captured["argv"]
+    assert captured["argv"][-1] == "-"
+    scratch = captured["argv"][captured["argv"].index("-C") + 1]
+    assert captured["cwd"] == scratch
+    assert policy.active_leases == 0
 
 
-def test_local_callable_provider_is_preserved_and_receives_only_completion_inputs():
+def test_local_callable_provider_still_works_without_egress():
     captured = []
     local = llm.CallableProvider(
         lambda prompt, system=None: captured.append((prompt, system)) or "done",
@@ -89,70 +107,28 @@ def test_local_callable_provider_is_preserved_and_receives_only_completion_input
         egress=False,
     )
 
-    assert llm.get_provider(local) is local
     assert llm.complete(
         "the prompt",
         system="the system",
         provider=local,
-        env={"SPOOL_LLM_PROVIDER": "CoDeX"},
-        network_policy=_ExplodingPolicy(),
+        env={"SPOOL_OFFLINE": "1"},
+        network_policy=NetworkPolicy(offline=True),
     ) == "done"
     assert captured == [("the prompt", "the system")]
 
 
-def test_callable_remote_complete_is_directly_fail_closed():
-    calls = []
-    remote = llm.CallableProvider(
-        lambda *_args, **_kwargs: calls.append("complete"),
-        name="remote-test",
-        egress=True,
-    )
-
-    _assert_stable_unavailable(lambda: remote.complete("private transcript"))
-    assert calls == []
-
-
-def test_provider_factory_rejects_remote_instance_before_returning_it():
-    calls = []
-    remote = llm.CallableProvider(
-        lambda *_args, **_kwargs: calls.append("complete"),
-        name="remote-test",
-        egress=True,
-    )
-
-    _assert_stable_unavailable(lambda: llm.get_provider(remote))
-    assert calls == []
-
-
-def test_completion_rejects_custom_remote_before_provider_or_lease_use():
-    events = []
-
-    class RemoteProvider:
-        name = "remote-custom"
-        egress = True
-
-        def complete(self, *_args, **_kwargs):
-            events.append("complete")
-
-    _assert_stable_unavailable(
-        lambda: llm.complete(
-            "private transcript",
-            provider=RemoteProvider(),
-            network_policy=_ExplodingPolicy(),
-        )
-    )
-    assert events == []
+def test_unknown_named_provider_stays_distinguishable():
+    with pytest.raises(llm.ProviderUnavailableError, match="unknown LLM provider"):
+        llm.get_provider("mystery-cloud", env={})
 
 
 @pytest.mark.parametrize("egress", [None, 0, 1, "false", object()])
-def test_opaque_egress_metadata_is_rejected_before_provider_use(egress):
-    calls = []
-
+def test_opaque_egress_metadata_is_rejected(egress):
     class OpaqueProvider:
         name = "opaque"
 
         def complete(self, *_args, **_kwargs):
-            calls.append("complete")
+            raise AssertionError("completion should not run")
 
     provider = OpaqueProvider()
     if egress is not None:
@@ -160,47 +136,3 @@ def test_opaque_egress_metadata_is_rejected_before_provider_use(egress):
 
     with pytest.raises(llm.ProviderUnavailableError, match="egress metadata"):
         llm.complete("private transcript", provider=provider)
-    assert calls == []
-
-
-def test_broken_egress_property_is_rejected_before_provider_use():
-    class BrokenProvider:
-        name = "broken"
-
-        @property
-        def egress(self):
-            raise RuntimeError("metadata unavailable")
-
-        def complete(self, *_args, **_kwargs):
-            raise AssertionError("provider completion was invoked")
-
-    with pytest.raises(llm.ProviderUnavailableError, match="egress metadata"):
-        llm.get_provider(BrokenProvider())
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [("1", True), ("TRUE", True), (" yes ", True), ("0", False), ("", False)],
-)
-def test_is_offline(value, expected):
-    assert llm.is_offline({"SPOOL_OFFLINE": value}) is expected
-
-
-def test_phase_zero_module_contains_no_cli_auth_or_process_registry_machinery():
-    tree = ast.parse(inspect.getsource(llm))
-    imported = {
-        alias.name.split(".", 1)[0]
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
-    }
-    imported.update(
-        (node.module or "").split(".", 1)[0]
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-    )
-
-    assert imported.isdisjoint({"shutil", "signal", "stat", "subprocess", "tempfile"})
-    assert not hasattr(llm, "ReasoningProcessRegistry")
-    assert not hasattr(llm, "reasoning_process_registry")
-    assert not any(name.startswith("CODEX_") for name in vars(llm))

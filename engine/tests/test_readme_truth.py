@@ -32,16 +32,14 @@ def test_readme_documents_the_canonical_download_capacity_response():
 def test_readme_names_every_outbound_boundary():
     text = " ".join(README.read_text(encoding="utf-8").split())
 
-    assert "the only enabled outbound paths in Phase 0 are" in text
+    assert "outbound paths are" in text
     assert "yt-dlp fetching user-requested media" in text
     assert "user-started model downloads from Hugging Face" in text
     assert (
-        "Remote reasoning is unavailable and fails closed until a supported "
-        "zero-tool transport exists."
+        "optional Codex CLI moment suggestions after explicit transcript-egress consent"
     ) in text
     assert "Offline mode blocks all non-loopback egress" in text
-    assert "transcription and rendering remain local" in text
-    assert "optional Codex remote reasoning" not in text
+    assert "media processing remains local" in text
     assert "the only outbound calls trove makes are" not in text
 
 
@@ -57,8 +55,8 @@ def test_readme_describes_phase_zero_mcp_as_inspection_only():
         "mutation returns `agent_mutation_disabled` before any `TroveClient` call."
     ) in text
     assert (
-        "Manual mutations remain available through the authenticated UI, REST API, "
-        "and CLI."
+        "Manual mutations and opted-in discovery remain available through the "
+        "authenticated UI, REST API, and CLI"
     ) in text
     assert (
         "read-only tools execute; every advertised mutation is centrally rejected"
@@ -67,29 +65,26 @@ def test_readme_describes_phase_zero_mcp_as_inspection_only():
     assert "Tool surface mirrors the CLI 1:1" not in text
 
 
-def test_root_readme_describes_only_the_supported_phase_zero_clip_workflow():
+def test_root_readme_describes_the_supported_clip_workflow():
     text = " ".join(ROOT_README.read_text(encoding="utf-8").split())
 
     assert (
-        "download/import → transcribe → select a transcript range manually → cut → "
-        "edit/reframe/caption → render/export"
+        "download/import → transcribe → Codex suggests moments → you select → "
+        "cut/reframe/caption/export"
     ) in text
     assert (
-        "Remote reasoning, automated discovery, and watch reconciliation are "
-        "unavailable in Phase 0."
+        "Codex moment suggestions are off by default."
     ) in text
     assert "URL/file → download → transcribe → find moments" not in text
 
 
-def test_engine_readme_keeps_manual_clip_work_available_without_claiming_automation():
+def test_engine_readme_describes_opted_in_discovery_and_local_media_work():
     text = " ".join(README.read_text(encoding="utf-8").split())
 
     assert (
-        "The supported Phase 0 clip path is manual: import media, transcribe it, "
-        "select a transcript range, cut, edit/reframe/caption, then render/export."
+        "The clip path supports manual transcript ranges or optional Codex CLI moment suggestions."
     ) in text
     assert (
-        "Remote reasoning, automated discovery, and watch reconciliation are "
-        "unavailable in Phase 0."
+        "After you select suggestions, Spool cuts, reframes, burns captions, and exports locally."
     ) in text
     assert "remote_agent_tools_disabled" not in text

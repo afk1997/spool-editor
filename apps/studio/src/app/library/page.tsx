@@ -6,8 +6,8 @@ import { describeActionError } from "@/lib/action-error";
 import { MediaCard } from "@/components/spool/cards";
 import { Btn, Chip, Icon, Seg, SourceGlyph, fmtDur } from "@spool/ui";
 
-/* LibraryScreen — sources are live-mapped. Local batch transcription remains available;
- * remote moment discovery is an explicit unavailable state in Phase 0. */
+/* LibraryScreen — sources are live-mapped; batch transcription and opted-in discovery
+ * use the same engine job queue as the source detail screen. */
 export default function LibraryScreen() {
   const ctx = useSpool();
   const [view, setView] = useState("grid");
@@ -49,6 +49,13 @@ export default function LibraryScreen() {
   const batchTranscribe = async () => {
     await runBatch("Transcribe requests settled", "type", (id) => ctx.client.startTranscribe(id));
   };
+  const discoveryReady = ctx.settingsReady
+    && ctx.reasoningProvider === "codex"
+    && ctx.reasoningEgressConsent
+    && !ctx.offline;
+  const batchFindClips = async () => {
+    await runBatch("Moment scans requested", "scissors", (id) => ctx.client.findMoments(id, { mode: "funny" }));
+  };
   return (
     <div className="mainpad fadein">
       <div className="row" style={{ marginBottom: 20, gap: 14 }}>
@@ -68,8 +75,8 @@ export default function LibraryScreen() {
           <div className="row" style={{ gap: 8 }}>
             <span className="chip acc">{sel.length} selected</span>
             <Btn variant="ghost" size="sm" icon="type" onClick={batchTranscribe} disabled={batching}>Transcribe</Btn>
-            <Btn variant="ghost" size="sm" icon="scissors" disabled title="Remote moment discovery is unavailable in Phase 0">Find clips</Btn>
-            <span className="mono" style={{ color: "var(--warn)", fontSize: 10.5 }}>Remote moment discovery is unavailable in Phase 0.</span>
+            <Btn variant="ghost" size="sm" icon="scissors" onClick={batchFindClips} disabled={batching || !discoveryReady} title={discoveryReady ? "Ask Codex for moment suggestions" : "Enable Codex moment suggestions in Settings → Privacy"}>Find clips</Btn>
+            {!discoveryReady && <span className="mono" style={{ color: "var(--warn)", fontSize: 10.5 }}>Enable Codex suggestions in Settings.</span>}
           </div>
         )}
         <Seg value={view} onChange={setView} neutral options={[{ value: "grid", icon: "grid", label: "", ariaLabel: "Grid view" }, { value: "table", icon: "list", label: "", ariaLabel: "Table view" }]} />

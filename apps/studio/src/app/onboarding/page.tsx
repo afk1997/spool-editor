@@ -38,16 +38,23 @@ export default function OnboardingScreen() {
   const storageRoot = typeof storage.data?.download_dir === "string" && storage.data.download_dir.trim()
     ? storage.data.download_dir
     : null;
+  const codexSuggestions = ctx.reasoningProvider === "codex" && ctx.reasoningEgressConsent;
   const privacySummary = !ctx.settingsReady
     ? ctx.settingsLoading
       ? "Checking privacy settings…"
       : "Privacy settings unavailable."
     : ctx.offline
       ? "Offline mode blocks network access."
-      : "Remote reasoning is unavailable in Phase 0.";
-  const momentFindingSummary = "Remote reasoning unavailable in Phase 0 · no egress";
-  const momentFindingTone = "warn";
-  const momentFindingState = "unavailable";
+      : codexSuggestions
+        ? "Codex moment suggestions are enabled."
+        : "Codex moment suggestions are off.";
+  const momentFindingSummary = ctx.offline && codexSuggestions
+    ? "Codex suggestions blocked by Offline mode"
+    : codexSuggestions
+      ? "Codex suggestions enabled · transcript text egress"
+      : "Codex suggestions off · no egress";
+  const momentFindingTone = codexSuggestions ? "warn" : "ok";
+  const momentFindingState = ctx.offline && codexSuggestions ? "blocked" : codexSuggestions ? "enabled" : "off";
 
   const fix = (id: string, hint: string) => { ctx.pushToast({ icon: "terminal", tone: "info", title: `Install ${id}`, body: hint ? `Run: ${hint}` : "See the docs, then re-check." }); doctor.reload(); };
 
@@ -78,7 +85,7 @@ export default function OnboardingScreen() {
             <div>
               <div className="eyebrow" style={{ marginBottom: 14 }}>Welcome to Spool</div>
               <h1 style={{ fontSize: 34, lineHeight: 1.1, marginBottom: 16 }}>Turn long videos into platform-ready shorts with local media processing.</h1>
-              <p style={{ color: "var(--text-dim)", fontSize: 15, lineHeight: 1.6, marginBottom: 28 }}>URL downloads use the network. Transcription and rendering run on this machine. Remote reasoning is unavailable in Phase 0 and sends nothing.</p>
+              <p style={{ color: "var(--text-dim)", fontSize: 15, lineHeight: 1.6, marginBottom: 28 }}>URL downloads use the network. Transcription and rendering run on this machine. Optional Codex moment suggestions send transcript text only when you enable them.</p>
               <div className="row" style={{ gap: 12 }}><Btn variant="primary" size="lg" iconR="arrowR" onClick={() => setStep(1)}>Let&rsquo;s set up</Btn><Btn variant="ghost" size="lg" onClick={() => ctx.nav("home")}>Skip for now</Btn></div>
             </div>
           )}

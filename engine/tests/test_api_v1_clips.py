@@ -145,7 +145,7 @@ def test_find_moments_409_when_no_transcript(client):
         ("/api/v1/sources/src1/produce", {"content_mode": "funny", "count": 1}),
     ],
 )
-def test_reasoning_routes_return_exact_phase0_error_before_clip_job_admission(
+def test_opted_in_reasoning_routes_admit_clip_jobs(
     client, monkeypatch, endpoint, payload,
 ):
     import clip_runner as cr
@@ -160,19 +160,12 @@ def test_reasoning_routes_return_exact_phase0_error_before_clip_job_admission(
     )
 
     manager = app.extensions["trove.clips"]
-    before = len(manager.snapshot_jobs())
     response = c.post(endpoint, json=payload)
 
-    assert response.status_code == 409
-    assert response.get_json() == {
-        "error": "remote_reasoning_unavailable",
-        "message": (
-            "Remote reasoning is unavailable in Phase 0 until a supported "
-            "zero-tool transport ships."
-        ),
-    }
-    assert len(manager.snapshot_jobs()) == before
-    assert provider_calls == []
+    assert response.status_code == 201
+    assert response.get_json()["kind"] in {"moments", "produce"}
+    _await(c, response.get_json()["id"])
+    assert provider_calls
     assert app.extensions["trove.network_policy"].active_leases == 0
 
 

@@ -34,8 +34,8 @@ DEFAULTS = {
     "fast_default": True,        # export fast vs quality when a render omits `fast` (hot)
     "default_preset": "tiktok",  # platform preset when a render omits `preset` (hot)
     "offline": False,            # block LLM egress (drives SPOOL_OFFLINE; hot)
-    "reasoning_provider": "none",  # Phase 0 is local-only; no remote provider is selectable
-    "reasoning_egress_consent": False,  # fixed false until a zero-tool transport ships
+    "reasoning_provider": "none",  # none | codex; remote reasoning is opt-in
+    "reasoning_egress_consent": False,  # explicit consent for transcript-text egress
     "clip_workers": 2,           # render-queue concurrency (applies on restart)
     "max_workers": 4,            # download-queue concurrency (applies on restart)
     "mcp_transport": "stdio",    # MCP server transport (applies on restart)
@@ -44,7 +44,7 @@ DEFAULTS = {
 # Anything outside this set in an update body is ignored (defense in depth — the route
 # validator is the first gate, the store is the second).
 _FIELDS = tuple(DEFAULTS.keys())
-_REASONING_PROVIDERS = {"none"}
+_REASONING_PROVIDERS = {"none", "codex"}
 
 
 class SettingsStore:
@@ -53,31 +53,27 @@ class SettingsStore:
     def __init__(self, path):
         self.path = str(path)
         self._lock = threading.RLock()
-        self._overrides, reasoning_was_canonicalized = self._load()
-        if reasoning_was_canonicalized:
-            self._publish(self._overrides)
+        self._overrides = self._load()
 
-    def _load(self) -> tuple[dict, bool]:
+    def _load(self) -> dict:
         try:
             with open(self.path) as f:
                 doc = json.load(f)
         except (OSError, ValueError):
-            return {}, False
+            return {}
         if not isinstance(doc, dict):
-            return {}, False
+            return {}
         loaded = {k: doc[k] for k in _FIELDS if k in doc}
-        unsafe_provider = (
-            "reasoning_provider" in loaded
-            and loaded["reasoning_provider"] != DEFAULTS["reasoning_provider"]
-        )
-        unsafe_consent = (
-            "reasoning_egress_consent" in loaded
-            and loaded["reasoning_egress_consent"] is not False
-        )
-        if unsafe_provider or unsafe_consent:
-            loaded["reasoning_provider"] = DEFAULTS["reasoning_provider"]
+        if loaded.get("reasoning_provider", "none") not in _REASONING_PROVIDERS:
+            loaded.pop("reasoning_provider", None)
+        if not isinstance(loaded.get("reasoning_egress_consent", False), bool):
+            loaded.pop("reasoning_egress_consent", None)
+        if (
+            loaded.get("reasoning_provider", DEFAULTS["reasoning_provider"]) == "none"
+            and loaded.get("reasoning_egress_consent") is True
+        ):
             loaded["reasoning_egress_consent"] = False
-        return loaded, unsafe_provider or unsafe_consent
+        return loaded
 
     def _stage(self, overrides: dict) -> str:
         """Durably write ``overrides`` beside the store without publishing it."""
@@ -138,7 +134,7 @@ class SettingsStore:
             raise ValueError("invalid reasoning_provider")
         if (
             "reasoning_egress_consent" in clean
-            and clean["reasoning_egress_consent"] is not False
+            and not isinstance(clean["reasoning_egress_consent"], bool)
         ):
             raise ValueError("invalid reasoning_egress_consent")
         with self._lock:
